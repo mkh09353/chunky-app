@@ -1,6 +1,16 @@
 // Map transcript Item[] → the polished Message[] shape the UI already renders.
-import type { Message, MessageBlock, Project, Thread, ThreadStatus } from "./mock"
+import type {
+  ChangedFiles,
+  FileDiff,
+  Message,
+  MessageBlock,
+  Project,
+  Thread,
+  ThreadStatus,
+  ToolBlockData,
+} from "./mock"
 import type { SessionSummary } from "./api"
+import { extractDiff, prettyJson, truncateText } from "./toolDiff"
 import { relativeTime, threadLabel, workspaceMark, workspaceName } from "./format"
 import type { Item, TranscriptState } from "./transcript"
 import { isStreaming, mainItems } from "./transcript"
@@ -15,7 +25,28 @@ function toolInputPreview(input: unknown): string {
   }
 }
 
-/** Fold sequential items into UI messages, preserving tool "worked" blocks. */
+/** Merge per-file diffs of one turn into a changed-files summary, or null. */
+function aggregateChangedFiles(diffs: FileDiff[]): ChangedFiles | null {
+  if (diffs.length === 0) return null
+  const byPath = new Map<string, { added: number; removed: number }>()
+  for (const d of diffs) {
+    const key = d.path ?? "(edited)"
+    const cur = byPath.get(key) ?? { added: 0, removed: 0 }
+    cur.added += d.added
+    cur.removed += d.removed
+    byPath.set(key, cur)
+  }
+  const files = [...byPath.entries()].map(([path, v]) => ({
+    path,
+    added: v.added,
+    removed: v.removed,
+  }))
+  const added = files.reduce((s, f) => s + f.added, 0)
+  const removed = files.reduce((s, f) => s + f.removed, 0)
+  return { total: files.length, added, removed, files }
+}
+
+/** Fold sequential items into UI messages: per-tool cards + a thinking block. */
 export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   const messages: Message[] = []
   let seq = 0
@@ -24,34 +55,29 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   // Pending assistant blocks (text/code/worked) before we flush a message.
   let asstBlocks: MessageBlock[] = []
   let asstStreaming = false
-  let toolSteps: string[] = []
-  let toolOpen = false
+  let turnDiffs: FileDiff[] = []
+  let lastToolIndex = -1
 
   const flushAssistant = () => {
-    if (asstBlocks.length === 0 && toolSteps.length === 0) return
-    const blocks = [...asstBlocks]
-    if (toolSteps.length > 0) {
-      // Prepend a worked summary if tools ran and we haven't already.
-      const hasWorked = blocks.some((b) => b.type === "worked")
-      if (!hasWorked) {
-        blocks.unshift({
-          type: "worked",
-          content: toolOpen ? "working…" : `${toolSteps.length} step${toolSteps.length === 1 ? "" : "s"}`,
-          steps: [...toolSteps],
-        })
-      }
+    if (asstBlocks.length === 0) {
+      asstStreaming = false
+      turnDiffs = []
+      lastToolIndex = -1
+      return
     }
-    if (blocks.length === 0) return
-    messages.push({
-      id: nextId(),
-      role: "assistant",
-      model: modelName,
-      blocks,
-    })
+    const blocks = [...asstBlocks]
+    // Aggregate this turn's file edits into a changed-files summary, placed at
+    // the end of the tool group (right after the last tool card).
+    const files = aggregateChangedFiles(turnDiffs)
+    if (files) {
+      const at = lastToolIndex >= 0 ? lastToolIndex + 1 : blocks.length
+      blocks.splice(at, 0, { type: "files", content: "", files })
+    }
+    messages.push({ id: nextId(), role: "assistant", model: modelName, blocks })
     asstBlocks = []
     asstStreaming = false
-    toolSteps = []
-    toolOpen = false
+    turnDiffs = []
+    lastToolIndex = -1
   }
 
   for (const it of items) {
@@ -82,26 +108,29 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
       case "reasoning": {
         if (it.text.trim()) {
           asstBlocks.push({
-            type: "worked",
-            content: it.streaming ? "thinking…" : "thought",
-            steps: it.text.split("\n").filter(Boolean).slice(0, 40),
+            type: "thinking",
+            content: it.streaming ? "Thinking…" : "Thought process",
+            steps: it.text.split("\n").filter(Boolean).slice(0, 80),
           })
         }
         break
       }
       case "tool": {
-        const preview = toolInputPreview(it.input)
-        const line = it.done
-          ? `${it.ok === false ? "✗" : "✓"} ${it.name}${preview ? ` — ${preview}` : ""}`
-          : `… ${it.name}${preview ? ` — ${preview}` : ""}`
-        toolSteps.push(line)
-        toolOpen = !it.done
-        if (it.done && it.output && it.ok === false) {
-          asstBlocks.push({
-            type: "text",
-            content: `**${it.name} failed**\n\n\`\`\`\n${it.output.slice(0, 1500)}\n\`\`\``,
-          })
+        const diff = extractDiff(it.name, it.input, it.output)
+        const tool: ToolBlockData = {
+          id: it.id,
+          name: it.name,
+          inputPreview: toolInputPreview(it.input),
+          inputJson: prettyJson(it.input),
+          done: it.done,
+          diff,
+          ...(it.ok !== undefined ? { ok: it.ok } : {}),
+          ...(it.output ? { output: truncateText(it.output) } : {}),
+          ...(it.progress ? { progress: truncateText(it.progress) } : {}),
         }
+        asstBlocks.push({ type: "tool", content: "", tool })
+        lastToolIndex = asstBlocks.length - 1
+        if (diff && it.done) turnDiffs.push(diff)
         break
       }
       case "error": {
@@ -142,7 +171,7 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   }
 
   // Always flush remaining assistant content (including mid-stream).
-  if (asstBlocks.length > 0 || toolSteps.length > 0 || asstStreaming) {
+  if (asstBlocks.length > 0 || asstStreaming) {
     flushAssistant()
   }
 

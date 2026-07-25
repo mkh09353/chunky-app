@@ -1,4 +1,4 @@
-import { ArrowUp, Check, ChevronDown, Cpu, Loader2, Paperclip, Square } from "lucide-react"
+import { ArrowUp, Check, ChevronDown, Cpu, ListPlus, Loader2, Paperclip, Square } from "lucide-react"
 import { useMemo, useRef, useState } from "react"
 import type { Model } from "~/lib/mock"
 import { MODELS } from "~/lib/mock"
@@ -34,6 +34,7 @@ export function Composer({
   streaming,
   onStop,
   disabled = false,
+  contextMeter,
 }: {
   model: Model
   models?: Model[]
@@ -45,6 +46,8 @@ export function Composer({
   streaming: boolean
   onStop: () => void
   disabled?: boolean
+  /** Optional context-window meter rendered in the composer footer. */
+  contextMeter?: React.ReactNode
 }) {
   const [value, setValue] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
@@ -74,7 +77,9 @@ export function Composer({
 
   const submit = () => {
     const text = value.trim()
-    if (!text || streaming || disabled) return
+    // While the agent is running, submitting ENQUEUES (App picks delivery); the
+    // parent decides queue-vs-send from `streaming`, so we never hard-block here.
+    if (!text || disabled) return
     onSend(text)
     setValue("")
     if (ref.current) ref.current.style.height = "auto"
@@ -257,25 +262,27 @@ export function Composer({
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            {contextMeter}
             <span className="hidden items-center gap-1 text-[11px] text-muted-foreground sm:flex">
-              <Kbd>⏎</Kbd> send
+              <Kbd>⏎</Kbd> {streaming ? "queue" : "send"}
               <Kbd>⇧⏎</Kbd> newline
             </span>
-            {streaming ? (
+            {streaming && (
               <Button size="icon" variant="secondary" onClick={onStop} aria-label="Stop">
                 <Square className="size-3.5 fill-current" />
               </Button>
-            ) : (
-              <Button
-                size="icon"
-                onClick={submit}
-                disabled={!value.trim() || disabled}
-                aria-label="Send"
-                className="rounded-full"
-              >
-                <ArrowUp />
-              </Button>
             )}
+            <Button
+              size="icon"
+              onClick={submit}
+              disabled={!value.trim() || disabled}
+              aria-label={streaming ? "Queue message" : "Send"}
+              variant={streaming ? "secondary" : "default"}
+              className="rounded-full"
+              title={streaming ? "Queue message (agent is running)" : "Send"}
+            >
+              {streaming ? <ListPlus /> : <ArrowUp />}
+            </Button>
           </div>
         </div>
       </div>

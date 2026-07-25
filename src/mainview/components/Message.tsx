@@ -1,17 +1,31 @@
 import {
+  Bot,
+  Brain,
   Check,
   ChevronRight,
   Copy,
   FileDiff,
+  FileText,
   Folder,
+  Loader2,
   RefreshCw,
+  Search,
   Sparkles,
+  Terminal,
   ThumbsDown,
   ThumbsUp,
   User,
+  Wrench,
+  X,
 } from "lucide-react"
 import { useState } from "react"
-import type { ChangedFiles, Message, MessageBlock } from "~/lib/mock"
+import type {
+  ChangedFiles,
+  FileDiff as FileDiffData,
+  Message,
+  MessageBlock,
+  ToolBlockData,
+} from "~/lib/mock"
 import { cn } from "~/lib/cn"
 import { renderMarkdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
@@ -126,6 +140,159 @@ function IconButton({ label, children }: { label: string; children: React.ReactN
   )
 }
 
+function toolIcon(name: string) {
+  const n = name.toLowerCase()
+  if (n.includes("bash")) return Terminal
+  if (n.includes("ffgrep") || n.includes("fffind")) return Search
+  if (n.includes("read") || n.includes("write") || n.includes("edit")) return FileText
+  if (n.includes("sidekick") || n.includes("spawn")) return Bot
+  return Wrench
+}
+
+function DiffView({ diff }: { diff: FileDiffData }) {
+  return (
+    <div className="overflow-hidden rounded-md border border-border bg-background/60 font-mono text-[11.5px] leading-[1.55]">
+      {diff.path && (
+        <div className="flex items-center gap-2 border-border/70 border-b bg-muted/40 px-2.5 py-1.5">
+          <FileDiff className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate text-muted-foreground">{diff.path}</span>
+          <span className="ml-auto flex shrink-0 items-center gap-2 tabular-nums">
+            <span className="text-success">+{diff.added}</span>
+            <span className="text-destructive">−{diff.removed}</span>
+          </span>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        {diff.lines.map((l, i) => (
+          <div
+            key={i}
+            className={cn(
+              "whitespace-pre px-2.5",
+              l.kind === "add" && "bg-success/12",
+              l.kind === "del" && "bg-destructive/12",
+              l.kind === "context" && "text-muted-foreground",
+            )}
+          >
+            <span
+              className={cn(
+                "select-none pr-2",
+                l.kind === "add"
+                  ? "text-success"
+                  : l.kind === "del"
+                    ? "text-destructive"
+                    : "text-muted-foreground/40",
+              )}
+            >
+              {l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}
+            </span>
+            {l.text || " "}
+          </div>
+        ))}
+        {diff.truncated && <div className="px-2.5 py-1 text-muted-foreground/70">… truncated</div>}
+      </div>
+    </div>
+  )
+}
+
+function ToolStatus({ tool }: { tool: ToolBlockData }) {
+  if (!tool.done) return <Loader2 className="size-3.5 animate-spin text-primary" />
+  if (tool.ok === false) return <X className="size-3.5 text-destructive" />
+  return <Check className="size-3.5 text-success" />
+}
+
+function ToolCard({ tool }: { tool: ToolBlockData }) {
+  const [open, setOpen] = useState(false)
+  const Icon = toolIcon(tool.name)
+  const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
+  return (
+    <div className="my-2 overflow-hidden rounded-lg border border-border bg-card/50 shadow-xs">
+      <button
+        type="button"
+        onClick={() => hasBody && setOpen((o) => !o)}
+        className={cn(
+          "flex w-full items-center gap-2 px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          hasBody && "cursor-pointer hover:bg-accent/40",
+        )}
+      >
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 font-medium text-[12.5px]">{tool.name}</span>
+        {tool.inputPreview && (
+          <span className="truncate font-mono text-[11.5px] text-muted-foreground">
+            {tool.inputPreview}
+          </span>
+        )}
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {tool.diff && (
+            <span className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums">
+              <span className="text-success">+{tool.diff.added}</span>
+              <span className="text-destructive">−{tool.diff.removed}</span>
+            </span>
+          )}
+          <ToolStatus tool={tool} />
+          {hasBody && (
+            <ChevronRight
+              className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")}
+            />
+          )}
+        </span>
+      </button>
+      {open && hasBody && (
+        <div className="flex flex-col gap-2 border-border border-t bg-muted/20 p-2.5">
+          {tool.diff && <DiffView diff={tool.diff} />}
+          {tool.inputJson && (
+            <pre className="max-h-72 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {tool.inputJson}
+            </pre>
+          )}
+          {!tool.done && tool.progress && (
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+              {tool.progress}
+            </pre>
+          )}
+          {tool.output && (
+            <pre
+              className={cn(
+                "max-h-72 overflow-auto whitespace-pre-wrap rounded-md border p-2 font-mono text-[11px] leading-relaxed",
+                tool.ok === false
+                  ? "border-destructive/30 bg-destructive/5 text-foreground"
+                  : "border-border bg-background/60 text-muted-foreground",
+              )}
+            >
+              {tool.output}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ThinkingCard({ label, steps }: { label: string; steps?: string[] }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="my-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 font-medium text-[11.5px] text-muted-foreground outline-none transition-colors hover:border-ring/40 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        <Brain className="size-3 text-primary/70" />
+        {label}
+        <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && steps && steps.length > 0 && (
+        <div className="mt-2 rounded-lg border border-border bg-muted/20 p-3 text-[12px] text-muted-foreground leading-relaxed">
+          {steps.map((s, i) => (
+            <p key={i} className={cn(i > 0 && "mt-1.5")}>
+              {s}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AssistantBlock({
   block,
   bi,
@@ -139,6 +306,12 @@ function AssistantBlock({
 }) {
   if (block.type === "worked") {
     return <WorkedRow duration={block.content} steps={block.steps} />
+  }
+  if (block.type === "thinking") {
+    return <ThinkingCard label={block.content} steps={block.steps} />
+  }
+  if (block.type === "tool" && block.tool) {
+    return <ToolCard tool={block.tool} />
   }
   if (block.type === "files" && block.files) {
     return <ChangedFilesCard data={block.files} />

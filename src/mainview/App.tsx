@@ -3,7 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
 import { Composer } from "./components/Composer"
+import { ContextMeter } from "./components/ContextMeter"
+import { QueueChips } from "./components/QueueChips"
 import { SettingsDialog } from "./components/SettingsDialog"
+import { TodosPanel } from "./components/TodosPanel"
 import { Sidebar } from "./components/Sidebar"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -47,6 +50,7 @@ import {
   streamingMessageId,
 } from "./lib/mapTranscript"
 import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
+import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
 import { initialState, isStreaming, reduce, type TranscriptState } from "./lib/transcript"
 
@@ -240,6 +244,21 @@ export function App() {
     () => (live ? streamingMessageId(activeThread.messages, streaming) : demoStreamingId),
     [live, activeThread.messages, streaming, demoStreamingId],
   )
+
+  // Active model's context limit for the context-window meter (undefined in demo).
+  const contextLimit = useMemo(() => {
+    if (!live) return undefined
+    const row = modelRows.find(
+      (r) => r.provider === modelSel?.provider && r.model.id === modelSel?.model,
+    )
+    return row?.model.contextLimit
+  }, [live, modelRows, modelSel])
+
+  // Session-scoped rich data lives on TranscriptState (auto-resets on switch).
+  const liveTodos = live ? transcript.todos : []
+  const liveUsage = live ? transcript.usage : null
+  const liveCompacted = live ? transcript.compacted : 0
+  const liveQueue = live ? transcript.queue.entries : []
 
   // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
   const refreshSessions = useCallback(
@@ -563,7 +582,7 @@ export function App() {
   )
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, delivery: MessageDelivery = "auto") => {
       setSendError(null)
       if (!live) {
         // Minimal demo echo so offline mode still feels alive.
@@ -608,10 +627,10 @@ export function App() {
       }
       setSending(true)
       try {
-        const blocked = await sendMessage(config.baseUrl, sessionId, text)
+        const blocked = await sendMessage(config.baseUrl, sessionId, text, { delivery })
         if (blocked?.blocked === "cache-cold") {
           // Phase 0: auto-confirm with force so the user isn't stuck.
-          const again = await sendMessage(config.baseUrl, sessionId, text, { force: true })
+          const again = await sendMessage(config.baseUrl, sessionId, text, { force: true, delivery })
           if (again) {
             setSendError("Send blocked by cache guard even after confirm.")
           }
@@ -867,23 +886,29 @@ export function App() {
               thread={activeThread}
               streamingId={liveStreamingId}
               loading={live && transcriptLoading}
+              compacted={liveCompacted}
             />
-            <Composer
-              model={uiModel}
-              models={uiModels}
-              onModelChange={handleModelChange}
-              onRefreshModels={live ? refreshModels : undefined}
-              onSend={(t) => void handleSend(t)}
-              streaming={streaming}
-              onStop={handleStop}
-              disabled={
-                live &&
-                (connectionState === "booting" ||
-                  connectionState === "offline" ||
-                  !sessionId ||
-                  sending)
-              }
-            />
+            <div className="flex flex-col gap-2">
+              <TodosPanel todos={liveTodos} />
+              <QueueChips entries={liveQueue} />
+              <Composer
+                model={uiModel}
+                models={uiModels}
+                onModelChange={handleModelChange}
+                onRefreshModels={live ? refreshModels : undefined}
+                // While the agent is running, submitting enqueues; else it sends.
+                onSend={(t) => void handleSend(t, streaming ? "queue" : "auto")}
+                streaming={streaming}
+                onStop={handleStop}
+                contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
+                disabled={
+                  live &&
+                  (connectionState === "booting" ||
+                    connectionState === "offline" ||
+                    !sessionId)
+                }
+              />
+            </div>
           </section>
         </div>
 

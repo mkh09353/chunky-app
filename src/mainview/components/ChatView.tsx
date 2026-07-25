@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   GitPullRequest,
+  Info,
   MoreHorizontal,
   PanelRightOpen,
   Share2,
@@ -134,12 +135,14 @@ export function ChatView({
   thread,
   streamingId,
   loading = false,
+  compacted = 0,
 }: {
   thread: Thread
   project?: Project
   streamingId: string | null
   headerRight?: React.ReactNode
   loading?: boolean
+  compacted?: number
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -168,6 +171,12 @@ export function ChatView({
             thread.messages.map((m: Message) => (
               <MessageView key={m.id} message={m} streaming={m.id === streamingId} />
             ))
+          )}
+          {compacted > 0 && (
+            <div className="mx-auto flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+              <Info className="size-3" />
+              Context compacted — older turns summarized{compacted > 1 ? ` · ×${compacted}` : ""}
+            </div>
           )}
         </div>
       </ScrollArea>
