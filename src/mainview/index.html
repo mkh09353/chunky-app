@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Pre-paint theme bootstrap: pin the theme class before first paint so we
+         never flash the wrong theme while the module bundle loads. Mirrors
+         lib/theme.ts (storage key "chunky.theme"). -->
+    <script>
+      (function () {
+        try {
+          var stored = null
+          try {
+            stored = localStorage.getItem("chunky.theme")
+          } catch (e) {}
+          var mode = stored === "light" || stored === "dark" || stored === "system" ? stored : "dark"
+          var resolved =
+            mode === "system"
+              ? window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : mode
+          var el = document.documentElement
+          el.classList.toggle("dark", resolved === "dark")
+          el.style.colorScheme = resolved
+        } catch (e) {}
+      })()
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chunky</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

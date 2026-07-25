@@ -1,0 +1,42 @@
+{
+  "name": "chunky-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chunky — a beautiful coding-agent chat desktop app (Electrobun + Base UI + Tailwind v4). Talks to the local Chunky server over HTTP+SSE.",
+  "scripts": {
+    "dev": "concurrently -k -n vite,electrobun -c magenta,cyan \"vite --port 5173 --strictPort\" \"electrobun dev\"",
+    "dev:web": "vite --port 5173 --strictPort",
+    "build:web": "vite build",
+    "build": "vite build && electrobun build",
+    "preview": "vite preview --port 5173 --strictPort",
+    "typecheck": "tsgo --noEmit",
+    "typecheck:tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.6.0",
+    "@chunky/protocol": "file:../chunky/packages/protocol",
+    "@ff-labs/fff-bun": "0.9.6",
+    "@fontsource-variable/dm-sans": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "electrobun": "^1.18.1",
+    "lucide-react": "^0.564.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@typescript/native-preview": "latest",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
