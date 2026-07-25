@@ -7,10 +7,12 @@ import {
   type CreateSessionResponse,
   type ListSessionsResponse,
   type MessageDelivery,
+  type FileSearchItem,
   type ReposResponse,
   type SendBlockedResponse,
   type ServerInfoResponse,
   type SessionSummary,
+  type ForkResponse, type GoalRequest, type GoalSnapshot, type RewindPoint,
 } from "@chunky/protocol"
 
 export type {
@@ -224,7 +226,11 @@ export async function sendMessage(
   baseUrl: string,
   sessionId: string,
   text: string,
-  opts: { force?: boolean; delivery?: MessageDelivery } = {},
+  opts: {
+    force?: boolean
+    delivery?: MessageDelivery
+    images?: { base64: string; mediaType: string }[]
+  } = {},
 ): Promise<SendBlockedResponse | null> {
   const res = await fetch(baseUrl + ROUTES.sendMessage(sessionId), {
     method: "POST",
@@ -233,6 +239,7 @@ export async function sendMessage(
       text,
       ...(opts.force ? { force: true } : {}),
       ...(opts.delivery && opts.delivery !== "auto" ? { delivery: opts.delivery } : {}),
+      ...(opts.images?.length ? { images: opts.images } : {}),
     }),
   })
   if (res.status === 409) {
@@ -247,9 +254,41 @@ export async function sendMessage(
   return null
 }
 
+/** Fuzzy file/directory search used by the composer @-mention menu. */
+export async function searchFiles(
+  baseUrl: string,
+  query: string,
+  repoId?: string | null,
+): Promise<FileSearchItem[]> {
+  const url = new URL(baseUrl + ROUTES.fileSearch, window.location.origin)
+  url.searchParams.set("q", query)
+  url.searchParams.set("limit", "12")
+  if (repoId) url.searchParams.set("repo", repoId)
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`file search failed (${res.status})`)
+  const body = (await res.json()) as { items?: FileSearchItem[] }
+  return body.items ?? []
+}
+
 export async function interruptSession(baseUrl: string, sessionId: string): Promise<void> {
   await fetch(baseUrl + ROUTES.interrupt(sessionId), { method: "POST" }).catch(() => {})
 }
+
+async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init)
+  const body = await res.json().catch(() => ({})) as T & { error?: string }
+  if (!res.ok) throw new Error(body.error || `request failed (${res.status})`)
+  return body
+}
+export const renameSession = (baseUrl: string, id: string, title: string) => jsonRequest<SessionSummary>(baseUrl + ROUTES.renameSession(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) })
+export const forkSession = (baseUrl: string, id: string, body: { worktree?: boolean; directive?: string }) => jsonRequest<ForkResponse>(baseUrl + ROUTES.fork(id), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+export const getRewindPoints = async (baseUrl: string, id: string) => (await jsonRequest<{ points: RewindPoint[] }>(baseUrl + ROUTES.rewindPoints(id))).points
+export const rewindSession = (baseUrl: string, id: string, turn: number) => jsonRequest(baseUrl + ROUTES.rewind(id), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ turn }) })
+export const getGoal = async (baseUrl: string, id: string) => (await jsonRequest<{ goal: GoalSnapshot | null }>(baseUrl + ROUTES.goal(id))).goal
+export const setGoal = async (baseUrl: string, id: string, body: GoalRequest) => (await jsonRequest<{ goal: GoalSnapshot | null }>(baseUrl + ROUTES.goal(id), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).goal
+export const shipSession = (baseUrl: string, id: string, notes?: string) => jsonRequest(baseUrl + ROUTES.ship(id), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(notes ? { notes } : {}) })
+export const getUsage = (baseUrl: string, id: string) => jsonRequest<unknown>(`${baseUrl}/api/usage?session=${encodeURIComponent(id)}`)
+export const getScoreboard = (baseUrl: string, id?: string) => jsonRequest<unknown>(`${baseUrl}/api/scoreboard${id ? `?session=${encodeURIComponent(id)}` : ""}`)
 
 /**
  * Open a session's SSE stream. Resolves when the server closes it.

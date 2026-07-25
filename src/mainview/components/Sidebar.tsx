@@ -39,16 +39,19 @@ function ThreadRow({
   project,
   active,
   onSelect,
+  onRename,
 }: {
   thread: Thread
   project: Project | undefined
   active: boolean
   onSelect: () => void
+  onRename?: () => void
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
+      onDoubleClick={() => onRename?.()}
       className={cn(
         "group relative flex w-full cursor-pointer flex-col gap-1 rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
         active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
@@ -96,6 +99,7 @@ export function Sidebar({
   onOpenSettings,
   onOpenPalette,
   connectionLabel,
+  onRenameThread,
 }: {
   projects: Project[]
   threads: Thread[]
@@ -107,6 +111,7 @@ export function Sidebar({
   onOpenPalette: () => void
   /** Optional live/demo connection badge in the footer. */
   connectionLabel?: string
+  onRenameThread?: (id: string) => void
 }) {
   const [query, setQuery] = useState("")
   const projectOf = useMemo(
@@ -198,6 +203,7 @@ export function Sidebar({
               project={projectOf.get(t.projectId)}
               active={t.id === activeThreadId}
               onSelect={() => onSelectThread(t.id)}
+              onRename={() => onRenameThread?.(t.id)}
             />
           ))}
         </div>
@@ -221,6 +227,7 @@ export function Sidebar({
                   project={projectOf.get(t.projectId)}
                   active={t.id === activeThreadId}
                   onSelect={() => onSelectThread(t.id)}
+                  onRename={() => onRenameThread?.(t.id)}
                 />
               ))}
             </div>

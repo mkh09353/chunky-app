@@ -1,6 +1,6 @@
 import { CornerDownLeft, Search } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { PALETTE_ACTIONS, type PaletteAction } from "~/lib/mock"
+export interface PaletteAction { id: string; label: string; hint?: string; group: string }
 import { cn } from "~/lib/cn"
 import { Dialog, DialogPopup } from "./ui/dialog"
 import { Kbd } from "./ui/kbd"
@@ -9,10 +9,12 @@ export function CommandPalette({
   open,
   onOpenChange,
   onRun,
+  actions,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onRun: (action: PaletteAction) => void
+  actions: PaletteAction[]
 }) {
   const [query, setQuery] = useState("")
   const [active, setActive] = useState(0)
@@ -20,9 +22,9 @@ export function CommandPalette({
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return PALETTE_ACTIONS
-    return PALETTE_ACTIONS.filter((a) => a.label.toLowerCase().includes(q))
-  }, [query])
+    if (!q) return actions
+    return actions.filter((a) => a.label.toLowerCase().includes(q))
+  }, [query, actions])
 
   useEffect(() => {
     if (open) {

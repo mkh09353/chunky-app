@@ -1,6 +1,6 @@
 // Reduce AgentEvents into a thread tree the chat UI can render.
 // Ported from the reference app — tolerate unknown / nested / legacy variants.
-import type { AgentEvent, GoalStatus, MessageEndReason, QueueEntry } from "@chunky/protocol"
+import type { AgentEvent, GoalStatus, MessageEndReason, QueueEntry, TodoSnapshot } from "@chunky/protocol"
 
 export const MAIN = "main"
 
@@ -49,6 +49,8 @@ export interface TranscriptState {
   order: string[]
   status: "idle" | "running"
   queue: { entries: QueueEntry[]; running: boolean }
+  todos: TodoSnapshot[]
+  background: { tasks: number; monitors: number }
 }
 
 export const initialState: TranscriptState = {
@@ -58,6 +60,8 @@ export const initialState: TranscriptState = {
   order: [MAIN],
   status: "idle",
   queue: { entries: [], running: false },
+  todos: [],
+  background: { tasks: 0, monitors: 0 },
 }
 
 const PROGRESS_MAX_BYTES = 64 * 1024
@@ -195,11 +199,20 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
     }
 
     case "session.rewound":
-    case "background.changed":
-    case "context.compacted":
-    case "todos.update":
-      // Live-only / not rendered in Phase 0 chat surface.
+      // Reattachment/replay is an orchestration concern; keep the reducer pure.
       return state
+
+    case "background.changed":
+      return { ...state, background: { tasks: ev.tasks, monitors: ev.monitors } }
+
+    case "todos.update":
+      return { ...state, todos: ev.todos }
+
+    case "context.compacted":
+      return updateThreadItems(state, MAIN, (items) => [
+        ...items,
+        { kind: "notice", text: "Earlier context was compacted into a summary. The full transcript remains available." },
+      ])
 
     case "cache.warning": {
       const threadId = ev.threadId || MAIN

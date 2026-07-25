@@ -39,6 +39,7 @@ import type {
   LoginInitiation,
   ManageSkillReposRequest,
   ModesResponse,
+  ModeSpec,
   SaveModeRequest,
   SkillCatalogEntry,
   SkillReposResponse,
@@ -138,6 +139,7 @@ export interface CustomProviderInput {
   id: string
   label: string
   baseURL: string
+  /** Sent to the server as `key`. */
   apiKey: string
 }
 
@@ -173,9 +175,17 @@ export async function selectProvider(provider: string): Promise<void> {
   await req<unknown>(`/api/providers/${encodeURIComponent(provider)}/select`, jsonInit("POST"))
 }
 
-/** Register a custom OpenAI-compatible provider. */
+/** Register a custom OpenAI-compatible provider. Server field is `key`. */
 export async function addCustomProvider(input: CustomProviderInput): Promise<void> {
-  await req<unknown>("/api/providers/custom", jsonInit("POST", input))
+  await req<unknown>(
+    "/api/providers/custom",
+    jsonInit("POST", {
+      id: input.id,
+      label: input.label,
+      baseURL: input.baseURL,
+      key: input.apiKey,
+    }),
+  )
 }
 
 // ================================================================
@@ -207,47 +217,22 @@ export async function listModels(providerId: string): Promise<CatalogModel[]> {
   return data.models ?? []
 }
 
-/** Normalize the availability response into an id -> enabled map. */
-function normalizeAvailability(data: unknown): Record<string, boolean> {
-  const out: Record<string, boolean> = {}
-  if (Array.isArray(data)) {
-    for (const id of data) if (typeof id === "string") out[id] = true
-    return out
-  }
-  if (data && typeof data === "object") {
-    const o = data as Record<string, unknown>
-    if (Array.isArray(o.available)) {
-      for (const id of o.available) if (typeof id === "string") out[id] = true
-      return out
-    }
-    if (Array.isArray(o.models)) {
-      for (const m of o.models) {
-        if (m && typeof m === "object") {
-          const row = m as Record<string, unknown>
-          if (typeof row.id === "string") out[row.id] = row.available !== false
-        }
-      }
-      return out
-    }
-    if (o.available && typeof o.available === "object") {
-      for (const [k, v] of Object.entries(o.available as Record<string, unknown>)) {
-        out[k] = Boolean(v)
-      }
-      return out
-    }
-    for (const [k, v] of Object.entries(o)) out[k] = Boolean(v)
-  }
-  return out
+/** GET availability returns the FULL known catalog plus the checked (visible) ids.
+ *  Server shape: { provider, models: ModelInfo[], available: string[] }. */
+export interface ModelAvailability {
+  models: CatalogModel[]
+  available: string[]
 }
 
-export async function getModelAvailability(providerId: string): Promise<Record<string, boolean>> {
-  const data = await req<unknown>(
+export async function getModelAvailability(providerId: string): Promise<ModelAvailability> {
+  const data = await req<{ models?: CatalogModel[]; available?: string[] }>(
     `/api/providers/${encodeURIComponent(providerId)}/models/availability`,
   )
-  return normalizeAvailability(data)
+  return { models: data.models ?? [], available: data.available ?? [] }
 }
 
-/** Persist the set of enabled model ids for a provider. */
+/** Persist the set of enabled (visible) model ids for a provider. PUT body is
+ *  { available: string[] }. */
 export async function setModelAvailability(
   providerId: string,
   available: string[],
@@ -258,16 +243,16 @@ export async function setModelAvailability(
   )
 }
 
-/** Add / hide / restore / list catalog entries. Returns the resulting models. */
+/** Add / hide / restore / list catalog entries. POST body { action, model? };
+ *  the response shape varies by action, so it's returned loosely typed. */
 export async function manageCatalog(
   providerId: string,
   request: CatalogRequest,
-): Promise<CatalogModel[]> {
-  const data = await req<{ models?: CatalogModel[] }>(
+): Promise<Record<string, unknown>> {
+  return req<Record<string, unknown>>(
     `/api/providers/${encodeURIComponent(providerId)}/models/catalog`,
     jsonInit("POST", request),
   )
-  return data.models ?? []
 }
 
 export async function getActiveModel(): Promise<ModelSelection | null> {
@@ -302,7 +287,13 @@ export interface AgentModelConfig {
 
 function normalizeAgentConfig(data: unknown): AgentModelConfig {
   if (!data || typeof data !== "object") return { enabled: false }
-  const o = data as Record<string, unknown>
+  const root = data as Record<string, unknown>
+  // Server wraps the config: GET/POST return { config, active } (+ effective for
+  // review). Tolerate both wrapped and bare shapes.
+  const o = (root.config && typeof root.config === "object" ? root.config : root) as Record<
+    string,
+    unknown
+  >
   return {
     enabled: o.enabled === true,
     provider: typeof o.provider === "string" ? o.provider : null,
@@ -360,11 +351,13 @@ function normalizeSidekick(data: unknown): SidekickConfig {
   const out: SidekickConfig = { default: {}, seats: {} }
   if (!data || typeof data !== "object") return out
   const o = data as Record<string, unknown>
-  out.default = normalizeSeat(o.default)
+  // Server shape: { config: <default seat>, seats: Record<name, SidekickSeat> }.
+  out.default = normalizeSeat(o.config)
   const seats = o.seats
   if (seats && typeof seats === "object") {
     for (const [name, cfg] of Object.entries(seats as Record<string, unknown>)) {
-      out.seats[name] = normalizeSeat(cfg)
+      // Named seats have no `enabled` field server-side — presence = enabled.
+      out.seats[name] = { ...normalizeSeat(cfg), enabled: true }
     }
   }
   return out
@@ -374,15 +367,42 @@ export async function getSidekick(): Promise<SidekickConfig> {
   return normalizeSidekick(await req<unknown>("/api/sidekick"))
 }
 
-/** Create or update a seat. Use "default" for the default seat. */
-export async function saveSeat(seat: string, config: SeatConfig): Promise<SidekickConfig> {
-  return normalizeSidekick(await req<unknown>("/api/sidekick", jsonInit("POST", { seat, config })))
+/** Build a flat patch, omitting null/undefined (server merge-persists it). */
+function seatPatch(cfg: SeatConfig): Record<string, unknown> {
+  const p: Record<string, unknown> = {}
+  if (typeof cfg.enabled === "boolean") p.enabled = cfg.enabled
+  if (cfg.provider) p.provider = cfg.provider
+  if (cfg.model) p.model = cfg.model
+  if (cfg.effort) p.effort = cfg.effort
+  return p
 }
 
-/** Delete a named seat (the default seat cannot be deleted, only reset). */
+/** Save the DEFAULT seat: POST flat { enabled?, provider?, model?, effort? }
+ *  (no `seat`). `enabled` is the master switch; empty model inherits executor. */
+export async function saveDefaultSeat(config: SeatConfig): Promise<SidekickConfig> {
+  return normalizeSidekick(await req<unknown>("/api/sidekick", jsonInit("POST", seatPatch(config))))
+}
+
+/** Save a NAMED seat. The server requires provider + model for named seats. */
+export async function saveNamedSeat(seat: string, config: SeatConfig): Promise<SidekickConfig> {
+  return normalizeSidekick(
+    await req<unknown>(
+      "/api/sidekick",
+      jsonInit("POST", {
+        seat,
+        enabled: true,
+        provider: config.provider,
+        model: config.model,
+        ...(config.effort ? { effort: config.effort } : {}),
+      }),
+    ),
+  )
+}
+
+/** Delete a named seat — server maps { seat, enabled: false } to removal. */
 export async function deleteSeat(seat: string): Promise<SidekickConfig> {
   return normalizeSidekick(
-    await req<unknown>("/api/sidekick", jsonInit("POST", { seat, config: null })),
+    await req<unknown>("/api/sidekick", jsonInit("POST", { seat, enabled: false })),
   )
 }
 
@@ -469,82 +489,95 @@ export async function runDream(): Promise<void> {
   await req<unknown>("/api/dream", jsonInit("POST", {}))
 }
 
+export type WorkflowBilling = "free" | "subscription" | "metered" | "unknown"
+
+/** One effective workflow route: a provider/model with its resolved tags,
+ *  automatic flag, effort, and billing (server computes these per ready model). */
 export interface WorkflowTarget {
-  /** Semantic tag this target satisfies (e.g. "frontend", "research"). */
-  tag: string
   provider: string
   model: string
-  effort?: string | null
-}
-
-export interface WorkflowTargetsResponse {
-  targets: WorkflowTarget[]
+  name: string
+  billing: WorkflowBilling
+  tags: string[]
   automatic: boolean
+  effort: string
+  priority: number
 }
 
-function normalizeWorkflowTargets(data: unknown): WorkflowTargetsResponse {
-  const out: WorkflowTargetsResponse = { targets: [], automatic: false }
-  if (!data || typeof data !== "object") return out
-  const o = data as Record<string, unknown>
-  out.automatic = o.automatic === true
-  if (Array.isArray(o.targets)) {
-    for (const t of o.targets) {
-      if (t && typeof t === "object") {
-        const row = t as Record<string, unknown>
-        if (typeof row.tag === "string" && typeof row.provider === "string" && typeof row.model === "string") {
-          out.targets.push({
-            tag: row.tag,
-            provider: row.provider,
-            model: row.model,
-            effort: typeof row.effort === "string" ? row.effort : null,
-          })
-        }
+/** A user override applied to one provider/model target. */
+export interface WorkflowTargetOverride {
+  provider: string
+  model: string
+  tags?: string[]
+  automatic?: boolean
+  effort?: Effort
+}
+
+function normalizeWorkflowTargets(data: unknown): WorkflowTarget[] {
+  const out: WorkflowTarget[] = []
+  const arr =
+    data && typeof data === "object" && Array.isArray((data as Record<string, unknown>).targets)
+      ? ((data as Record<string, unknown>).targets as unknown[])
+      : []
+  for (const t of arr) {
+    if (t && typeof t === "object") {
+      const r = t as Record<string, unknown>
+      if (typeof r.provider === "string" && typeof r.model === "string") {
+        out.push({
+          provider: r.provider,
+          model: r.model,
+          name: typeof r.name === "string" ? r.name : r.model,
+          billing: (typeof r.billing === "string" ? r.billing : "unknown") as WorkflowBilling,
+          tags: Array.isArray(r.tags) ? r.tags.filter((x): x is string => typeof x === "string") : [],
+          automatic: r.automatic === true,
+          effort: typeof r.effort === "string" ? r.effort : "medium",
+          priority: typeof r.priority === "number" ? r.priority : 0,
+        })
       }
     }
   }
   return out
 }
 
-export async function getWorkflowTargets(): Promise<WorkflowTargetsResponse> {
+/** GET -> the effective targets (every ready provider's models). No global
+ *  automatic flag: `automatic` is per-target. */
+export async function getWorkflowTargets(): Promise<WorkflowTarget[]> {
   return normalizeWorkflowTargets(await req<unknown>("/api/workflow-targets"))
 }
 
-export async function putWorkflowTarget(target: WorkflowTarget): Promise<WorkflowTargetsResponse> {
-  return normalizeWorkflowTargets(
-    await req<unknown>("/api/workflow-targets", jsonInit("PUT", target)),
-  )
+/** Upsert an override for one provider/model. The server returns { ok }, so
+ *  callers should re-fetch getWorkflowTargets() to see the merged result. */
+export async function putWorkflowTarget(override: WorkflowTargetOverride): Promise<void> {
+  await req<unknown>("/api/workflow-targets", jsonInit("PUT", override))
 }
 
-export async function setWorkflowAutomatic(automatic: boolean): Promise<WorkflowTargetsResponse> {
-  return normalizeWorkflowTargets(
-    await req<unknown>("/api/workflow-targets", jsonInit("PUT", { automatic })),
-  )
-}
-
-export async function deleteWorkflowTarget(tag: string): Promise<WorkflowTargetsResponse> {
-  return normalizeWorkflowTargets(
-    await req<unknown>(`/api/workflow-targets?tag=${encodeURIComponent(tag)}`, {
-      method: "DELETE",
-    }),
-  )
+/** Clear the override for one provider/model (revert to the zero-config default). */
+export async function deleteWorkflowTarget(provider: string, model: string): Promise<void> {
+  await req<unknown>("/api/workflow-targets", jsonInit("DELETE", { provider, model }))
 }
 
 // ================================================================
 // 9. Onboarding
 // ================================================================
 
+/** Provider onboarding status: "ready" | "missing" | "inherited" (Anthropic
+ *  inherited creds), or any future server string. */
+export type OnboardingProviderStatus = "ready" | "missing" | "inherited" | (string & {})
+
 export interface OnboardingProvider {
   id: string
   label: string
+  status: OnboardingProviderStatus
+  detail?: string
+  /** Derived: any status other than "missing" means credentials are present. */
   ready: boolean
 }
 
+/** A suggested onboarding mode: name + description + the full ModeSpec to apply. */
 export interface SuggestedMode {
   name: string
-  provider?: string
-  model?: string
-  effort?: string
-  description?: string
+  description: string
+  spec: ModeSpec
 }
 
 export interface OnboardingResponse {
@@ -566,10 +599,14 @@ function normalizeOnboarding(data: unknown): OnboardingResponse {
     if (p && typeof p === "object") {
       const row = p as Record<string, unknown>
       if (typeof row.id === "string") {
+        const status =
+          typeof row.status === "string" ? row.status : row.ready === true ? "ready" : "missing"
         out.providers.push({
           id: row.id,
           label: typeof row.label === "string" ? row.label : providerLabel(row.id),
-          ready: row.ready === true,
+          status,
+          detail: typeof row.detail === "string" ? row.detail : undefined,
+          ready: status !== "missing",
         })
       }
     }
@@ -583,14 +620,15 @@ function normalizeOnboarding(data: unknown): OnboardingResponse {
   for (const m of rawModes) {
     if (m && typeof m === "object") {
       const row = m as Record<string, unknown>
-      if (typeof row.name === "string") {
-        out.suggestedModes.push({
-          name: row.name,
-          provider: typeof row.provider === "string" ? row.provider : undefined,
-          model: typeof row.model === "string" ? row.model : undefined,
-          effort: typeof row.effort === "string" ? row.effort : undefined,
-          description: typeof row.description === "string" ? row.description : undefined,
-        })
+      if (typeof row.name === "string" && row.spec && typeof row.spec === "object") {
+        const spec = row.spec as ModeSpec
+        if (typeof spec.provider === "string" && typeof spec.model === "string") {
+          out.suggestedModes.push({
+            name: row.name,
+            description: typeof row.description === "string" ? row.description : "",
+            spec,
+          })
+        }
       }
     }
   }
@@ -601,8 +639,9 @@ export async function getOnboarding(): Promise<OnboardingResponse> {
   return normalizeOnboarding(await req<unknown>("/api/onboarding"))
 }
 
-export async function applyOnboardingMode(name: string): Promise<void> {
-  await req<unknown>("/api/onboarding/apply", jsonInit("POST", { mode: name }))
+/** Apply a suggested mode. Server body is { mode: ModeSpec, name? }. */
+export async function applyOnboardingMode(mode: SuggestedMode): Promise<void> {
+  await req<unknown>("/api/onboarding/apply", jsonInit("POST", { mode: mode.spec, name: mode.name }))
 }
 
 export async function completeOnboarding(): Promise<void> {

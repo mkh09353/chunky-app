@@ -6,7 +6,7 @@ import {
   Share2,
   Sparkles,
 } from "lucide-react"
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { Repo } from "~/lib/api"
 import type { Message, Project, Thread } from "~/lib/mock"
 import { Button } from "./ui/button"
@@ -21,6 +21,8 @@ import { RepoTabs } from "./RepoTabs"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
+import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
+import type { TranscriptState } from "~/lib/transcript"
 
 /** Top chrome strip: repo tabs + compact thread title + actions. */
 export function ChatTopBar({
@@ -33,6 +35,7 @@ export function ChatTopBar({
   reposBusy = false,
   reposDisabled = false,
   headerRight,
+  onRename, onFork, onRewind, onGoal, onShip, onStats,
 }: {
   thread: Thread
   /** Optional; when omitted, repo tabs are hidden (demo / offline). */
@@ -44,6 +47,7 @@ export function ChatTopBar({
   reposBusy?: boolean
   reposDisabled?: boolean
   headerRight?: React.ReactNode
+  onRename?: () => void; onFork?: () => void; onRewind?: () => void; onGoal?: () => void; onShip?: () => void; onStats?: () => void
 }) {
   const showRepos =
     !!repos && !!onSelectRepo && !!onAddRepo && !!onRemoveRepo && repos.length >= 0
@@ -72,31 +76,7 @@ export function ChatTopBar({
 
       <div className="no-drag flex shrink-0 items-center gap-1.5">
         <div className="hidden items-stretch sm:flex">
-          <Button variant="outline" size="sm" className="gap-1.5 rounded-r-none border-r-0">
-            <GitPullRequest className="size-3.5" />
-            <span className="hidden lg:inline">View PR</span>
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="outline"
-                  size="sm"
-                  aria-label="PR actions"
-                  className="rounded-l-none px-1.5"
-                />
-              }
-            >
-              <ChevronDown className="size-3.5" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem>Copy PR link</DropdownMenuItem>
-              <DropdownMenuItem>View diff</DropdownMenuItem>
-              <DropdownMenuItem>Request review…</DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem>Merge when ready</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={onShip}><GitPullRequest className="size-3.5" /><span className="hidden lg:inline">Ship it</span></Button>
         </div>
 
         {headerRight}
@@ -117,11 +97,13 @@ export function ChatTopBar({
             <MoreHorizontal />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem>Rename thread</DropdownMenuItem>
-            <DropdownMenuItem>Duplicate</DropdownMenuItem>
-            <DropdownMenuItem>Export as Markdown</DropdownMenuItem>
+            <DropdownMenuItem onClick={onRename}>Rename session</DropdownMenuItem>
+            <DropdownMenuItem onClick={onFork}>Fork session…</DropdownMenuItem>
+            <DropdownMenuItem onClick={onRewind}>Rewind to turn…</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem variant="destructive">Delete thread</DropdownMenuItem>
+            <DropdownMenuItem onClick={onGoal}>Goal mode…</DropdownMenuItem>
+            <DropdownMenuItem onClick={onShip}>Ship it…</DropdownMenuItem>
+            <DropdownMenuItem onClick={onStats}>Usage & scoreboard</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -134,12 +116,18 @@ export function ChatView({
   thread,
   streamingId,
   loading = false,
+  transcript,
+  modelName,
+  foldAll = false,
 }: {
   thread: Thread
   project?: Project
   streamingId: string | null
   headerRight?: React.ReactNode
   loading?: boolean
+  transcript?: TranscriptState
+  modelName?: string
+  foldAll?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -169,8 +157,27 @@ export function ChatView({
               <MessageView key={m.id} message={m} streaming={m.id === streamingId} />
             ))
           )}
+          {transcript && childThreads(transcript, "main").map((node) => (
+            <ThreadCard key={node.id} nodeId={node.id} transcript={transcript} modelName={modelName} foldAll={foldAll} />
+          ))}
         </div>
       </ScrollArea>
     </div>
   )
+}
+
+function ThreadCard({ nodeId, transcript, modelName, foldAll }: { nodeId: string; transcript: TranscriptState; modelName?: string; foldAll: boolean }) {
+  const node = transcript.threads[nodeId]!
+  const [open, setOpen] = useState(!foldAll)
+  useEffect(() => setOpen(!foldAll), [foldAll])
+  const messages = itemsToMessages(node.items, node.model ?? modelName)
+  return <section className="ml-4 overflow-hidden rounded-xl border border-primary/20 bg-primary/[0.035] shadow-xs sm:ml-8">
+    <button type="button" onClick={() => setOpen((value) => !value)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-primary/[0.06]">
+      <ChevronDown className={`size-4 text-primary transition-transform ${open ? "" : "-rotate-90"}`} />
+      <Sparkles className="size-3.5 text-primary" /><span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{node.title}</span>
+      {node.model && <span className="max-w-32 truncate rounded-full border border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">{node.model}</span>}
+      <span className={node.status === "running" ? "text-[11px] text-primary" : "text-[11px] text-muted-foreground"}>{node.status === "running" ? "Running" : "Idle"}</span>
+    </button>
+    {open && <div className="border-border/70 border-t px-3 py-3"><div className="flex flex-col gap-5">{messages.length ? messages.map((message) => <MessageView key={message.id} message={message} />) : <span className="text-[12px] text-muted-foreground">Waiting for work…</span>}{childThreads(transcript, node.id).map((child) => <ThreadCard key={child.id} nodeId={child.id} transcript={transcript} modelName={modelName} foldAll={foldAll} />)}</div></div>}
+  </section>
 }

@@ -2,8 +2,10 @@ import { AlertCircle, Moon, Sun, WifiOff } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
+import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
 import { Composer } from "./components/Composer"
-import { SettingsDialog } from "./components/SettingsDialog"
+import { SettingsCenter } from "./components/settings/SettingsCenter"
+import { needsOnboarding, OnboardingWizard } from "./components/settings/OnboardingWizard"
 import { Sidebar } from "./components/Sidebar"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -13,6 +15,7 @@ import {
   fetchModel,
   fetchServerInfo,
   interruptSession,
+  forkSession, getGoal, getRewindPoints, getScoreboard, getUsage, renameSession, rewindSession, setGoal, shipSession,
   listAllModels,
   listRepos,
   listSessions,
@@ -22,6 +25,7 @@ import {
   QueueFullError,
   removeRepo,
   selectModel,
+  searchFiles,
   sendMessage,
   splitModelKey,
   type AppConfig,
@@ -30,13 +34,14 @@ import {
   type Repo,
   type SessionSummary,
 } from "./lib/api"
+import type { GoalSnapshot, RewindPoint } from "@chunky/protocol"
+import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
 import {
   MODELS,
   PROJECTS,
   THREADS,
   type Model,
-  type PaletteAction,
   type Project,
   type Thread,
 } from "./lib/mock"
@@ -132,7 +137,7 @@ function rowsToModels(rows: ModelRow[]): Model[] {
 }
 
 export function App() {
-  const { mode, setMode, resolved, toggle } = useTheme()
+  const { resolved, toggle } = useTheme()
 
   // ---- Live server state ----
   const [config, setConfig] = useState<AppConfig | null>(null)
@@ -151,6 +156,19 @@ export function App() {
   const [repos, setRepos] = useState<Repo[]>([])
   const [activeRepoId, setActiveRepoId] = useState<string | null>(null)
   const [addingRepo, setAddingRepo] = useState(false)
+  const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: "interject" } | null>(null)
+  const [foldThreads, setFoldThreads] = useState(false)
+  const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
+  const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | null>(null)
+  const [dialogText, setDialogText] = useState("")
+  const [rewindPoints, setRewindPoints] = useState<RewindPoint[]>([])
+  const [selectedRewind, setSelectedRewind] = useState<RewindPoint | null>(null)
+  const [forkWorktree, setForkWorktree] = useState(false)
+  const [goalWorkflows, setGoalWorkflows] = useState(false)
+  const [goalTurns, setGoalTurns] = useState("")
+  const [stats, setStats] = useState<{ usage: unknown; scoreboard: unknown } | null>(null)
+  const [statsTab, setStatsTab] = useState<"usage" | "scoreboard">("usage")
+  const [notice, setNotice] = useState<string | null>(null)
 
   // ---- Demo/mock fallback state (preserved polish) ----
   const [demoThreads, setDemoThreads] = useState<Thread[]>(THREADS)
@@ -161,6 +179,7 @@ export function App() {
 
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [onboardingOpen, setOnboardingOpen] = useState(false)
 
   const streamAbort = useRef<AbortController | null>(null)
   const settleTimer = useRef<number | null>(null)
@@ -168,6 +187,7 @@ export function App() {
   const activeRepoIdRef = useRef<string | null>(null)
   const repoListGen = useRef(0)
   const attachGen = useRef(0)
+  const onboardingChecked = useRef(false)
   const lastSessionByRepo = useRef<Record<string, string>>(readLastSessions())
 
   sessionIdRef.current = sessionId
@@ -263,6 +283,7 @@ export function App() {
     const gen = ++attachGen.current
 
     setSessionId(id)
+    void getGoal(baseUrl, id).then(setGoalState).catch(() => setGoalState(null))
     const repoForSession = activeRepoIdRef.current
     if (repoForSession) {
       lastSessionByRepo.current[repoForSession] = id
@@ -288,7 +309,12 @@ export function App() {
     const onEvent = (ev: Parameters<typeof reduce>[1]) => {
       if (gen !== attachGen.current) return
       attempt = 0
+      if (ev.type === "session.rewound") {
+        void attachSession(baseUrl, id)
+        return
+      }
       setTranscript((s) => reduce(s, ev))
+      if (ev.type === "goal.update") setGoalState(ev.goal)
       // Surface title updates from session list by refreshing occasionally on status idle.
       if (ev.type === "session.status" && ev.status === "idle") {
         void refreshSessions(baseUrl, activeRepoIdRef.current).catch(() => {})
@@ -413,6 +439,16 @@ export function App() {
     }, 15_000)
     return () => clearInterval(t)
   }, [config, appMode])
+
+  // Only ask a reachable live server once per app lifetime. Demo/offline mode
+  // never touches onboarding endpoints.
+  useEffect(() => {
+    if (!config || appMode !== "live" || connectionState !== "connected" || onboardingChecked.current) return
+    onboardingChecked.current = true
+    void needsOnboarding().then((needed) => {
+      if (needed) setOnboardingOpen(true)
+    })
+  }, [config, appMode, connectionState])
 
   /** Refresh current selection + full provider catalogs (picker open / retry). */
   const refreshModels = useCallback(async () => {
@@ -563,7 +599,7 @@ export function App() {
   )
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, opts: { delivery?: "interject"; images?: { base64: string; mediaType: string }[] } = {}) => {
       setSendError(null)
       if (!live) {
         // Minimal demo echo so offline mode still feels alive.
@@ -608,13 +644,9 @@ export function App() {
       }
       setSending(true)
       try {
-        const blocked = await sendMessage(config.baseUrl, sessionId, text)
+        const blocked = await sendMessage(config.baseUrl, sessionId, text, opts)
         if (blocked?.blocked === "cache-cold") {
-          // Phase 0: auto-confirm with force so the user isn't stuck.
-          const again = await sendMessage(config.baseUrl, sessionId, text, { force: true })
-          if (again) {
-            setSendError("Send blocked by cache guard even after confirm.")
-          }
+          setCacheGuard({ text, images: opts.images ?? [], approxTokens: blocked.warning.approxTokens, reason: blocked.warning.reason, delivery: opts.delivery })
         }
         // Refresh session list so title/activity update soon.
         void refreshSessions(config.baseUrl, activeRepoIdRef.current).catch(() => {})
@@ -639,6 +671,47 @@ export function App() {
     if (!config || !sessionId) return
     void interruptSession(config.baseUrl, sessionId)
   }, [live, stopDemoStream, config, sessionId])
+
+  const openDialog = useCallback(async (kind: NonNullable<typeof dialog>) => {
+    if (!live || !config || !sessionId) return
+    setDialogText(kind === "rename" ? (sessions.find((s) => s.sessionId === sessionId)?.title ?? "") : "")
+    setSelectedRewind(null)
+    if (kind === "rewind") setRewindPoints(await getRewindPoints(config.baseUrl, sessionId).catch(() => []))
+    if (kind === "stats") { setStatsTab("usage"); setStats(await Promise.all([getUsage(config.baseUrl, sessionId), getScoreboard(config.baseUrl, sessionId)]).then(([usage, scoreboard]) => ({ usage, scoreboard })).catch(() => null)) }
+    setDialog(kind)
+  }, [live, config, sessionId, sessions])
+
+  const runDialog = useCallback(async () => {
+    if (!config || !sessionId || !dialog) return
+    try {
+      if (dialog === "rename") { await renameSession(config.baseUrl, sessionId, dialogText.trim()); await refreshSessions(config.baseUrl); }
+      if (dialog === "fork") { const fork = await forkSession(config.baseUrl, sessionId, { worktree: forkWorktree, directive: dialogText.trim() || undefined }); setNotice(`Forked a new session${fork.worktree ? ` in ${fork.worktree.branch}` : ""}.`); await refreshSessions(config.baseUrl) }
+      if (dialog === "rewind" && selectedRewind) { await rewindSession(config.baseUrl, sessionId, selectedRewind.turn); setNotice(`Restoring turn ${selectedRewind.turn}…`) }
+      if (dialog === "goal") { const maxTurns = Number(goalTurns); setGoalState(await setGoal(config.baseUrl, sessionId, { objective: dialogText.trim(), mode: goalWorkflows ? "workflows" : "direct", ...(Number.isFinite(maxTurns) && maxTurns > 0 ? { maxTurns } : {}) })) }
+      if (dialog === "ship") { await shipSession(config.baseUrl, sessionId, dialogText.trim() || undefined); setNotice("Ship it started — Chunky is preparing a handoff session.") }
+      setDialog(null)
+    } catch (err) { setSendError((err as Error).message) }
+  }, [config, sessionId, dialog, dialogText, forkWorktree, selectedRewind, goalTurns, goalWorkflows, refreshSessions])
+
+  const goalAction = useCallback(async (action: "pause" | "resume" | "clear") => {
+    if (!config || !sessionId) return
+    setGoalState(await setGoal(config.baseUrl, sessionId, { action }).catch(() => goal))
+  }, [config, sessionId, goal])
+
+  const confirmCacheGuard = useCallback(async () => {
+    if (!cacheGuard || !config || !sessionId) return
+    const pending = cacheGuard
+    setCacheGuard(null)
+    setSending(true)
+    try {
+      const blocked = await sendMessage(config.baseUrl, sessionId, pending.text, { force: true, delivery: pending.delivery, images: pending.images })
+      if (blocked) setSendError("Send blocked by cache guard even after confirmation.")
+    } catch (err) {
+      setSendError((err as Error).message)
+    } finally {
+      setSending(false)
+    }
+  }, [cacheGuard, config, sessionId])
 
   const handleModelChange = useCallback(
     async (m: Model) => {
@@ -708,20 +781,29 @@ export function App() {
     }
   }, [config, attachSession, openRepoThreads, refreshSessions])
 
+  const paletteActions = useMemo<PaletteAction[]>(() => [
+    { id: "new", label: "New session", hint: "⌘N", group: "Session" },
+    ...repos.map((repo) => ({ id: `repo:${repo.id}`, label: `Switch repo: ${repo.name}`, group: "Repositories" })),
+    ...sessions.map((session) => ({ id: `session:${session.sessionId}`, label: `Switch session: ${session.title || session.sessionId.slice(0, 8)}`, group: "Sessions" })),
+    ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
+    ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it", "Usage & scoreboard"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
+    { id: "theme", label: "Toggle theme", group: "Appearance" },
+    { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
+    { id: "onboarding", label: "Run Onboarding", group: "Integration" },
+  ], [repos, sessions, uiModels])
+
   const runAction = useCallback(
     (a: PaletteAction) => {
-      if (a.id === "new-thread" || a.id === "new-project") void handleNewThread()
-      else if (a.id === "toggle-theme") toggle()
+      if (a.id === "new") void handleNewThread()
+      else if (a.id === "theme") toggle()
       else if (a.id === "settings") setSettingsOpen(true)
-      else if (a.id.startsWith("model-")) {
-        const m = uiModels.find((x) => a.label.includes(x.name))
-        if (m) void handleModelChange(m)
-      } else if (a.id.startsWith("thread-")) {
-        const t = threads.find((x) => x.title === a.label)
-        if (t) handleSelectThread(t.id)
-      }
+      else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
+      else if (a.id.startsWith("repo:")) void handleSelectRepo(a.id.slice(5))
+      else if (a.id.startsWith("session:")) handleSelectThread(a.id.slice(8))
+      else if (a.id.startsWith("model:")) { const model = uiModels.find((item) => item.id === a.id.slice(6)); if (model) void handleModelChange(model) }
+      else if (a.id.startsWith("action:")) { const kind = a.id.slice(7); const map: Record<string, NonNullable<typeof dialog>> = { "Rename session": "rename", "Fork session": "fork", "Rewind to turn": "rewind", "Goal mode": "goal", "Ship it": "ship", "Usage & scoreboard": "stats" }; void openDialog(map[kind]!) }
     },
-    [handleNewThread, toggle, uiModels, handleModelChange, threads, handleSelectThread],
+    [handleNewThread, toggle, handleSelectRepo, handleSelectThread, uiModels, handleModelChange, openDialog, live],
   )
 
   // Global shortcuts.
@@ -740,6 +822,9 @@ export function App() {
       } else if (meta && e.key.toLowerCase() === "n") {
         e.preventDefault()
         void handleNewThread()
+      } else if (meta && e.key.toLowerCase() === "t") {
+        e.preventDefault()
+        setFoldThreads((value) => !value)
       } else if (e.key === "Escape" && streaming && live) {
         handleStop()
       }
@@ -835,6 +920,7 @@ export function App() {
           onNewThread={() => void handleNewThread()}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
+          onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
           connectionLabel={
             live
               ? connectionState === "connected"
@@ -851,7 +937,8 @@ export function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
             thread={activeThread}
-            headerRight={themeToggle}
+            headerRight={<>{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
+            onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
             onSelectRepo={(id) => void handleSelectRepo(id)}
@@ -867,15 +954,25 @@ export function App() {
               thread={activeThread}
               streamingId={liveStreamingId}
               loading={live && transcriptLoading}
+              transcript={live ? transcript : undefined}
+              modelName={uiModel.name}
+              foldAll={foldThreads}
             />
+            {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
             <Composer
               model={uiModel}
               models={uiModels}
               onModelChange={handleModelChange}
               onRefreshModels={live ? refreshModels : undefined}
-              onSend={(t) => void handleSend(t)}
+              onSend={(t, opts) => void handleSend(t, opts)}
+              onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
               streaming={streaming}
               onStop={handleStop}
+              queue={transcript.queue.entries}
+              todos={transcript.todos}
+              cacheGuard={cacheGuard}
+              onCacheConfirm={() => void confirmCacheGuard()}
+              onCacheCancel={() => setCacheGuard(null)}
               disabled={
                 live &&
                 (connectionState === "booting" ||
@@ -887,12 +984,13 @@ export function App() {
           </section>
         </div>
 
-        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onRun={runAction} />
-        <SettingsDialog
+        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onRun={runAction} actions={paletteActions} />
+        <SettingsCenter
           open={settingsOpen}
-          onOpenChange={setSettingsOpen}
-          mode={mode}
-          onModeChange={setMode}
+          onOpenChange={(open) => {
+            setSettingsOpen(open)
+            if (!open && live && config) void refreshModels()
+          }}
           connection={{
             state: live ? connectionState : "offline",
             baseUrl: config?.baseUrl ?? "http://localhost:4620",
@@ -901,6 +999,17 @@ export function App() {
             mode: appMode,
           }}
         />
+        <OnboardingWizard
+          open={onboardingOpen}
+          onOpenChange={setOnboardingOpen}
+          onComplete={() => { void refreshModels() }}
+        />
+        {notice && <div className="fixed right-5 bottom-5 z-50 rounded-xl border border-primary/25 bg-popover px-4 py-3 text-[13px] shadow-panel"><span>{notice}</span><button type="button" className="ml-3 text-primary" onClick={() => setNotice(null)}>Dismiss</button></div>}
+        <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}><DialogPopup>
+          <DialogHeader><DialogTitle>{dialog === "rename" ? "Rename session" : dialog === "fork" ? "Fork session" : dialog === "rewind" ? "Rewind session" : dialog === "goal" ? "Goal mode" : dialog === "ship" ? "Ship it" : "Usage & scoreboard"}</DialogTitle><DialogDescription>{dialog === "rewind" ? "Choose a completed turn, then explicitly confirm restoring files and conversation." : dialog === "ship" ? "Optional notes for the handoff brief." : ""}</DialogDescription></DialogHeader>
+          <div className="px-6 pb-2">{(dialog === "rename" || dialog === "fork" || dialog === "goal" || dialog === "ship") && <textarea value={dialogText} onChange={(event) => setDialogText(event.target.value)} placeholder={dialog === "goal" ? "Objective…" : dialog === "fork" ? "Optional directive…" : dialog === "ship" ? "Optional handoff notes…" : "Session title"} className="min-h-20 w-full rounded-lg border border-input bg-transparent p-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />}{dialog === "fork" && <label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={forkWorktree} onChange={(event) => setForkWorktree(event.target.checked)} /> Create a git worktree</label>}{dialog === "goal" && <><label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={goalWorkflows} onChange={(event) => setGoalWorkflows(event.target.checked)} /> Use workflows mode</label><input value={goalTurns} onChange={(event) => setGoalTurns(event.target.value)} placeholder="Optional max turns" inputMode="numeric" className="mt-2 w-full rounded-lg border border-input bg-transparent p-2 text-sm" />{goal && <div className="mt-3 flex gap-2"><Button size="sm" variant="outline" onClick={() => void goalAction(goal.status === "active" ? "pause" : "resume")}>{goal.status === "active" ? "Pause" : "Resume"}</Button><Button size="sm" variant="outline" onClick={() => void goalAction("clear")}>Clear</Button></div>}</>}{dialog === "rewind" && <div className="max-h-60 overflow-auto">{rewindPoints.map((point) => <button type="button" onClick={() => setSelectedRewind(point)} key={point.turn} className={`mb-1 w-full rounded-lg border p-2 text-left text-sm ${selectedRewind?.turn === point.turn ? "border-primary bg-primary/10" : "border-border"}`}>Turn {point.turn} · {point.userText}</button>)}{selectedRewind && <p className="mt-2 text-xs text-destructive">Confirming restores files AND conversation to turn {selectedRewind.turn}.</p>}</div>}{dialog === "stats" && <><div className="mb-2 flex gap-1 border-b border-border"><button type="button" onClick={() => setStatsTab("usage")} className={`px-3 py-2 text-sm ${statsTab === "usage" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Usage</button><button type="button" onClick={() => setStatsTab("scoreboard")} className={`px-3 py-2 text-sm ${statsTab === "scoreboard" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Scoreboard</button></div><pre className="max-h-80 overflow-auto rounded-lg bg-muted p-3 text-[11px]">{JSON.stringify(stats?.[statsTab], null, 2)}</pre></>}</div>
+          <DialogFooter>{dialog !== "stats" && <Button onClick={() => void runDialog()} disabled={(dialog === "rewind" && !selectedRewind) || (dialog === "rename" && !dialogText.trim())}>{dialog === "rewind" ? "Confirm restore" : dialog === "goal" ? "Start goal" : dialog === "ship" ? "Ship it" : "Continue"}</Button>}</DialogFooter>
+        </DialogPopup></Dialog>
       </div>
     </TooltipProvider>
   )

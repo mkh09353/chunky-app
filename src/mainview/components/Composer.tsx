@@ -1,5 +1,6 @@
-import { ArrowUp, Check, ChevronDown, Cpu, Loader2, Paperclip, Square } from "lucide-react"
-import { useMemo, useRef, useState } from "react"
+import { ArrowUp, Check, ChevronDown, Cpu, File, Loader2, Paperclip, Square, X } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import type { FileSearchItem, QueueEntry, TodoSnapshot } from "@chunky/protocol"
 import type { Model } from "~/lib/mock"
 import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
@@ -31,9 +32,15 @@ export function Composer({
   onModelChange,
   onRefreshModels,
   onSend,
+  onSearchFiles,
   streaming,
   onStop,
   disabled = false,
+  queue,
+  todos,
+  cacheGuard,
+  onCacheConfirm,
+  onCacheCancel,
 }: {
   model: Model
   models?: Model[]
@@ -41,17 +48,29 @@ export function Composer({
   onModelChange: (m: Model) => void | Promise<void>
   /** Re-fetch current selection + catalogs when the menu opens (live). */
   onRefreshModels?: () => void | Promise<void>
-  onSend: (text: string) => void
+  onSend: (text: string, opts?: { delivery?: "interject"; images?: { base64: string; mediaType: string }[] }) => void
+  onSearchFiles?: (query: string) => Promise<FileSearchItem[]>
   streaming: boolean
   onStop: () => void
   disabled?: boolean
+  queue?: QueueEntry[]
+  todos?: TodoSnapshot[]
+  cacheGuard?: { approxTokens: number; reason: string } | null
+  onCacheConfirm?: () => void
+  onCacheCancel?: () => void
 }) {
   const [value, setValue] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
   const [switchingId, setSwitchingId] = useState<string | null>(null)
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [images, setImages] = useState<{ base64: string; mediaType: string; name: string }[]>([])
+  const [mentionOpen, setMentionOpen] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState("")
+  const [mentionItems, setMentionItems] = useState<FileSearchItem[]>([])
+  const [mentionIndex, setMentionIndex] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
   const switchGen = useRef(0)
 
   const busy = switchingId !== null
@@ -72,12 +91,60 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
   }
 
-  const submit = () => {
+  const submit = (delivery?: "interject") => {
     const text = value.trim()
-    if (!text || streaming || disabled) return
-    onSend(text)
+    if ((!text && images.length === 0) || disabled) return
+    onSend(text, { delivery, images: images.map(({ base64, mediaType }) => ({ base64, mediaType })) })
     setValue("")
+    setImages([])
     if (ref.current) ref.current.style.height = "auto"
+  }
+
+  useEffect(() => {
+    if (!mentionOpen || !onSearchFiles) return
+    const timer = window.setTimeout(() => {
+      void onSearchFiles(mentionQuery).then((items) => {
+        setMentionItems(items)
+        setMentionIndex(0)
+      }).catch(() => setMentionItems([]))
+    }, 100)
+    return () => clearTimeout(timer)
+  }, [mentionOpen, mentionQuery, onSearchFiles])
+
+  const updateMentions = (next: string, cursor: number) => {
+    const before = next.slice(0, cursor)
+    const match = /(?:^|\s)@([^\s@]*)$/.exec(before)
+    setMentionOpen(!!match && !!onSearchFiles)
+    setMentionQuery(match?.[1] ?? "")
+  }
+
+  const insertMention = (item: FileSearchItem) => {
+    const el = ref.current
+    const cursor = el?.selectionStart ?? value.length
+    const before = value.slice(0, cursor)
+    const start = before.lastIndexOf("@")
+    const next = `${value.slice(0, start)}@${item.path} ${value.slice(cursor)}`
+    setValue(next)
+    setMentionOpen(false)
+    requestAnimationFrame(() => {
+      el?.focus()
+      const position = start + item.path.length + 2
+      el?.setSelectionRange(position, position)
+    })
+  }
+
+  const addImages = (files: FileList | null) => {
+    if (!files) return
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith("image/")) continue
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = String(reader.result)
+        const base64 = result.split(",")[1]
+        if (base64) setImages((old) => [...old, { base64, mediaType: file.type, name: file.name }])
+      }
+      reader.readAsDataURL(file)
+    }
   }
 
   const handleOpenChange = (open: boolean) => {
@@ -123,7 +190,18 @@ export function Composer({
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+      {(todos?.length ?? 0) > 0 && (
+        <details className="mb-2 rounded-xl border border-border bg-card/70 px-3 py-2 text-[12px]" open>
+          <summary className="cursor-pointer font-medium text-muted-foreground">Todo checklist · {todos!.filter((todo) => todo.status === "completed").length}/{todos!.length}</summary>
+          <div className="mt-2 grid gap-1">
+            {todos!.map((todo) => <div key={todo.id} className="flex gap-2"><span className={todo.status === "completed" ? "text-success" : todo.status === "in_progress" ? "text-primary" : "text-muted-foreground"}>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "•" : "○"}</span><span className={todo.status === "completed" ? "text-muted-foreground line-through" : ""}>{todo.activeForm ?? todo.content}</span></div>)}
+          </div>
+        </details>
+      )}
+      {(queue?.length ?? 0) > 0 && <div className="mb-2 flex flex-wrap gap-1.5">{queue!.map((entry, i) => <span key={`${entry.text}-${i}`} title={entry.text} className="max-w-full truncate rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[11px] text-primary">Queued · {entry.text}</span>)}</div>}
+      {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}
       <div className="rounded-[22px] border border-border bg-card/80 p-2 shadow-panel backdrop-blur-xl transition-colors focus-within:border-ring/60">
+        {images.length > 0 && <div className="flex flex-wrap gap-1 px-2 pt-1">{images.map((image, i) => <span key={`${image.name}-${i}`} className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px]"><File className="size-3" />{image.name}<button type="button" onClick={() => setImages((old) => old.filter((_, index) => index !== i))}><X className="size-3" /></button></span>)}</div>}
         <Textarea
           ref={ref}
           value={value}
@@ -138,23 +216,32 @@ export function Composer({
           onChange={(e) => {
             setValue(e.target.value)
             grow(e.target)
+            updateMentions(e.target.value, e.target.selectionStart)
           }}
           onKeyDown={(e) => {
+            if (mentionOpen) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setMentionIndex((old) => Math.max(0, Math.min(mentionItems.length - 1, old + (e.key === "ArrowDown" ? 1 : -1)))) }
+              else if ((e.key === "Enter" || e.key === "Tab") && mentionItems[mentionIndex]) { e.preventDefault(); insertMention(mentionItems[mentionIndex]!) }
+              else if (e.key === "Escape") { e.preventDefault(); setMentionOpen(false) }
+              return
+            }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault()
-              submit()
+              submit(e.altKey ? "interject" : undefined)
             }
           }}
         />
+        {mentionOpen && <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-popover shadow-panel">{mentionItems.length ? mentionItems.map((item, i) => <button type="button" key={item.path} onMouseDown={(e) => { e.preventDefault(); insertMention(item) }} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === mentionIndex && "bg-accent")}><File className="size-3 text-primary" /><span className="truncate">{item.path}</span><span className="ml-auto text-muted-foreground">{item.kind}</span></button>) : <div className="px-3 py-2 text-[12px] text-muted-foreground">No matching files</div>}</div>}
 
         <div className="flex items-center justify-between gap-2 pt-1">
           <div className="flex min-w-0 items-center gap-1">
             <Tooltip>
-              <TooltipTrigger render={<Button variant="ghost" size="icon-sm" />}>
+              <TooltipTrigger render={<Button variant="ghost" size="icon-sm" onClick={() => fileRef.current?.click()} />}>
                 <Paperclip />
               </TooltipTrigger>
               <TooltipPopup>Attach files</TooltipPopup>
             </Tooltip>
+            <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { addImages(e.target.files); e.currentTarget.value = "" }} />
 
             <DropdownMenu open={menuOpen} onOpenChange={handleOpenChange}>
               <DropdownMenuTrigger
@@ -258,7 +345,8 @@ export function Composer({
 
           <div className="flex shrink-0 items-center gap-2">
             <span className="hidden items-center gap-1 text-[11px] text-muted-foreground sm:flex">
-              <Kbd>⏎</Kbd> send
+              <Kbd>⏎</Kbd> {streaming ? "queue" : "send"}
+              {streaming && <><span>·</span><Kbd>⌥⏎</Kbd> interject</>}
               <Kbd>⇧⏎</Kbd> newline
             </span>
             {streaming ? (
@@ -268,8 +356,8 @@ export function Composer({
             ) : (
               <Button
                 size="icon"
-                onClick={submit}
-                disabled={!value.trim() || disabled}
+                onClick={() => submit()}
+                disabled={(!value.trim() && images.length === 0) || disabled}
                 aria-label="Send"
                 className="rounded-full"
               >

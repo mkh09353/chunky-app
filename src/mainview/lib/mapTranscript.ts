@@ -2,7 +2,7 @@
 import type { Message, MessageBlock, Project, Thread, ThreadStatus } from "./mock"
 import type { SessionSummary } from "./api"
 import { relativeTime, threadLabel, workspaceMark, workspaceName } from "./format"
-import type { Item, TranscriptState } from "./transcript"
+import type { Item, ThreadNode, TranscriptState } from "./transcript"
 import { isStreaming, mainItems } from "./transcript"
 
 function toolInputPreview(input: unknown): string {
@@ -147,6 +147,14 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   }
 
   return messages
+}
+
+/** Child nodes are deliberately kept separate from main messages so the view can
+ * render their recursive cards without making reducer state into presentation state. */
+export function childThreads(state: TranscriptState, parentId: string): ThreadNode[] {
+  return state.order
+    .map((id) => state.threads[id])
+    .filter((thread): thread is ThreadNode => !!thread && thread.parentId === parentId)
 }
 
 /** Extract fenced code blocks so Message.tsx can use CodeBlock. */
