@@ -1,6 +1,17 @@
-import { ArrowUp, Check, ChevronDown, Cpu, File, Loader2, Paperclip, Square, X } from "lucide-react"
+import {
+  ArrowUp,
+  Check,
+  ChevronDown,
+  Cpu,
+  File,
+  ListPlus,
+  Loader2,
+  Paperclip,
+  Square,
+  X,
+} from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { FileSearchItem, QueueEntry, TodoSnapshot } from "@chunky/protocol"
+import type { FileSearchItem } from "@chunky/protocol"
 import type { Model } from "~/lib/mock"
 import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
@@ -36,8 +47,7 @@ export function Composer({
   streaming,
   onStop,
   disabled = false,
-  queue,
-  todos,
+  contextMeter,
   cacheGuard,
   onCacheConfirm,
   onCacheCancel,
@@ -53,8 +63,8 @@ export function Composer({
   streaming: boolean
   onStop: () => void
   disabled?: boolean
-  queue?: QueueEntry[]
-  todos?: TodoSnapshot[]
+  /** Optional context-window meter rendered in the composer footer. */
+  contextMeter?: React.ReactNode
   cacheGuard?: { approxTokens: number; reason: string } | null
   onCacheConfirm?: () => void
   onCacheCancel?: () => void
@@ -93,6 +103,8 @@ export function Composer({
 
   const submit = (delivery?: "interject") => {
     const text = value.trim()
+    // While the agent is running, submitting ENQUEUES (App picks delivery); the
+    // parent decides queue-vs-send from `streaming`, so we never hard-block here.
     if ((!text && images.length === 0) || disabled) return
     onSend(text, { delivery, images: images.map(({ base64, mediaType }) => ({ base64, mediaType })) })
     setValue("")
@@ -190,15 +202,8 @@ export function Composer({
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-4">
-      {(todos?.length ?? 0) > 0 && (
-        <details className="mb-2 rounded-xl border border-border bg-card/70 px-3 py-2 text-[12px]" open>
-          <summary className="cursor-pointer font-medium text-muted-foreground">Todo checklist · {todos!.filter((todo) => todo.status === "completed").length}/{todos!.length}</summary>
-          <div className="mt-2 grid gap-1">
-            {todos!.map((todo) => <div key={todo.id} className="flex gap-2"><span className={todo.status === "completed" ? "text-success" : todo.status === "in_progress" ? "text-primary" : "text-muted-foreground"}>{todo.status === "completed" ? "✓" : todo.status === "in_progress" ? "•" : "○"}</span><span className={todo.status === "completed" ? "text-muted-foreground line-through" : ""}>{todo.activeForm ?? todo.content}</span></div>)}
-          </div>
-        </details>
-      )}
-      {(queue?.length ?? 0) > 0 && <div className="mb-2 flex flex-wrap gap-1.5">{queue!.map((entry, i) => <span key={`${entry.text}-${i}`} title={entry.text} className="max-w-full truncate rounded-full border border-primary/20 bg-primary/10 px-2.5 py-1 text-[11px] text-primary">Queued · {entry.text}</span>)}</div>}
+      {/* Todos + queued messages render above the composer via TodosPanel /
+          QueueChips (see App.tsx) so both surfaces stay in one place. */}
       {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}
       <div className="rounded-[22px] border border-border bg-card/80 p-2 shadow-panel backdrop-blur-xl transition-colors focus-within:border-ring/60">
         {images.length > 0 && <div className="flex flex-wrap gap-1 px-2 pt-1">{images.map((image, i) => <span key={`${image.name}-${i}`} className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px]"><File className="size-3" />{image.name}<button type="button" onClick={() => setImages((old) => old.filter((_, index) => index !== i))}><X className="size-3" /></button></span>)}</div>}
@@ -344,26 +349,28 @@ export function Composer({
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
+            {contextMeter}
             <span className="hidden items-center gap-1 text-[11px] text-muted-foreground sm:flex">
               <Kbd>⏎</Kbd> {streaming ? "queue" : "send"}
               {streaming && <><span>·</span><Kbd>⌥⏎</Kbd> interject</>}
               <Kbd>⇧⏎</Kbd> newline
             </span>
-            {streaming ? (
+            {streaming && (
               <Button size="icon" variant="secondary" onClick={onStop} aria-label="Stop">
                 <Square className="size-3.5 fill-current" />
               </Button>
-            ) : (
-              <Button
-                size="icon"
-                onClick={() => submit()}
-                disabled={(!value.trim() && images.length === 0) || disabled}
-                aria-label="Send"
-                className="rounded-full"
-              >
-                <ArrowUp />
-              </Button>
             )}
+            <Button
+              size="icon"
+              onClick={() => submit()}
+              disabled={(!value.trim() && images.length === 0) || disabled}
+              aria-label={streaming ? "Queue message" : "Send"}
+              variant={streaming ? "secondary" : "default"}
+              className="rounded-full"
+              title={streaming ? "Queue message (agent is running)" : "Send"}
+            >
+              {streaming ? <ListPlus /> : <ArrowUp />}
+            </Button>
           </div>
         </div>
       </div>

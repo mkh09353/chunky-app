@@ -21,14 +21,49 @@ export interface ChangedFiles {
   files: ChangedFile[]
 }
 
+/** One line of a structured diff derived from tool I/O. */
+export interface DiffLine {
+  kind: "add" | "del" | "context"
+  text: string
+}
+
+/** A structured, per-file diff extracted from an edit/write tool call. */
+export interface FileDiff {
+  path?: string
+  added: number
+  removed: number
+  lines: DiffLine[]
+  truncated?: boolean
+}
+
+/** Rich per-tool-call render data carried through to Message.tsx. */
+export interface ToolBlockData {
+  id: string
+  name: string
+  /** One-line argument preview derived from `input`. */
+  inputPreview: string
+  /** Pretty-printed input JSON (2-space), truncated. */
+  inputJson: string
+  /** Tool output (truncated) once done. */
+  output?: string
+  /** Streaming progress text while running (truncated). */
+  progress?: string
+  done: boolean
+  ok?: boolean
+  /** Structured diff when this is an edit/write tool, else null/undefined. */
+  diff?: FileDiff | null
+}
+
 export interface MessageBlock {
-  type: "text" | "code" | "worked" | "files"
+  type: "text" | "code" | "worked" | "files" | "tool" | "thinking"
   content: string
   lang?: string
-  /** worked block: the tool/step lines revealed when expanded. */
+  /** worked / thinking block: the tool/step lines revealed when expanded. */
   steps?: string[]
   /** files block: the changed-files summary. */
   files?: ChangedFiles
+  /** tool block: rich per-tool-call render data. */
+  tool?: ToolBlockData
 }
 
 export interface Message {

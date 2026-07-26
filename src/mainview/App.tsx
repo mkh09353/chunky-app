@@ -6,6 +6,9 @@ import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, Dia
 import { Composer } from "./components/Composer"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
 import { needsOnboarding, OnboardingWizard } from "./components/settings/OnboardingWizard"
+import { ContextMeter } from "./components/ContextMeter"
+import { QueueChips } from "./components/QueueChips"
+import { TodosPanel } from "./components/TodosPanel"
 import { Sidebar } from "./components/Sidebar"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -52,6 +55,7 @@ import {
   streamingMessageId,
 } from "./lib/mapTranscript"
 import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
+import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
 import { initialState, isStreaming, reduce, type TranscriptState } from "./lib/transcript"
 
@@ -156,7 +160,7 @@ export function App() {
   const [repos, setRepos] = useState<Repo[]>([])
   const [activeRepoId, setActiveRepoId] = useState<string | null>(null)
   const [addingRepo, setAddingRepo] = useState(false)
-  const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: "interject" } | null>(null)
+  const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: MessageDelivery } | null>(null)
   const [foldThreads, setFoldThreads] = useState(false)
   const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
   const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | null>(null)
@@ -260,6 +264,21 @@ export function App() {
     () => (live ? streamingMessageId(activeThread.messages, streaming) : demoStreamingId),
     [live, activeThread.messages, streaming, demoStreamingId],
   )
+
+  // Active model's context limit for the context-window meter (undefined in demo).
+  const contextLimit = useMemo(() => {
+    if (!live) return undefined
+    const row = modelRows.find(
+      (r) => r.provider === modelSel?.provider && r.model.id === modelSel?.model,
+    )
+    return row?.model.contextLimit
+  }, [live, modelRows, modelSel])
+
+  // Session-scoped rich data lives on TranscriptState (auto-resets on switch).
+  const liveTodos = live ? transcript.todos : []
+  const liveUsage = live ? transcript.usage : null
+  const liveCompacted = live ? transcript.compacted : 0
+  const liveQueue = live ? transcript.queue.entries : []
 
   // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
   const refreshSessions = useCallback(
@@ -599,7 +618,13 @@ export function App() {
   )
 
   const handleSend = useCallback(
-    async (text: string, opts: { delivery?: "interject"; images?: { base64: string; mediaType: string }[] } = {}) => {
+    async (
+      text: string,
+      opts: {
+        delivery?: MessageDelivery
+        images?: { base64: string; mediaType: string }[]
+      } = {},
+    ) => {
       setSendError(null)
       if (!live) {
         // Minimal demo echo so offline mode still feels alive.
@@ -646,6 +671,7 @@ export function App() {
       try {
         const blocked = await sendMessage(config.baseUrl, sessionId, text, opts)
         if (blocked?.blocked === "cache-cold") {
+          // Explicit confirm bar in the Composer (no silent force-resend).
           setCacheGuard({ text, images: opts.images ?? [], approxTokens: blocked.warning.approxTokens, reason: blocked.warning.reason, delivery: opts.delivery })
         }
         // Refresh session list so title/activity update soon.
@@ -957,30 +983,40 @@ export function App() {
               transcript={live ? transcript : undefined}
               modelName={uiModel.name}
               foldAll={foldThreads}
+              compacted={liveCompacted}
             />
             {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
-            <Composer
-              model={uiModel}
-              models={uiModels}
-              onModelChange={handleModelChange}
-              onRefreshModels={live ? refreshModels : undefined}
-              onSend={(t, opts) => void handleSend(t, opts)}
-              onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
-              streaming={streaming}
-              onStop={handleStop}
-              queue={transcript.queue.entries}
-              todos={transcript.todos}
-              cacheGuard={cacheGuard}
-              onCacheConfirm={() => void confirmCacheGuard()}
-              onCacheCancel={() => setCacheGuard(null)}
-              disabled={
-                live &&
-                (connectionState === "booting" ||
-                  connectionState === "offline" ||
-                  !sessionId ||
-                  sending)
-              }
-            />
+            <div className="flex flex-col gap-2">
+              <TodosPanel todos={liveTodos} />
+              <QueueChips entries={liveQueue} />
+              <Composer
+                model={uiModel}
+                models={uiModels}
+                onModelChange={handleModelChange}
+                onRefreshModels={live ? refreshModels : undefined}
+                // While the agent is running, plain ⏎ enqueues; ⌥⏎ interjects.
+                onSend={(t, opts) =>
+                  void handleSend(t, {
+                    ...opts,
+                    delivery: opts?.delivery ?? (streaming ? "queue" : "auto"),
+                  })
+                }
+                onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
+                streaming={streaming}
+                onStop={handleStop}
+                contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
+                cacheGuard={cacheGuard}
+                onCacheConfirm={() => void confirmCacheGuard()}
+                onCacheCancel={() => setCacheGuard(null)}
+                disabled={
+                  live &&
+                  (connectionState === "booting" ||
+                    connectionState === "offline" ||
+                    !sessionId ||
+                    sending)
+                }
+              />
+            </div>
           </section>
         </div>
 

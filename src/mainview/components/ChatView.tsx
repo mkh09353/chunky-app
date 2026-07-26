@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   GitPullRequest,
+  Info,
   MoreHorizontal,
   PanelRightOpen,
   Share2,
@@ -119,6 +120,7 @@ export function ChatView({
   transcript,
   modelName,
   foldAll = false,
+  compacted = 0,
 }: {
   thread: Thread
   project?: Project
@@ -128,6 +130,7 @@ export function ChatView({
   transcript?: TranscriptState
   modelName?: string
   foldAll?: boolean
+  compacted?: number
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -160,6 +163,12 @@ export function ChatView({
           {transcript && childThreads(transcript, "main").map((node) => (
             <ThreadCard key={node.id} nodeId={node.id} transcript={transcript} modelName={modelName} foldAll={foldAll} />
           ))}
+          {compacted > 0 && (
+            <div className="mx-auto flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+              <Info className="size-3" />
+              Context compacted — older turns summarized{compacted > 1 ? ` · ×${compacted}` : ""}
+            </div>
+          )}
         </div>
       </ScrollArea>
     </div>

@@ -1,6 +1,13 @@
 // Reduce AgentEvents into a thread tree the chat UI can render.
 // Ported from the reference app — tolerate unknown / nested / legacy variants.
-import type { AgentEvent, GoalStatus, MessageEndReason, QueueEntry, TodoSnapshot } from "@chunky/protocol"
+import type {
+  AgentEvent,
+  GoalStatus,
+  MessageEndReason,
+  QueueEntry,
+  TodoSnapshot,
+  UsageDelta,
+} from "@chunky/protocol"
 
 export const MAIN = "main"
 
@@ -49,8 +56,14 @@ export interface TranscriptState {
   order: string[]
   status: "idle" | "running"
   queue: { entries: QueueEntry[]; running: boolean }
+  /** Live plan/checklist for this session (todos.update). */
   todos: TodoSnapshot[]
+  /** Background tasks / monitors currently running (background.changed). */
   background: { tasks: number; monitors: number }
+  /** Latest provider usage snapshot (usage.update); null until first turn. */
+  usage: UsageDelta | null
+  /** How many times older context was summarized (context.compacted). */
+  compacted: number
 }
 
 export const initialState: TranscriptState = {
@@ -62,6 +75,8 @@ export const initialState: TranscriptState = {
   queue: { entries: [], running: false },
   todos: [],
   background: { tasks: 0, monitors: 0 },
+  usage: null,
+  compacted: 0,
 }
 
 const PROGRESS_MAX_BYTES = 64 * 1024
@@ -206,12 +221,18 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
       return { ...state, background: { tasks: ev.tasks, monitors: ev.monitors } }
 
     case "todos.update":
+      // Live plan/checklist snapshot for the Todos panel.
       return { ...state, todos: ev.todos }
 
     case "context.compacted":
-      return updateThreadItems(state, MAIN, (items) => [
+      // Older model context replaced by a summary: drop an inline notice where
+      // it happened AND bump the counter the chat surface shows as a chip.
+      return updateThreadItems({ ...state, compacted: state.compacted + 1 }, MAIN, (items) => [
         ...items,
-        { kind: "notice", text: "Earlier context was compacted into a summary. The full transcript remains available." },
+        {
+          kind: "notice",
+          text: "Earlier context was compacted into a summary. The full transcript remains available.",
+        },
       ])
 
     case "cache.warning": {
@@ -313,7 +334,8 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
       ].filter(Boolean)
       const summary = parts.length ? parts.join(" · ") : "usage"
       const threadId = ev.threadId || MAIN
-      return updateThreadItems(state, threadId, (items) => [
+      // Keep the LAST usage snapshot on state for the context-window meter.
+      return updateThreadItems({ ...state, usage: ev.usage }, threadId, (items) => [
         ...items,
         { kind: "usage", summary },
       ])
