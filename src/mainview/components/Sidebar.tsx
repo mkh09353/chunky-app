@@ -1,6 +1,17 @@
-import { Check, GitBranch, Loader2, PenSquare, Search, Settings } from "lucide-react"
+import {
+  Archive,
+  ArchiveRestore,
+  Check,
+  ChevronDown,
+  GitBranch,
+  Loader2,
+  PenSquare,
+  Search,
+  Settings,
+} from "lucide-react"
 import { useMemo, useState } from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
+import { useArchivedSessions } from "~/lib/archivedSessions"
 import { cn } from "~/lib/cn"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
@@ -40,20 +51,26 @@ function ThreadRow({
   active,
   onSelect,
   onRename,
+  onToggleArchive,
+  archived = false,
 }: {
   thread: Thread
   project: Project | undefined
   active: boolean
   onSelect: () => void
   onRename?: () => void
+  /** Local-only archive toggle; omitted → no archive affordance on the row. */
+  onToggleArchive?: () => void
+  archived?: boolean
 }) {
   return (
+    <div className="group relative">
     <button
       type="button"
       onClick={onSelect}
       onDoubleClick={() => onRename?.()}
       className={cn(
-        "group relative flex w-full cursor-pointer flex-col gap-1 rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+        "relative flex w-full cursor-pointer flex-col gap-1 rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
         active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
       )}
     >
@@ -65,7 +82,12 @@ function ThreadRow({
         <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
           {project ? `${project.owner}/${project.name}` : "unknown"}
         </span>
-        <span className="ml-auto flex shrink-0 items-center">
+        <span
+          className={cn(
+            "ml-auto flex shrink-0 items-center transition-opacity",
+            onToggleArchive && "group-hover:opacity-0",
+          )}
+        >
           <StatusPill status={thread.status} />
         </span>
       </div>
@@ -87,6 +109,27 @@ function ThreadRow({
         )}
       </div>
     </button>
+    {onToggleArchive && (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              aria-label={archived ? `Unarchive ${thread.title}` : `Archive ${thread.title}`}
+              onClick={(event) => {
+                event.stopPropagation()
+                onToggleArchive()
+              }}
+              className="pointer-events-none absolute top-1.5 right-2 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
+            />
+          }
+        >
+          {archived ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
+        </TooltipTrigger>
+        <TooltipPopup>{archived ? "Unarchive" : "Archive (this device only)"}</TooltipPopup>
+      </Tooltip>
+    )}
+    </div>
   )
 }
 
@@ -114,12 +157,16 @@ export function Sidebar({
   onRenameThread?: (id: string) => void
 }) {
   const [query, setQuery] = useState("")
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  const { archived: archivedIds, toggle: toggleArchived } = useArchivedSessions()
   const projectOf = useMemo(
     () => new Map(projects.map((p) => [p.id, p])),
     [projects],
   )
 
-  const { active, settled } = useMemo(() => {
+  // Archiving is a local view filter that composes with search: the archived
+  // section shows only archived threads that also match the query.
+  const { active, settled, archived } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const match = (t: Thread) => {
       if (!q) return true
@@ -131,11 +178,13 @@ export function Sidebar({
       )
     }
     const list = threads.filter(match)
+    const visible = list.filter((t) => !archivedIds.has(t.id))
     return {
-      active: list.filter((t) => t.status.kind !== "done"),
-      settled: list.filter((t) => t.status.kind === "done"),
+      active: visible.filter((t) => t.status.kind !== "done"),
+      settled: visible.filter((t) => t.status.kind === "done"),
+      archived: list.filter((t) => archivedIds.has(t.id)),
     }
-  }, [threads, query, projectOf])
+  }, [threads, query, projectOf, archivedIds])
 
   return (
     <aside className="relative flex h-full w-72 shrink-0 flex-col overflow-hidden bg-transparent text-sidebar-foreground">
@@ -204,6 +253,7 @@ export function Sidebar({
               active={t.id === activeThreadId}
               onSelect={() => onSelectThread(t.id)}
               onRename={() => onRenameThread?.(t.id)}
+              onToggleArchive={() => toggleArchived(t.id)}
             />
           ))}
         </div>
@@ -228,6 +278,7 @@ export function Sidebar({
                   active={t.id === activeThreadId}
                   onSelect={() => onSelectThread(t.id)}
                   onRename={() => onRenameThread?.(t.id)}
+                  onToggleArchive={() => toggleArchived(t.id)}
                 />
               ))}
             </div>
@@ -240,8 +291,51 @@ export function Sidebar({
               ? `No threads match “${query}”.`
               : threads.length === 0
                 ? "No sessions yet — start a new thread."
-                : "No threads match."}
+                : archived.length > 0
+                  ? "All threads are archived."
+                  : "No threads match."}
           </p>
+        )}
+
+        {archived.length > 0 && (
+          <>
+            <button
+              type="button"
+              onClick={() => setArchivedOpen((open) => !open)}
+              aria-expanded={archivedOpen}
+              className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 pt-4 pb-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+            >
+              <ChevronDown
+                className={cn(
+                  "size-3 text-muted-foreground/60 transition-transform",
+                  !archivedOpen && "-rotate-90",
+                )}
+              />
+              <span className="font-medium text-[10.5px] text-muted-foreground/60 uppercase tracking-[0.08em]">
+                Archived
+              </span>
+              <span className="h-px flex-1 bg-border/60" />
+              <span className="text-[10.5px] text-muted-foreground/40 tabular-nums">
+                {archived.length}
+              </span>
+            </button>
+            {archivedOpen && (
+              <div className="flex flex-col gap-0.5">
+                {archived.map((t) => (
+                  <ThreadRow
+                    key={t.id}
+                    thread={t}
+                    project={projectOf.get(t.projectId)}
+                    active={t.id === activeThreadId}
+                    onSelect={() => onSelectThread(t.id)}
+                    onRename={() => onRenameThread?.(t.id)}
+                    onToggleArchive={() => toggleArchived(t.id)}
+                    archived
+                  />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </ScrollArea>
 

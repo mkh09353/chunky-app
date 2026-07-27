@@ -9,6 +9,7 @@ import {
   searchDirectories,
 } from "./dirSearch"
 import { createTerminalManager } from "./terminal"
+import * as git from "./git"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -237,6 +238,21 @@ rpc = createRPC({
     terminalWrite: async (params: unknown) => terminals.write(params),
     terminalResize: async (params: unknown) => terminals.resize(params),
     terminalClose: async (params: unknown) => terminals.close(params),
+
+    gitStatus: async (params: unknown) => git.gitStatus(params ?? {}),
+    gitBranches: async (params: unknown) => git.gitBranches(params ?? {}),
+    gitStage: async (params: unknown) => git.gitStage(params ?? {}),
+    gitUnstage: async (params: unknown) => git.gitUnstage(params ?? {}),
+    gitCommit: async (params: unknown) => git.gitCommit(params ?? {}),
+    gitSwitch: async (params: unknown) => git.gitSwitch(params ?? {}),
+    gitPull: async (params: unknown) => git.gitPull(params ?? {}),
+    gitPush: async (params: unknown) => git.gitPush(params ?? {}),
+    scmInfo: async (params: unknown) => git.scmInfo(params ?? {}),
+    scmCreatePr: async (params: unknown) => git.scmCreatePr(params ?? {}),
+    scmListPrs: async (params: unknown) => git.scmListPrs(params ?? {}),
+    scmCheckoutPr: async (params: unknown) => git.scmCheckoutPr(params ?? {}),
+    scmClone: async (params: unknown) => git.scmClone(params ?? {}),
+    scmPublish: async (params: unknown) => git.scmPublish(params ?? {}),
   },
 })
 

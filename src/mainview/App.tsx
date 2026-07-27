@@ -10,6 +10,7 @@ import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
 import { TodosPanel } from "./components/TodosPanel"
 import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
+import { GitToolbar } from "./components/GitPanel"
 import { Sidebar } from "./components/Sidebar"
 import { BrowserPane } from "./components/BrowserPane"
 import { Button } from "./components/ui/button"
@@ -325,6 +326,14 @@ export function App() {
     )
     return row?.model.contextLimit
   }, [live, modelRows, modelSel])
+
+  // Working directory for the git panel: the active session's own workspace
+  // wins, then the open repo, then the server workspace.
+  const gitCwd = useMemo(() => {
+    if (!live) return undefined
+    const sessionWorkspace = sessions.find((s) => s.sessionId === sessionId)?.workspace
+    return sessionWorkspace || activeRepo?.path || workspace || config?.workspace || undefined
+  }, [live, sessions, sessionId, activeRepo, workspace, config])
 
   // Session-scoped rich data lives on TranscriptState (auto-resets on switch).
   const liveTodos = live ? transcript.todos : []
@@ -1348,7 +1357,7 @@ export function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
             thread={activeThread}
-            headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
+            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
