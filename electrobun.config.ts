@@ -3,6 +3,10 @@ import { join } from "node:path"
 import type { ElectrobunConfig } from "electrobun/bun"
 
 const isRelease = process.argv[2] === "build"
+const isStableRelease = process.argv.includes("--env=stable")
+// Signing credentials exist only in the tag-release workflow. Keeping this
+// false locally makes `bun run build` a useful unsigned release-build check.
+const signAndNotarize = isStableRelease && process.env.GITHUB_ACTIONS === "true"
 // Keep desktop bundle metadata in lockstep with the package/release tag.
 const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
   version: string
@@ -59,10 +63,10 @@ export default {
     watchIgnore: ["dist/**"],
     mac: {
       bundleCEF: false,
-      // When Apple Developer credentials are available, enable codesign/notarize
-      // here and configure the required signing identity and notarization secrets in CI.
-      // codesign: true,
-      // notarize: true,
+      // Electrobun's default hardened-runtime entitlements include the Bun/JIT
+      // allowances it needs, so no project-specific entitlements file is needed.
+      codesign: signAndNotarize,
+      notarize: signAndNotarize,
     },
     linux: { bundleCEF: false },
     win: { bundleCEF: false },

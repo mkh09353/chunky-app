@@ -34,9 +34,9 @@ macOS on Apple Silicon (arm64) is currently the supported release target:
 curl -fsSL https://raw.githubusercontent.com/mkh09353/chunky-app/main/scripts/install.sh | bash
 ```
 
-The installer downloads the latest release DMG, installs `Chunky.app` in
-`/Applications`, and removes its quarantine attribute because current builds
-are unsigned. To install manually, download
+The installer downloads the latest release DMG and installs `Chunky.app` in
+`/Applications`. It preserves quarantine metadata for signed releases and only
+removes it as a fallback for legacy unsigned releases. To install manually, download
 [`stable-macos-arm64-Chunky.dmg`](https://github.com/mkh09353/chunky-app/releases/latest/download/stable-macos-arm64-Chunky.dmg),
 open it, and copy `Chunky.app` to `/Applications`.
 
@@ -54,10 +54,43 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The release workflow verifies the tag matches `package.json`, builds on macOS
-arm64, and publishes every Electrobun artifact from `artifacts/` to the GitHub
-Release. The updater polls
+The release workflow verifies the tag matches `package.json`, runs the stable
+macOS arm64 build, and publishes every Electrobun artifact from `artifacts/` to
+the GitHub Release. The updater polls
 `https://github.com/mkh09353/chunky-app/releases/latest/download/stable-macos-arm64-update.json`.
+
+### macOS signing and notarization setup
+
+Tag releases sign and notarize with `xcrun notarytool`; local `bun run build`
+remains unsigned and does not require Apple credentials. Before creating the
+first release, create a **Developer ID Application** certificate in the Apple
+Developer portal for the team, export it from Keychain Access as a passworded
+`.p12`, and base64 encode it without line wrapping:
+
+```sh
+base64 < developer-id-application.p12 | tr -d '\n'
+```
+
+Create an app-specific password for the Apple ID used to submit notarization
+(`appleid.apple.com`), and record that Apple Developer Team ID. Add these
+repository secrets with these exact names and values:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_P12_BASE64` | Single-line base64 of the exported Developer ID Application `.p12`. |
+| `APPLE_CERTIFICATE_PASSWORD` | Password assigned while exporting that `.p12`. |
+| `APPLE_KEYCHAIN_PASSWORD` | A new random password used only for the throwaway CI keychain. |
+| `ELECTROBUN_DEVELOPER_ID` | Exact signing identity shown by `security find-identity`, e.g. `Developer ID Application: Your Name (TEAMID)`. |
+| `ELECTROBUN_APPLEID` | Apple ID email address authorized for notarization. |
+| `ELECTROBUN_APPLEIDPASS` | App-specific password created for that Apple ID. |
+| `ELECTROBUN_TEAMID` | Ten-character Apple Developer Team ID. |
+
+The workflow imports the certificate into a temporary keychain, grants
+`codesign` access, then deletes the keychain in an `always()` cleanup step.
+Electrobun signs the app bundles and DMG with hardened runtime, submits each
+for notarization, and staples the results. Its built-in default entitlements
+already allow Bun's JIT, unsigned executable memory, and dynamic library
+loading, so this app does not add an entitlements file.
 
 ## Server connection (Phase 0)
 

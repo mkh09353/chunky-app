@@ -40,9 +40,14 @@ sudo -v
 sudo rm -rf /Applications/Chunky.app
 sudo ditto "$mount_point/Chunky.app" /Applications/Chunky.app
 
-# Current release builds are unsigned. Removing the download quarantine lets
-# macOS launch the installed app; this can be removed after notarized releases.
-sudo xattr -dr com.apple.quarantine /Applications/Chunky.app || true
+if codesign --verify --deep --strict /Applications/Chunky.app >/dev/null 2>&1; then
+  echo "Verified Chunky's code signature; leaving macOS quarantine metadata intact."
+else
+  # Keep compatibility with older unsigned releases. This is harmless when no
+  # quarantine attribute exists, and can be removed after old releases expire.
+  echo "No valid code signature found; removing quarantine for a legacy unsigned build."
+  sudo xattr -dr com.apple.quarantine /Applications/Chunky.app || true
+fi
 
 echo "Chunky installed at /Applications/Chunky.app"
 echo "Open it from Applications to get started."

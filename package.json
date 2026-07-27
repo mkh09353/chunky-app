@@ -8,7 +8,7 @@
     "dev": "concurrently -k -n vite,electrobun -c magenta,cyan \"vite --port 5173 --strictPort\" \"electrobun dev\"",
     "dev:web": "vite --port 5173 --strictPort",
     "build:web": "vite build",
-    "build": "vite build && electrobun build",
+    "build": "vite build && electrobun build --env=stable",
     "preview": "vite preview --port 5173 --strictPort",
     "typecheck": "tsgo --noEmit",
     "typecheck:tsc": "tsc --noEmit"
