@@ -8,8 +8,18 @@ export function nativeRpcAvailable(): boolean {
   )
 }
 
+export type RpcMessageListener = (payload: unknown) => void
+
+/**
+ * Loosely-typed view of the electrobun RPC object. `request` is request/response;
+ * `send` + `addMessageListener` are the fire-and-forget message channel used for
+ * streaming (terminal output, etc.).
+ */
 export type RpcClient = {
   request?: Record<string, (...a: unknown[]) => Promise<unknown>>
+  send?: Record<string, (...a: unknown[]) => void>
+  addMessageListener?: (message: string, listener: RpcMessageListener) => void
+  removeMessageListener?: (message: string, listener: RpcMessageListener) => void
 }
 
 let rpcReady: Promise<RpcClient | null> | null = null

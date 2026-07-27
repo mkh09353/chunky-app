@@ -9,6 +9,7 @@ import { needsOnboarding, OnboardingWizard } from "./components/settings/Onboard
 import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
 import { TodosPanel } from "./components/TodosPanel"
+import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
 import { Sidebar } from "./components/Sidebar"
 import { BrowserPane } from "./components/BrowserPane"
 import { Button } from "./components/ui/button"
@@ -185,6 +186,7 @@ export function App() {
   const [addingRepo, setAddingRepo] = useState(false)
   const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: MessageDelivery } | null>(null)
   const [foldThreads, setFoldThreads] = useState(false)
+  const [terminalsOpen, setTerminalsOpen] = useState(loadTerminalsOpen)
   const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
   const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | "incognito" | null>(null)
   const [incognitoModes, setIncognitoModes] = useState<SavedMode[]>([])
@@ -1188,6 +1190,7 @@ export function App() {
     ...sessions.map((session) => ({ id: `session:${session.sessionId}`, label: `Switch session: ${session.title || session.sessionId.slice(0, 8)}`, group: "Sessions" })),
     ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
     ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it", "Usage & scoreboard"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
+    { id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" },
     { id: "theme", label: "Toggle theme", group: "Appearance" },
     { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
     { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
@@ -1197,6 +1200,7 @@ export function App() {
   const runAction = useCallback(
     (a: PaletteAction) => {
       if (a.id === "new") void handleNewThread()
+      else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
       else if (a.id === "browser") setBrowserOpen((open) => !open)
       else if (a.id === "settings") setSettingsOpen(true)
@@ -1225,6 +1229,10 @@ export function App() {
       } else if (meta && e.key.toLowerCase() === "n") {
         e.preventDefault()
         void handleNewThread()
+      } else if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "`" || e.code === "Backquote")) {
+        // Ctrl+` toggles the terminal drawer (Cmd+T is taken by thread folding).
+        e.preventDefault()
+        setTerminalsOpen((value) => !value)
       } else if (meta && e.key.toLowerCase() === "t") {
         e.preventDefault()
         setFoldThreads((value) => !value)
@@ -1350,6 +1358,8 @@ export function App() {
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
             onToggleBrowser={() => setBrowserOpen((open) => !open)}
+            onToggleTerminal={() => setTerminalsOpen((value) => !value)}
+            terminalOpen={terminalsOpen}
           />
 
           <section className="content-panel flex min-h-0 min-w-0 flex-1">
@@ -1365,6 +1375,12 @@ export function App() {
                 compacted={liveCompacted}
               />
               {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
+              <TerminalDrawer
+                open={terminalsOpen}
+                onOpenChange={setTerminalsOpen}
+                cwd={activeRepo?.path || workspace || config?.workspace || undefined}
+                resolvedTheme={resolved}
+              />
               <div className="flex flex-col gap-2">
                 <TodosPanel todos={liveTodos} />
                 <QueueChips entries={liveQueue} />

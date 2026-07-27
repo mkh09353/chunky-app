@@ -6,6 +6,7 @@ import {
   PanelRightOpen,
   Share2,
   Sparkles,
+  SquareTerminal,
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import type { Repo } from "~/lib/api"
@@ -22,6 +23,7 @@ import { RepoTabs } from "./RepoTabs"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
+import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
 import type { TranscriptState } from "~/lib/transcript"
 
@@ -37,6 +39,8 @@ export function ChatTopBar({
   reposDisabled = false,
   headerRight,
   onToggleBrowser,
+  onToggleTerminal,
+  terminalOpen = false,
   onRename, onFork, onRewind, onGoal, onShip, onStats,
 }: {
   thread: Thread
@@ -50,6 +54,9 @@ export function ChatTopBar({
   reposDisabled?: boolean
   headerRight?: React.ReactNode
   onToggleBrowser?: () => void
+  /** Bottom terminal drawer toggle; omitted → the button is hidden. */
+  onToggleTerminal?: () => void
+  terminalOpen?: boolean
   onRename?: () => void; onFork?: () => void; onRewind?: () => void; onGoal?: () => void; onShip?: () => void; onStats?: () => void
 }) {
   const showRepos =
@@ -83,6 +90,24 @@ export function ChatTopBar({
         </div>
 
         {headerRight}
+        {onToggleTerminal && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className={cn("no-drag", terminalOpen && "bg-accent text-foreground")}
+                  onClick={onToggleTerminal}
+                  aria-label="Toggle terminal drawer"
+                />
+              }
+            >
+              <SquareTerminal />
+            </TooltipTrigger>
+            <TooltipPopup>Toggle terminal (Ctrl+`)</TooltipPopup>
+          </Tooltip>
+        )}
         <Tooltip>
           <TooltipTrigger render={<Button variant="ghost" size="icon-sm" />}>
             <Share2 />
