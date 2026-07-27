@@ -26,6 +26,39 @@ bun run dev        # vite (HMR) + electrobun window
 First `electrobun dev` downloads the platform core (dist-macos-arm64) — the
 very first invocation may exit after downloading; just run it again.
 
+## Install
+
+macOS on Apple Silicon (arm64) is currently the supported release target:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mkh09353/chunky-app/main/scripts/install.sh | bash
+```
+
+The installer downloads the latest release DMG, installs `Chunky.app` in
+`/Applications`, and removes its quarantine attribute because current builds
+are unsigned. To install manually, download
+[`stable-macos-arm64-Chunky.dmg`](https://github.com/mkh09353/chunky-app/releases/latest/download/stable-macos-arm64-Chunky.dmg),
+open it, and copy `Chunky.app` to `/Applications`.
+
+## Releases
+
+Chunky checks GitHub Releases for updates shortly after launch and from
+**Chunky → Check for Updates…**. Available updates download in the background
+and are installed after confirmation.
+
+To cut a release, update the `version` in `package.json`, then create and push
+the matching tag:
+
+```sh
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+The release workflow verifies the tag matches `package.json`, builds on macOS
+arm64, and publishes every Electrobun artifact from `artifacts/` to the GitHub
+Release. The updater polls
+`https://github.com/mkh09353/chunky-app/releases/latest/download/stable-macos-arm64-update.json`.
+
 ## Server connection (Phase 0)
 
 | Mode | Base URL | Auth token |

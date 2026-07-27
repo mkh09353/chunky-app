@@ -1,4 +1,4 @@
-import { BrowserWindow, ApplicationMenu, createRPC, Utils } from "electrobun/bun"
+import { BrowserWindow, ApplicationMenu, createRPC, Updater, Utils } from "electrobun/bun"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -53,6 +53,70 @@ const config = {
 
 const extraRoots = [parentRoot(workspace)].filter((p): p is string => !!p)
 
+let updateInProgress = false
+
+/** Check, download, and offer to restart for an Electrobun release update. */
+async function checkForUpdates({ interactive = false } = {}): Promise<void> {
+  if (updateInProgress) return
+
+  try {
+    // Development bundles deliberately have no update endpoint.
+    if ((await Updater.localInfo.channel()) === "dev") {
+      if (interactive) {
+        await Utils.showMessageBox({
+          type: "info",
+          title: "Check for Updates",
+          message: "Updates are unavailable in development builds.",
+        })
+      }
+      return
+    }
+
+    updateInProgress = true
+    const update = await Updater.checkForUpdate()
+    if (!update.updateAvailable) {
+      if (interactive) {
+        await Utils.showMessageBox({
+          type: "info",
+          title: "Check for Updates",
+          message: "Chunky is up to date.",
+        })
+      }
+      if (update.error) console.warn("[chunky] update check failed:", update.error)
+      return
+    }
+
+    await Updater.downloadUpdate()
+    const downloaded = Updater.updateInfo()
+    if (!downloaded?.updateReady) {
+      console.warn("[chunky] update download did not complete:", downloaded?.error || "unknown error")
+      return
+    }
+
+    const { response } = await Utils.showMessageBox({
+      type: "question",
+      title: "Update Ready",
+      message: "A Chunky update has been downloaded.",
+      detail: "Restart now to install it?",
+      buttons: ["Restart and Install", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (response === 0) await Updater.applyUpdate()
+  } catch (error) {
+    // Update failures must never interfere with using the app.
+    console.warn("[chunky] update failed:", error)
+  } finally {
+    updateInProgress = false
+  }
+}
+
+Updater.onStatusChange((entry) => {
+  if (entry.status === "error" || entry.status === "patch-failed") {
+    console.warn(`[chunky] updater ${entry.status}: ${entry.message}`)
+  }
+})
+
 // Warm FFF indexes in the background so the first keystroke is fast.
 void ensureFinders(extraRoots).catch((err) => {
   console.warn("[chunky] FFF warm-up failed:", err)
@@ -66,6 +130,7 @@ ApplicationMenu.setApplicationMenu([
     label: "Chunky",
     submenu: [
       { role: "about" },
+      { label: "Check for Updates…", action: "check-for-updates" },
       { type: "separator" },
       { role: "hide", accelerator: "CommandOrControl+H" },
       { role: "hideOthers", accelerator: "CommandOrControl+Alt+H" },
@@ -97,6 +162,11 @@ ApplicationMenu.setApplicationMenu([
     ],
   },
 ])
+
+ApplicationMenu.on("application-menu-clicked", (event) => {
+  const action = (event as { data?: { action?: unknown } }).data?.action
+  if (action === "check-for-updates") void checkForUpdates({ interactive: true })
+})
 
 function clampLimit(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number(raw)
@@ -205,3 +275,6 @@ process.on("SIGTERM", () => {
 void win
 
 console.log(`[chunky] window ready · server ${baseUrl}`)
+
+// Do not delay window startup or surface a dialog unless an update exists.
+setTimeout(() => void checkForUpdates(), 4_000)

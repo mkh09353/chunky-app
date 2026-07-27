@@ -1,8 +1,12 @@
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { ElectrobunConfig } from "electrobun/bun"
 
 const isRelease = process.argv[2] === "build"
+// Keep desktop bundle metadata in lockstep with the package/release tag.
+const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+  version: string
+}
 
 /**
  * Electrobun uses `Bun.build({ target: "bun" })` (not `--compile`).
@@ -36,9 +40,11 @@ export default {
   app: {
     name: isRelease ? "Chunky" : "Chunky Dev",
     identifier: isRelease ? "to.chunky.app" : "to.chunky.app.dev",
-    version: "0.1.0",
+    version,
   },
   build: {
+    // Releases currently ship macOS Apple Silicon only.
+    targets: "macos-arm64",
     bun: {
       entrypoint: "src/bun/index.ts",
     },
@@ -51,8 +57,17 @@ export default {
       ...fffBinCopy,
     },
     watchIgnore: ["dist/**"],
-    mac: { bundleCEF: false },
+    mac: {
+      bundleCEF: false,
+      // When Apple Developer credentials are available, enable codesign/notarize
+      // here and configure the required signing identity and notarization secrets in CI.
+      // codesign: true,
+      // notarize: true,
+    },
     linux: { bundleCEF: false },
     win: { bundleCEF: false },
+  },
+  release: {
+    baseUrl: "https://github.com/mkh09353/chunky-app/releases/latest/download",
   },
 } satisfies ElectrobunConfig
