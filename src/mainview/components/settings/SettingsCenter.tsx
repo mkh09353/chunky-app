@@ -57,7 +57,11 @@ export interface SettingsConnectionInfo {
   mode: "live" | "demo"
 }
 
-function renderSection(id: SectionId, connection?: SettingsConnectionInfo) {
+function renderSection(
+  id: SectionId,
+  connection?: SettingsConnectionInfo,
+  onModesChanged?: () => void,
+) {
   switch (id) {
     case "providers":
       return <ProvidersSection />
@@ -70,7 +74,7 @@ function renderSection(id: SectionId, connection?: SettingsConnectionInfo) {
     case "sidekick":
       return <SidekickSection />
     case "modes":
-      return <ModesSection />
+      return <ModesSection onApplied={onModesChanged} />
     case "skills":
       return <SkillsSection />
     case "workflow":
@@ -85,11 +89,14 @@ export function SettingsCenter({
   onOpenChange,
   initialSection,
   connection,
+  onModesChanged,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   initialSection?: string
   connection?: SettingsConnectionInfo
+  /** Called after a mode is applied/saved/deleted (refresh models + aliases). */
+  onModesChanged?: () => void
 }) {
   const [section, setSection] = useState<SectionId>(
     isSectionId(initialSection) ? initialSection : "providers",
@@ -138,7 +145,7 @@ export function SettingsCenter({
           </nav>
 
           <ScrollArea className="min-w-0 flex-1" viewportClassName="p-5">
-            {renderSection(section, connection)}
+            {renderSection(section, connection, onModesChanged)}
           </ScrollArea>
         </div>
       </DialogPopup>

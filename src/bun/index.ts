@@ -8,6 +8,7 @@ import {
   parentRoot,
   searchDirectories,
 } from "./dirSearch"
+import { createTerminalManager } from "./terminal"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -109,7 +110,13 @@ function clampQuery(raw: unknown): string {
   return raw.trim().slice(0, 200)
 }
 
-const rpc = createRPC({
+let rpc!: ReturnType<typeof createRPC>
+const terminals = createTerminalManager((name, payload) => {
+  const send = rpc.send as unknown as Record<string, (value: unknown) => void>
+  send[name]?.(payload)
+})
+
+rpc = createRPC({
   maxRequestTime: 180_000,
   requestHandler: {
     getConfig: async () => config,
@@ -155,6 +162,11 @@ const rpc = createRPC({
         return { items: [] as { name: string; path: string }[], error: message }
       }
     },
+
+    terminalOpen: async (params: unknown) => terminals.open(params),
+    terminalWrite: async (params: unknown) => terminals.write(params),
+    terminalResize: async (params: unknown) => terminals.resize(params),
+    terminalClose: async (params: unknown) => terminals.close(params),
   },
 })
 
@@ -176,6 +188,7 @@ const win = new BrowserWindow({
 
 // Tear down native FFF handles when the process is leaving.
 const cleanup = () => {
+  terminals.destroy()
   destroyFinders()
 }
 process.on("exit", cleanup)

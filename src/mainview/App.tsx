@@ -1,4 +1,4 @@
-import { AlertCircle, Moon, Sun, WifiOff } from "lucide-react"
+import { AlertCircle, EyeOff, Moon, Sun, WifiOff } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
@@ -10,6 +10,7 @@ import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
 import { TodosPanel } from "./components/TodosPanel"
 import { Sidebar } from "./components/Sidebar"
+import { BrowserPane } from "./components/BrowserPane"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import {
@@ -37,7 +38,27 @@ import {
   type Repo,
   type SessionSummary,
 } from "./lib/api"
-import type { GoalSnapshot, RewindPoint } from "@chunky/protocol"
+// `setCacheGuard` is aliased: the local state setter of the same name owns the
+// pre-send confirm bar, while this one persists the server-side threshold.
+import { applyMode, deleteMode, getCacheGuard, getModes, saveMode, setCacheGuard as saveCacheGuardTokens } from "./lib/configApi"
+import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
+import {
+  incognitoAppliedLine,
+  NO_INCOGNITO_MODES,
+  notIncognitoLine,
+  resolveIncognitoCommand,
+  unknownModeLine,
+  type SavedMode,
+} from "./lib/incognitoModes"
+import { ScoreboardTable, UsageTable } from "./components/StatsTables"
+import {
+  BARE_COMMAND_RE,
+  COMMANDS,
+  modeCommands,
+  savedModeForCommand,
+  type SlashCommand,
+} from "./lib/slashCommands"
+import type { GoalSnapshot, ModeSpec, RewindPoint } from "@chunky/protocol"
 import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
 import {
@@ -63,6 +84,8 @@ type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" |
 type AppMode = "live" | "demo"
 
 const REPLAY_SETTLE_MS = 120
+/** How long a local apply suppresses the echoed mode.applied notice. */
+const SELF_APPLY_WINDOW_MS = 10_000
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
 const LAST_SESSION_KEY = "chunky.lastSessionByRepo"
 
@@ -163,15 +186,23 @@ export function App() {
   const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: MessageDelivery } | null>(null)
   const [foldThreads, setFoldThreads] = useState(false)
   const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
-  const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | null>(null)
+  const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | "incognito" | null>(null)
+  const [incognitoModes, setIncognitoModes] = useState<SavedMode[]>([])
   const [dialogText, setDialogText] = useState("")
   const [rewindPoints, setRewindPoints] = useState<RewindPoint[]>([])
   const [selectedRewind, setSelectedRewind] = useState<RewindPoint | null>(null)
   const [forkWorktree, setForkWorktree] = useState(false)
   const [goalWorkflows, setGoalWorkflows] = useState(false)
   const [goalTurns, setGoalTurns] = useState("")
-  const [stats, setStats] = useState<{ usage: unknown; scoreboard: unknown } | null>(null)
+  const [stats, setStats] = useState<{
+    usage: UsageResponse | null
+    usageError: string | null
+    scoreboard: ScoreboardResponse | null
+    scoreboardError: string | null
+  } | null>(null)
   const [statsTab, setStatsTab] = useState<"usage" | "scoreboard">("usage")
+  // TUI parity: bare /scoreboard is server-wide, `/scoreboard session` scopes it.
+  const [scoreboardScope, setScoreboardScope] = useState<"session" | "all">("all")
   const [notice, setNotice] = useState<string | null>(null)
 
   // ---- Demo/mock fallback state (preserved polish) ----
@@ -183,9 +214,25 @@ export function App() {
 
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
+  const [browserOpen, setBrowserOpen] = useState(false)
+  // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
+  // model picker for `/model`.
+  const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
+  const [modelPickerSignal, setModelPickerSignal] = useState(0)
 
   const streamAbort = useRef<AbortController | null>(null)
+  // handleSend runs before the dialog/settings actions are declared, so slash
+  // dispatch is reached through a ref (same trick as the TUI's doModeRef).
+  const dispatchSlashRef = useRef<(command: string) => Promise<boolean>>(async () => false)
+  // Same reason for the live `mode.applied` broadcast: attachSession must keep a
+  // stable identity (it seeds the boot effect), so the SSE handler can't take
+  // refreshModels/refreshModes as deps — it reads them through this ref.
+  const modeAppliedRef = useRef<(name: string, spec: ModeSpec) => void>(() => {})
+  // Set just BEFORE this window POSTs an apply: the server broadcasts
+  // mode.applied to every stream, and the local caller already shows a notice.
+  const selfAppliedMode = useRef<{ name: string; at: number } | null>(null)
   const settleTimer = useRef<number | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const activeRepoIdRef = useRef<string | null>(null)
@@ -199,6 +246,9 @@ export function App() {
 
   const live = appMode === "live"
   const streaming = live ? isStreaming(transcript) || sending : demoStreamingId !== null
+  // Server-authoritative: the session row carries the off-the-record flag.
+  const incognitoSession =
+    live && sessions.find((s) => s.sessionId === sessionId)?.incognito === true
 
   const uiModels = useMemo(() => {
     if (!live) return MODELS
@@ -330,6 +380,12 @@ export function App() {
       attempt = 0
       if (ev.type === "session.rewound") {
         void attachSession(baseUrl, id)
+        return
+      }
+      // Live-only broadcast (never persisted, never a transcript item): another
+      // window/the TUI applied a mode, so re-read the model + alias state here.
+      if (ev.type === "mode.applied") {
+        modeAppliedRef.current(ev.name, ev.spec)
         return
       }
       setTranscript((s) => reduce(s, ev))
@@ -480,6 +536,57 @@ export function App() {
     setModelRows(rows)
   }, [config, appMode])
 
+  /** Saved modes → slash aliases. Demo/offline never touches the server. */
+  const refreshModes = useCallback(async () => {
+    if (appMode !== "live") {
+      setSlashModes([])
+      return
+    }
+    try {
+      const { modes } = await getModes()
+      setSlashModes(modeCommands(modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
+    } catch {
+      /* keep the last known aliases; the menu is a convenience, not state */
+    }
+  }, [appMode])
+
+  useEffect(() => {
+    if (appMode !== "live") {
+      setSlashModes([])
+      return
+    }
+    if (connectionState !== "connected") return
+    void refreshModes()
+  }, [appMode, connectionState, refreshModes])
+
+  const slashCommands = useMemo<SlashCommand[]>(() => [...COMMANDS, ...slashModes], [slashModes])
+
+  /** Remember that THIS window is about to apply `name`, so the echoed
+   *  mode.applied broadcast doesn't double up on the caller's own notice. */
+  const markSelfApplied = useCallback((name: string) => {
+    selfAppliedMode.current = { name: name.toLowerCase(), at: Date.now() }
+  }, [])
+
+  /** Server said a mode was applied on this session's stream (this window, the
+   *  TUI, or another app window): re-read models + aliases, then notice once. */
+  const handleModeApplied = useCallback(
+    (name: string, spec: ModeSpec) => {
+      void refreshModels()
+      void refreshModes()
+      const self = selfAppliedMode.current
+      if (self && self.name === name.toLowerCase() && Date.now() - self.at < SELF_APPLY_WINDOW_MS) {
+        selfAppliedMode.current = null
+        return
+      }
+      const detail = spec?.model
+        ? `: ${prettyModel(spec.model)}${spec.effort ? ` (${spec.effort})` : ""}`
+        : ""
+      setNotice(`Mode "${name}" applied${detail}`)
+    },
+    [refreshModels, refreshModes],
+  )
+  modeAppliedRef.current = handleModeApplied
+
   // ---- Actions ----
   const handleNewThread = useCallback(async () => {
     if (!live) {
@@ -626,6 +733,10 @@ export function App() {
       } = {},
     ) => {
       setSendError(null)
+      // Slash commands dispatch instead of sending; unknown ones fall through
+      // and are sent as ordinary chat text (TUI parity).
+      const command = text.trim()
+      if (command.startsWith("/") && (await dispatchSlashRef.current(command))) return
       if (!live) {
         // Minimal demo echo so offline mode still feels alive.
         stopDemoStream()
@@ -698,14 +809,48 @@ export function App() {
     void interruptSession(config.baseUrl, sessionId)
   }, [live, stopDemoStream, config, sessionId])
 
+  /** Usage (session-scoped) + scoreboard (session or server-wide), settled
+   *  independently so one endpoint failing still renders the other. */
+  const loadStats = useCallback(
+    async (scope: "session" | "all") => {
+      if (!config || !sessionId) return
+      const [usage, scoreboard] = await Promise.allSettled([
+        getUsage(config.baseUrl, sessionId),
+        getScoreboard(config.baseUrl, scope === "session" ? sessionId : undefined),
+      ])
+      setStats({
+        usage: usage.status === "fulfilled" ? asUsage(usage.value) : null,
+        usageError: usage.status === "rejected" ? (usage.reason as Error).message : null,
+        scoreboard: scoreboard.status === "fulfilled" ? asScoreboard(scoreboard.value) : null,
+        scoreboardError: scoreboard.status === "rejected" ? (scoreboard.reason as Error).message : null,
+      })
+    },
+    [config, sessionId],
+  )
+
+  const openStats = useCallback(
+    async (tab: "usage" | "scoreboard", scope: "session" | "all") => {
+      if (!live || !config || !sessionId) return
+      setStatsTab(tab)
+      setScoreboardScope(scope)
+      setStats(null)
+      setDialog("stats")
+      await loadStats(scope)
+    },
+    [live, config, sessionId, loadStats],
+  )
+
   const openDialog = useCallback(async (kind: NonNullable<typeof dialog>) => {
     if (!live || !config || !sessionId) return
+    if (kind === "stats") {
+      await openStats("usage", "all")
+      return
+    }
     setDialogText(kind === "rename" ? (sessions.find((s) => s.sessionId === sessionId)?.title ?? "") : "")
     setSelectedRewind(null)
     if (kind === "rewind") setRewindPoints(await getRewindPoints(config.baseUrl, sessionId).catch(() => []))
-    if (kind === "stats") { setStatsTab("usage"); setStats(await Promise.all([getUsage(config.baseUrl, sessionId), getScoreboard(config.baseUrl, sessionId)]).then(([usage, scoreboard]) => ({ usage, scoreboard })).catch(() => null)) }
     setDialog(kind)
-  }, [live, config, sessionId, sessions])
+  }, [live, config, sessionId, sessions, openStats])
 
   const runDialog = useCallback(async () => {
     if (!config || !sessionId || !dialog) return
@@ -723,6 +868,236 @@ export function App() {
     if (!config || !sessionId) return
     setGoalState(await setGoal(config.baseUrl, sessionId, { action }).catch(() => goal))
   }, [config, sessionId, goal])
+
+  const openSettingsAt = useCallback((section?: string) => {
+    setSettingsSection(section)
+    setSettingsOpen(true)
+  }, [])
+
+  /** Apply a saved mode server-side, then re-read the model/provider UI state. */
+  const applyModeByName = useCallback(
+    async (name: string) => {
+      try {
+        markSelfApplied(name)
+        const applied = await applyMode(name)
+        await refreshModels()
+        void refreshModes()
+        const detail = applied?.model
+          ? `: ${prettyModel(applied.model)}${applied.effort ? ` (${applied.effort})` : ""} · ${applied.provider}`
+          : ""
+        setNotice(`Mode "${applied?.applied || name}" applied${detail}.`)
+      } catch (err) {
+        setNotice(`Mode "${name}": ${(err as Error).message}`)
+      }
+    },
+    [refreshModels, refreshModes, markSelfApplied],
+  )
+
+  /** `/mode` subcommands: bare opens Settings → Modes, save/rm hit the server. */
+  const runModeCommand = useCallback(
+    async (rest: string) => {
+      if (!rest) {
+        openSettingsAt("modes")
+        return
+      }
+      const save = rest.match(/^save\s+(\S+)$/i)
+      if (save) {
+        try {
+          await saveMode({ name: save[1]! })
+          await refreshModes()
+          setNotice(`Mode "${save[1]}" saved from the current pairing.`)
+        } catch (err) {
+          setNotice(`Mode save failed: ${(err as Error).message}`)
+        }
+        return
+      }
+      const rm = rest.match(/^(?:rm|delete)\s+(\S+)$/i)
+      if (rm) {
+        try {
+          await deleteMode(rm[1]!)
+          await refreshModes()
+          setNotice(`Mode "${rm[1]}" deleted.`)
+        } catch (err) {
+          setNotice(`Mode delete failed: ${(err as Error).message}`)
+        }
+        return
+      }
+      await applyModeByName(rest)
+    },
+    [openSettingsAt, refreshModes, applyModeByName],
+  )
+
+  /** `/incognito [name]` — the mode-apply flow filtered to incognito modes
+   *  (modes carrying a provider allowlist). Exactly one → apply it; several →
+   *  picker; none → explain how to make one. */
+  const runIncognito = useCallback(
+    async (rest: string) => {
+      try {
+        const { modes } = await getModes()
+        const action = resolveIncognitoCommand(modes as SavedMode[], rest)
+        if (action.kind === "none") return setNotice(NO_INCOGNITO_MODES)
+        if (action.kind === "unknown") return setNotice(unknownModeLine(action.name))
+        if (action.kind === "not-incognito") return setNotice(notIncognitoLine(action.name))
+        if (action.kind === "pick") {
+          setIncognitoModes(action.modes)
+          setDialog("incognito")
+          return
+        }
+        markSelfApplied(action.name)
+        const applied = await applyMode(action.name)
+        await refreshModels()
+        void refreshModes()
+        setNotice(
+          incognitoAppliedLine(
+            applied?.applied || action.name,
+            `${prettyModel(applied?.model ?? "")}${applied?.effort ? ` (${applied.effort})` : ""} · ${applied?.provider ?? ""}`,
+          ),
+        )
+      } catch (err) {
+        setNotice(`Incognito request failed: ${(err as Error).message}`)
+      }
+    },
+    [refreshModels, refreshModes, markSelfApplied],
+  )
+
+  /** `/cacheguard [tokens|off]` — same parsing + wording as the TUI, backed by
+   *  GET/POST ROUTES.cacheGuard (the pre-send confirm bar reads the same setting). */
+  const runCacheGuard = useCallback(async (rest: string) => {
+    const trimmed = rest.trim().toLowerCase()
+    const describe = (tokens: number | null) =>
+      tokens == null
+        ? "Cache guard: off — cold-cache sends go through without confirmation. `/cacheguard <tokens>` (e.g. 100k) to enable."
+        : `Cache guard: a send that would re-send ≥${compactTokens(tokens)} tokens on a cold cache asks for confirmation first. \`/cacheguard <tokens|off>\` to change.`
+    try {
+      if (!trimmed) {
+        setNotice(describe((await getCacheGuard()).tokens))
+        return
+      }
+      let tokens: number | null
+      if (trimmed === "off" || trimmed === "none" || trimmed === "0") {
+        tokens = null
+      } else {
+        const m = trimmed.match(/^(\d+(?:\.\d+)?)(k|m)?$/)
+        if (!m) {
+          setNotice("Usage: /cacheguard <tokens|off> — e.g. /cacheguard 100k, /cacheguard 50000, /cacheguard off")
+          return
+        }
+        tokens = Math.round(Number(m[1]) * (m[2] === "m" ? 1_000_000 : m[2] === "k" ? 1_000 : 1))
+      }
+      const body = await saveCacheGuardTokens(tokens)
+      setNotice(
+        body.tokens == null
+          ? "Cache guard off — cold-cache sends go through without confirmation."
+          : `Cache guard set: confirm before re-sending ≥${compactTokens(body.tokens)} tokens on a cold cache.`,
+      )
+    } catch (err) {
+      setNotice(`Cache guard request failed: ${(err as Error).message}`)
+    }
+  }, [])
+
+  /** Dispatch a typed slash command. Returns false when it should be sent as
+   *  chat text instead (unknown command, or a live-only command in demo mode). */
+  const dispatchSlash = useCallback(
+    async (command: string): Promise<boolean> => {
+      const head = (command.split(/\s+/)[0] ?? "").toLowerCase()
+      const rest = command.slice(head.length).trim()
+
+      // Local commands work offline too.
+      switch (head) {
+        case "/help":
+          setNotice(
+            ["Commands", ...slashCommands.map((c) => `${c.name} — ${c.description}`)].join("\n"),
+          )
+          return true
+        case "/settings":
+          openSettingsAt()
+          return true
+        case "/clear":
+          void handleNewThread()
+          return true
+        case "/model":
+          setModelPickerSignal((n) => n + 1)
+          return true
+        case "/resume":
+          setPaletteOpen(true)
+          return true
+      }
+
+      // Everything below needs the live server; in demo it stays chat text.
+      if (!live) return false
+
+      // Saved modes double as commands: a bare `/fire` applies the "fire" mode.
+      if (BARE_COMMAND_RE.test(command)) {
+        const modeName = savedModeForCommand(command, slashModes)
+        if (modeName) {
+          await applyModeByName(modeName)
+          return true
+        }
+      }
+
+      switch (head) {
+        case "/rename":
+          await openDialog("rename")
+          return true
+        case "/rewind":
+          await openDialog("rewind")
+          return true
+        case "/usage":
+        case "/scoreboard": {
+          if (!sessionId) {
+            setNotice(`No session yet — send a message first, then ${head}.`)
+            return true
+          }
+          // `/scoreboard session` scopes to this thread (TUI parity).
+          const scope = head === "/scoreboard" && !/^session\b/i.test(rest) ? "all" : "session"
+          await openStats(head === "/usage" ? "usage" : "scoreboard", scope)
+          return true
+        }
+        case "/cacheguard":
+          await runCacheGuard(rest)
+          return true
+        case "/workers":
+          openSettingsAt("workflow")
+          return true
+        case "/reviewer":
+          openSettingsAt("reviewer")
+          return true
+        case "/fork":
+          await openDialog("fork")
+          if (rest) setDialogText(rest)
+          return true
+        case "/goal":
+          await openDialog("goal")
+          if (rest) setDialogText(rest)
+          return true
+        case "/shipit":
+          await openDialog("ship")
+          if (rest) setDialogText(rest)
+          return true
+        case "/mode":
+          await runModeCommand(rest)
+          return true
+        case "/incognito":
+          await runIncognito(rest)
+          return true
+        case "/advisor":
+          openSettingsAt("advisor")
+          return true
+        case "/sidekick":
+          openSettingsAt("sidekick")
+          return true
+        case "/skills":
+          openSettingsAt("skills")
+          return true
+        case "/provider":
+          openSettingsAt("providers")
+          return true
+      }
+      return false
+    },
+    [slashCommands, slashModes, live, sessionId, openSettingsAt, handleNewThread, openDialog, openStats, applyModeByName, runModeCommand, runCacheGuard, runIncognito],
+  )
+  dispatchSlashRef.current = dispatchSlash
 
   const confirmCacheGuard = useCallback(async () => {
     if (!cacheGuard || !config || !sessionId) return
@@ -814,14 +1189,16 @@ export function App() {
     ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
     ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it", "Usage & scoreboard"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
     { id: "theme", label: "Toggle theme", group: "Appearance" },
+    { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
     { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
     { id: "onboarding", label: "Run Onboarding", group: "Integration" },
-  ], [repos, sessions, uiModels])
+  ], [repos, sessions, uiModels, browserOpen])
 
   const runAction = useCallback(
     (a: PaletteAction) => {
       if (a.id === "new") void handleNewThread()
       else if (a.id === "theme") toggle()
+      else if (a.id === "browser") setBrowserOpen((open) => !open)
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
       else if (a.id.startsWith("repo:")) void handleSelectRepo(a.id.slice(5))
@@ -963,7 +1340,7 @@ export function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
             thread={activeThread}
-            headerRight={<>{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
+            headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
@@ -972,24 +1349,26 @@ export function App() {
             onRemoveRepo={(id) => void handleRemoveRepo(id)}
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
+            onToggleBrowser={() => setBrowserOpen((open) => !open)}
           />
 
-          <section className="content-panel flex min-h-0 min-w-0 flex-1 flex-col">
-            {statusBanner}
-            <ChatView
-              thread={activeThread}
-              streamingId={liveStreamingId}
-              loading={live && transcriptLoading}
-              transcript={live ? transcript : undefined}
-              modelName={uiModel.name}
-              foldAll={foldThreads}
-              compacted={liveCompacted}
-            />
-            {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
-            <div className="flex flex-col gap-2">
-              <TodosPanel todos={liveTodos} />
-              <QueueChips entries={liveQueue} />
-              <Composer
+          <section className="content-panel flex min-h-0 min-w-0 flex-1">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              {statusBanner}
+              <ChatView
+                thread={activeThread}
+                streamingId={liveStreamingId}
+                loading={live && transcriptLoading}
+                transcript={live ? transcript : undefined}
+                modelName={uiModel.name}
+                foldAll={foldThreads}
+                compacted={liveCompacted}
+              />
+              {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
+              <div className="flex flex-col gap-2">
+                <TodosPanel todos={liveTodos} />
+                <QueueChips entries={liveQueue} />
+                <Composer
                 model={uiModel}
                 models={uiModels}
                 onModelChange={handleModelChange}
@@ -1002,6 +1381,8 @@ export function App() {
                   })
                 }
                 onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
+                commands={slashCommands}
+                openModelPickerSignal={modelPickerSignal}
                 streaming={streaming}
                 onStop={handleStop}
                 contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
@@ -1015,8 +1396,10 @@ export function App() {
                     !sessionId ||
                     sending)
                 }
-              />
+                />
+              </div>
             </div>
+            {browserOpen ? <BrowserPane onClose={() => setBrowserOpen(false)} /> : null}
           </section>
         </div>
 
@@ -1025,7 +1408,15 @@ export function App() {
           open={settingsOpen}
           onOpenChange={(open) => {
             setSettingsOpen(open)
-            if (!open && live && config) void refreshModels()
+            if (!open && live && config) {
+              void refreshModels()
+              void refreshModes()
+            }
+          }}
+          initialSection={settingsSection}
+          onModesChanged={() => {
+            void refreshModels()
+            void refreshModes()
           }}
           connection={{
             state: live ? connectionState : "offline",
@@ -1040,11 +1431,11 @@ export function App() {
           onOpenChange={setOnboardingOpen}
           onComplete={() => { void refreshModels() }}
         />
-        {notice && <div className="fixed right-5 bottom-5 z-50 rounded-xl border border-primary/25 bg-popover px-4 py-3 text-[13px] shadow-panel"><span>{notice}</span><button type="button" className="ml-3 text-primary" onClick={() => setNotice(null)}>Dismiss</button></div>}
+        {notice && <div className="fixed right-5 bottom-5 z-50 max-h-[60vh] max-w-sm overflow-y-auto rounded-xl border border-primary/25 bg-popover px-4 py-3 text-[13px] shadow-panel"><span className="whitespace-pre-line">{notice}</span><button type="button" className="ml-3 text-primary" onClick={() => setNotice(null)}>Dismiss</button></div>}
         <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}><DialogPopup>
-          <DialogHeader><DialogTitle>{dialog === "rename" ? "Rename session" : dialog === "fork" ? "Fork session" : dialog === "rewind" ? "Rewind session" : dialog === "goal" ? "Goal mode" : dialog === "ship" ? "Ship it" : "Usage & scoreboard"}</DialogTitle><DialogDescription>{dialog === "rewind" ? "Choose a completed turn, then explicitly confirm restoring files and conversation." : dialog === "ship" ? "Optional notes for the handoff brief." : ""}</DialogDescription></DialogHeader>
-          <div className="px-6 pb-2">{(dialog === "rename" || dialog === "fork" || dialog === "goal" || dialog === "ship") && <textarea value={dialogText} onChange={(event) => setDialogText(event.target.value)} placeholder={dialog === "goal" ? "Objective…" : dialog === "fork" ? "Optional directive…" : dialog === "ship" ? "Optional handoff notes…" : "Session title"} className="min-h-20 w-full rounded-lg border border-input bg-transparent p-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />}{dialog === "fork" && <label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={forkWorktree} onChange={(event) => setForkWorktree(event.target.checked)} /> Create a git worktree</label>}{dialog === "goal" && <><label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={goalWorkflows} onChange={(event) => setGoalWorkflows(event.target.checked)} /> Use workflows mode</label><input value={goalTurns} onChange={(event) => setGoalTurns(event.target.value)} placeholder="Optional max turns" inputMode="numeric" className="mt-2 w-full rounded-lg border border-input bg-transparent p-2 text-sm" />{goal && <div className="mt-3 flex gap-2"><Button size="sm" variant="outline" onClick={() => void goalAction(goal.status === "active" ? "pause" : "resume")}>{goal.status === "active" ? "Pause" : "Resume"}</Button><Button size="sm" variant="outline" onClick={() => void goalAction("clear")}>Clear</Button></div>}</>}{dialog === "rewind" && <div className="max-h-60 overflow-auto">{rewindPoints.map((point) => <button type="button" onClick={() => setSelectedRewind(point)} key={point.turn} className={`mb-1 w-full rounded-lg border p-2 text-left text-sm ${selectedRewind?.turn === point.turn ? "border-primary bg-primary/10" : "border-border"}`}>Turn {point.turn} · {point.userText}</button>)}{selectedRewind && <p className="mt-2 text-xs text-destructive">Confirming restores files AND conversation to turn {selectedRewind.turn}.</p>}</div>}{dialog === "stats" && <><div className="mb-2 flex gap-1 border-b border-border"><button type="button" onClick={() => setStatsTab("usage")} className={`px-3 py-2 text-sm ${statsTab === "usage" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Usage</button><button type="button" onClick={() => setStatsTab("scoreboard")} className={`px-3 py-2 text-sm ${statsTab === "scoreboard" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Scoreboard</button></div><pre className="max-h-80 overflow-auto rounded-lg bg-muted p-3 text-[11px]">{JSON.stringify(stats?.[statsTab], null, 2)}</pre></>}</div>
-          <DialogFooter>{dialog !== "stats" && <Button onClick={() => void runDialog()} disabled={(dialog === "rewind" && !selectedRewind) || (dialog === "rename" && !dialogText.trim())}>{dialog === "rewind" ? "Confirm restore" : dialog === "goal" ? "Start goal" : dialog === "ship" ? "Ship it" : "Continue"}</Button>}</DialogFooter>
+          <DialogHeader><DialogTitle>{dialog === "rename" ? "Rename session" : dialog === "fork" ? "Fork session" : dialog === "rewind" ? "Rewind session" : dialog === "goal" ? "Goal mode" : dialog === "ship" ? "Ship it" : dialog === "incognito" ? "Go incognito" : "Usage & scoreboard"}</DialogTitle><DialogDescription>{dialog === "rewind" ? "Choose a completed turn, then explicitly confirm restoring files and conversation." : dialog === "ship" ? "Optional notes for the handoff brief." : dialog === "incognito" ? "Pick an incognito mode. Applying it takes NEW sessions off the record — this one stays as it is." : ""}</DialogDescription></DialogHeader>
+          <div className="px-6 pb-2">{(dialog === "rename" || dialog === "fork" || dialog === "goal" || dialog === "ship") && <textarea value={dialogText} onChange={(event) => setDialogText(event.target.value)} placeholder={dialog === "goal" ? "Objective…" : dialog === "fork" ? "Optional directive…" : dialog === "ship" ? "Optional handoff notes…" : "Session title"} className="min-h-20 w-full rounded-lg border border-input bg-transparent p-2 text-sm outline-none focus:ring-2 focus:ring-ring/40" />}{dialog === "fork" && <label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={forkWorktree} onChange={(event) => setForkWorktree(event.target.checked)} /> Create a git worktree</label>}{dialog === "goal" && <><label className="mt-3 flex gap-2 text-sm"><input type="checkbox" checked={goalWorkflows} onChange={(event) => setGoalWorkflows(event.target.checked)} /> Use workflows mode</label><input value={goalTurns} onChange={(event) => setGoalTurns(event.target.value)} placeholder="Optional max turns" inputMode="numeric" className="mt-2 w-full rounded-lg border border-input bg-transparent p-2 text-sm" />{goal && <div className="mt-3 flex gap-2"><Button size="sm" variant="outline" onClick={() => void goalAction(goal.status === "active" ? "pause" : "resume")}>{goal.status === "active" ? "Pause" : "Resume"}</Button><Button size="sm" variant="outline" onClick={() => void goalAction("clear")}>Clear</Button></div>}</>}{dialog === "rewind" && <div className="max-h-60 overflow-auto">{rewindPoints.map((point) => <button type="button" onClick={() => setSelectedRewind(point)} key={point.turn} className={`mb-1 w-full rounded-lg border p-2 text-left text-sm ${selectedRewind?.turn === point.turn ? "border-primary bg-primary/10" : "border-border"}`}>Turn {point.turn} · {point.userText}</button>)}{selectedRewind && <p className="mt-2 text-xs text-destructive">Confirming restores files AND conversation to turn {selectedRewind.turn}.</p>}</div>}{dialog === "incognito" && <div className="max-h-60 overflow-auto">{incognitoModes.map((mode) => <button type="button" key={mode.name} onClick={() => { setDialog(null); void runIncognito(mode.name) }} className="mb-1 flex w-full flex-col gap-0.5 rounded-lg border border-border p-2 text-left hover:border-primary/50 hover:bg-accent"><span className="font-medium text-sm">{mode.name}</span><span className="text-[11.5px] text-muted-foreground">{prettyModel(mode.model)} · {mode.provider}{mode.incognito?.allow?.length ? ` · allows ${mode.incognito.allow.join(", ")}` : ""}</span></button>)}</div>}{dialog === "stats" && <><div className="mb-2 flex items-center gap-1 border-b border-border"><button type="button" onClick={() => setStatsTab("usage")} className={`px-3 py-2 text-sm ${statsTab === "usage" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Usage</button><button type="button" onClick={() => setStatsTab("scoreboard")} className={`px-3 py-2 text-sm ${statsTab === "scoreboard" ? "border-primary border-b-2 text-primary" : "text-muted-foreground"}`}>Scoreboard</button>{statsTab === "scoreboard" && <div className="ml-auto flex items-center gap-1 pb-1 text-[11px]">{(["session", "all"] as const).map((scope) => <button key={scope} type="button" onClick={() => { setScoreboardScope(scope); void loadStats(scope) }} className={cn("rounded-full border px-2 py-0.5", scoreboardScope === scope ? "border-primary/40 bg-primary/10 text-primary" : "border-border text-muted-foreground")}>{scope === "session" ? "This session" : "All sessions"}</button>)}</div>}</div><div className="max-h-80 overflow-auto">{!stats ? <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">Loading…</p> : statsTab === "usage" ? (stats.usage ? <UsageTable body={stats.usage} /> : <p className="px-3 py-6 text-center text-[12px] text-destructive">{stats.usageError ?? "No usage yet."}</p>) : (stats.scoreboard ? <ScoreboardTable body={stats.scoreboard} /> : <p className="px-3 py-6 text-center text-[12px] text-destructive">{stats.scoreboardError ?? "No scoreboard data."}</p>)}</div></>}</div>
+          <DialogFooter>{dialog !== "stats" && dialog !== "incognito" && <Button onClick={() => void runDialog()} disabled={(dialog === "rewind" && !selectedRewind) || (dialog === "rename" && !dialogText.trim())}>{dialog === "rewind" ? "Confirm restore" : dialog === "goal" ? "Start goal" : dialog === "ship" ? "Ship it" : "Continue"}</Button>}</DialogFooter>
         </DialogPopup></Dialog>
       </div>
     </TooltipProvider>

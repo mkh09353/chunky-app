@@ -4,11 +4,14 @@ import { useState } from "react"
 import {
   getAdvisor,
   getReviewer,
+  getReviewerStatus,
   listAllModels,
+  prettyModel,
+  providerLabel,
   setAdvisor,
   setReviewer,
 } from "~/lib/configApi"
-import type { AgentModelConfig, ModelRow } from "~/lib/configApi"
+import type { AgentModelConfig, ModelRow, ReviewerStatus } from "~/lib/configApi"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -30,12 +33,17 @@ function AgentConfigSection({
   noun,
   load,
   save,
+  footer,
+  onSaved,
 }: {
   title: string
   description: string
   noun: string
   load: () => Promise<AgentModelConfig>
   save: (cfg: AgentModelConfig) => Promise<AgentModelConfig>
+  /** Extra server-reported state rendered under the picker (read-only). */
+  footer?: React.ReactNode
+  onSaved?: () => void
 }) {
   const cfg = useAsync<AgentModelConfig>(load, [])
   const rows = useAsync<ModelRow[]>(() => listAllModels(), [])
@@ -60,6 +68,7 @@ function AgentConfigSection({
       const next = await save(current)
       cfg.setData(next)
       setDraft(null)
+      onSaved?.()
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -113,6 +122,8 @@ function AgentConfigSection({
             )}
           </div>
 
+          {footer}
+
           {error && (
             <div className="pt-2">
               <InlineError>{error}</InlineError>
@@ -142,7 +153,41 @@ export function AdvisorSection() {
   )
 }
 
+/** Server-reported reviewer readiness + the effective reviewer, which an active
+ *  mode's `review` override can differ from (the server keeps that read-only). */
+function ReviewerStatusNote({ nonce }: { nonce: number }) {
+  const status = useAsync<ReviewerStatus>(() => getReviewerStatus(), [nonce])
+  if (status.loading || status.error || !status.data) return null
+  const { config, effective, active } = status.data
+  const label = (cfg: AgentModelConfig) =>
+    cfg.enabled
+      ? cfg.provider && cfg.model
+        ? `${providerLabel(cfg.provider)} · ${prettyModel(cfg.model)}${cfg.effort ? ` · ${cfg.effort}` : ""}`
+        : "inherits the executor"
+      : "off"
+  const overridden =
+    effective.enabled !== config.enabled ||
+    (effective.provider ?? null) !== (config.provider ?? null) ||
+    (effective.model ?? null) !== (config.model ?? null)
+  return (
+    <div className="border-border/60 border-t pt-3 text-[12px] text-muted-foreground">
+      <p>
+        Effective now: <span className="text-foreground">{label(effective)}</span>
+        {" · "}
+        {active ? "ready" : "not resolvable (log in or pick a model)"}
+      </p>
+      {overridden && (
+        <p className="pt-1">
+          The active mode overrides the reviewer, so it differs from this default. Saving here
+          changes the default only — the mode keeps its own setting.
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function ReviewerSection() {
+  const [nonce, setNonce] = useState(0)
   return (
     <AgentConfigSection
       title="Reviewer"
@@ -150,6 +195,8 @@ export function ReviewerSection() {
       noun="reviewer"
       load={getReviewer}
       save={setReviewer}
+      footer={<ReviewerStatusNote nonce={nonce} />}
+      onSaved={() => setNonce((n) => n + 1)}
     />
   )
 }

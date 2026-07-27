@@ -34,6 +34,7 @@ export type {
 export type { ModelRow, ModelSelection } from "./api"
 export { prettyModel, providerLabel, splitModelKey }
 
+import { ROUTES } from "@chunky/protocol"
 import type {
   CacheGuardResponse,
   LoginInitiation,
@@ -178,7 +179,7 @@ export async function selectProvider(provider: string): Promise<void> {
 /** Register a custom OpenAI-compatible provider. Server field is `key`. */
 export async function addCustomProvider(input: CustomProviderInput): Promise<void> {
   await req<unknown>(
-    "/api/providers/custom",
+    ROUTES.customProvider,
     jsonInit("POST", {
       id: input.id,
       label: input.label,
@@ -311,11 +312,34 @@ export async function setAdvisor(cfg: AgentModelConfig): Promise<AgentModelConfi
 }
 
 export async function getReviewer(): Promise<AgentModelConfig> {
-  return normalizeAgentConfig(await req<unknown>("/api/review"))
+  return normalizeAgentConfig(await req<unknown>(ROUTES.review))
 }
 
 export async function setReviewer(cfg: AgentModelConfig): Promise<AgentModelConfig> {
-  return normalizeAgentConfig(await req<unknown>("/api/review", jsonInit("POST", cfg)))
+  return normalizeAgentConfig(await req<unknown>(ROUTES.review, jsonInit("POST", cfg)))
+}
+
+/** GET ROUTES.review also reports readiness and the EFFECTIVE reviewer, which
+ *  an active mode's `review` override can differ from — the server keeps that
+ *  override read-only here, so the UI shows it rather than silently losing it. */
+export interface ReviewerStatus {
+  config: AgentModelConfig
+  effective: AgentModelConfig
+  /** True when a reviewer model actually resolves (logged in + configured). */
+  active: boolean
+}
+
+export async function getReviewerStatus(): Promise<ReviewerStatus> {
+  const body = (await req<unknown>(ROUTES.review)) as {
+    config?: unknown
+    effective?: unknown
+    active?: unknown
+  }
+  return {
+    config: normalizeAgentConfig(body?.config),
+    effective: normalizeAgentConfig(body?.effective),
+    active: body?.active === true,
+  }
 }
 
 // ================================================================
@@ -422,19 +446,30 @@ export function validateSeatName(name: string): string | null {
 // ================================================================
 
 export async function getModes(): Promise<ModesResponse> {
-  return req<ModesResponse>("/api/modes")
+  return req<ModesResponse>(ROUTES.modes)
 }
 
 export async function saveMode(request: SaveModeRequest): Promise<ModesResponse> {
-  return req<ModesResponse>("/api/modes", jsonInit("POST", request))
+  return req<ModesResponse>(ROUTES.modes, jsonInit("POST", request))
 }
 
-export async function applyMode(name: string): Promise<void> {
-  await req<unknown>(`/api/modes/${encodeURIComponent(name)}/apply`, jsonInit("POST"))
+/** Apply a saved mode — the server switches executor + advisor + sidekick as
+ *  one unit and returns the applied selection. */
+export async function applyMode(name: string): Promise<ApplyModeResult> {
+  return req<ApplyModeResult>(ROUTES.applyMode(name), jsonInit("POST"))
 }
 
 export async function deleteMode(name: string): Promise<ModesResponse> {
-  return req<ModesResponse>(`/api/modes/${encodeURIComponent(name)}`, { method: "DELETE" })
+  return req<ModesResponse>(ROUTES.deleteMode(name), { method: "DELETE" })
+}
+
+/** The apply endpoint's payload (executor half of the applied trio). */
+export interface ApplyModeResult {
+  applied: string
+  provider: string
+  model: string | null
+  effort?: string | null
+  speed?: string | null
 }
 
 // ================================================================
@@ -458,14 +493,14 @@ export async function setSkillEnabled(
 }
 
 export async function getSkillRepos(): Promise<SkillRepoStatus[]> {
-  const data = await req<SkillReposResponse>("/api/skill-repos")
+  const data = await req<SkillReposResponse>(ROUTES.skillRepos)
   return data.repos ?? []
 }
 
 export async function manageSkillRepos(
   request: ManageSkillReposRequest,
 ): Promise<SkillReposResponse> {
-  return req<SkillReposResponse>("/api/skill-repos", jsonInit("POST", request))
+  return req<SkillReposResponse>(ROUTES.skillRepos, jsonInit("POST", request))
 }
 
 // ================================================================
@@ -473,12 +508,12 @@ export async function manageSkillRepos(
 // ================================================================
 
 export async function getCacheGuard(): Promise<CacheGuardResponse> {
-  return req<CacheGuardResponse>("/api/cache-guard")
+  return req<CacheGuardResponse>(ROUTES.cacheGuard)
 }
 
 /** null disables the guard. */
 export async function setCacheGuard(tokens: number | null): Promise<CacheGuardResponse> {
-  return req<CacheGuardResponse>("/api/cache-guard", jsonInit("POST", { tokens }))
+  return req<CacheGuardResponse>(ROUTES.cacheGuard, jsonInit("POST", { tokens }))
 }
 
 // ================================================================
@@ -486,7 +521,7 @@ export async function setCacheGuard(tokens: number | null): Promise<CacheGuardRe
 // ================================================================
 
 export async function runDream(): Promise<void> {
-  await req<unknown>("/api/dream", jsonInit("POST", {}))
+  await req<unknown>(ROUTES.dream, jsonInit("POST", {}))
 }
 
 export type WorkflowBilling = "free" | "subscription" | "metered" | "unknown"
@@ -636,14 +671,14 @@ function normalizeOnboarding(data: unknown): OnboardingResponse {
 }
 
 export async function getOnboarding(): Promise<OnboardingResponse> {
-  return normalizeOnboarding(await req<unknown>("/api/onboarding"))
+  return normalizeOnboarding(await req<unknown>(ROUTES.onboarding))
 }
 
 /** Apply a suggested mode. Server body is { mode: ModeSpec, name? }. */
 export async function applyOnboardingMode(mode: SuggestedMode): Promise<void> {
-  await req<unknown>("/api/onboarding/apply", jsonInit("POST", { mode: mode.spec, name: mode.name }))
+  await req<unknown>(ROUTES.onboardingApply, jsonInit("POST", { mode: mode.spec, name: mode.name }))
 }
 
 export async function completeOnboarding(): Promise<void> {
-  await req<unknown>("/api/onboarding/complete", jsonInit("POST", {}))
+  await req<unknown>(ROUTES.onboardingComplete, jsonInit("POST", {}))
 }

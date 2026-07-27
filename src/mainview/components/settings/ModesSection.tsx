@@ -8,7 +8,7 @@ import {
   providerLabel,
   saveMode,
 } from "~/lib/configApi"
-import type { ModeInfo, ModeSpec, ModesResponse } from "~/lib/configApi"
+import type { ModeAdvisor, ModeInfo, ModeSpec, ModesResponse } from "~/lib/configApi"
 import { Button } from "../ui/button"
 import {
   Badge,
@@ -24,11 +24,37 @@ import {
   useAsync,
 } from "./common"
 
+/** "Sol (high)" — one agent slot of a mode. */
+function agentLabel(agent: ModeAdvisor): string {
+  return `${prettyModel(agent.model)}${agent.effort ? ` (${agent.effort})` : ""}`
+}
+
+/** The full trio: executor · sidekick (+ named seats) · advisor · reviewer.
+ *  Mirrors the TUI's `/mode` summary — absent keys inherit, null means off. */
 function specLabel(spec: ModeSpec): string {
   if (!spec.provider || !spec.model) return "—"
   const bits = [`${providerLabel(spec.provider)} · ${prettyModel(spec.model)}`]
   if (spec.effort) bits.push(`effort ${spec.effort}`)
   if (spec.speed) bits.push(spec.speed)
+  if (spec.sidekick !== undefined) {
+    bits.push(`sidekick ${spec.sidekick ? agentLabel(spec.sidekick) : "inherit"}`)
+  }
+  if (spec.sidekickSeats !== undefined) {
+    const seats = spec.sidekickSeats
+      ? Object.entries(spec.sidekickSeats).sort(([a], [b]) => a.localeCompare(b))
+      : []
+    if (seats.length > 0) {
+      bits.push(`seats ${seats.map(([name, seat]) => `${name}=${agentLabel(seat)}`).join(", ")}`)
+    } else if (spec.sidekickSeats === null) {
+      bits.push("seats cleared")
+    }
+  }
+  if (spec.advisor !== undefined) {
+    bits.push(`advisor ${spec.advisor ? agentLabel(spec.advisor) : "off"}`)
+  }
+  if (spec.review !== undefined) {
+    bits.push(`reviewer ${spec.review ? agentLabel(spec.review) : "off"}`)
+  }
   return bits.join(" · ")
 }
 
@@ -40,7 +66,7 @@ function sameAsCurrent(mode: ModeInfo, current: ModeSpec): boolean {
   )
 }
 
-export function ModesSection() {
+export function ModesSection({ onApplied }: { onApplied?: () => void } = {}) {
   const modes = useAsync<ModesResponse>(() => getModes(), [])
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -53,6 +79,9 @@ export function ModesSection() {
     try {
       await applyMode(mode)
       modes.reload()
+      // Applying swaps executor + advisor + sidekick server-side: let the app
+      // re-read the model selection so the composer isn't stale.
+      onApplied?.()
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -67,6 +96,7 @@ export function ModesSection() {
     try {
       const next = await deleteMode(mode)
       modes.setData(next)
+      onApplied?.()
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -83,6 +113,7 @@ export function ModesSection() {
       const next = await saveMode({ name: n })
       modes.setData(next)
       setName("")
+      onApplied?.()
     } catch (err) {
       setError((err as Error).message)
     } finally {

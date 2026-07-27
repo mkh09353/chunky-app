@@ -6,6 +6,7 @@ import {
   File,
   ListPlus,
   Loader2,
+  ChevronRight,
   Paperclip,
   Square,
   X,
@@ -16,6 +17,7 @@ import type { Model } from "~/lib/mock"
 import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
 import { providerLabel } from "~/lib/api"
+import { filterCommands, type SlashCommand } from "~/lib/slashCommands"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -44,6 +46,8 @@ export function Composer({
   onRefreshModels,
   onSend,
   onSearchFiles,
+  commands = [],
+  openModelPickerSignal,
   streaming,
   onStop,
   disabled = false,
@@ -60,6 +64,10 @@ export function Composer({
   onRefreshModels?: () => void | Promise<void>
   onSend: (text: string, opts?: { delivery?: "interject"; images?: { base64: string; mediaType: string }[] }) => void
   onSearchFiles?: (query: string) => Promise<FileSearchItem[]>
+  /** Slash commands (built-ins + saved-mode aliases) for the `/` popup. */
+  commands?: SlashCommand[]
+  /** Bump to open the model picker from outside (e.g. the `/model` command). */
+  openModelPickerSignal?: number
   streaming: boolean
   onStop: () => void
   disabled?: boolean
@@ -79,6 +87,8 @@ export function Composer({
   const [mentionQuery, setMentionQuery] = useState("")
   const [mentionItems, setMentionItems] = useState<FileSearchItem[]>([])
   const [mentionIndex, setMentionIndex] = useState(0)
+  const [slashDismissed, setSlashDismissed] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const switchGen = useRef(0)
@@ -96,6 +106,15 @@ export function Composer({
     return [...map.entries()].sort(([a], [b]) => providerSortKey(a).localeCompare(providerSortKey(b)))
   }, [models])
 
+  // Slash popup: only while the whole input is one `/token` (never mid-message),
+  // matching the TUI's `value.startsWith("/") && !value.includes(" ")`.
+  const slashActive = !slashDismissed && value.startsWith("/") && !value.includes(" ")
+  const slashMatches = useMemo(
+    () => (slashActive ? filterCommands(commands, value) : []),
+    [slashActive, commands, value],
+  )
+  const slashOpen = slashActive && slashMatches.length > 0
+
   const grow = (el: HTMLTextAreaElement) => {
     el.style.height = "auto"
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
@@ -109,7 +128,27 @@ export function Composer({
     onSend(text, { delivery, images: images.map(({ base64, mediaType }) => ({ base64, mediaType })) })
     setValue("")
     setImages([])
+    setSlashDismissed(false)
     if (ref.current) ref.current.style.height = "auto"
+  }
+
+  /** Menu pick: bare commands run now, argument-taking ones just complete. */
+  const runCommand = (cmd: SlashCommand) => {
+    setSlashIndex(0)
+    setSlashDismissed(false)
+    setValue("")
+    if (ref.current) ref.current.style.height = "auto"
+    onSend(cmd.name)
+  }
+
+  const completeCommand = (cmd: SlashCommand) => {
+    const next = `${cmd.name} `
+    setValue(next)
+    setSlashDismissed(true)
+    requestAnimationFrame(() => {
+      ref.current?.focus()
+      ref.current?.setSelectionRange(next.length, next.length)
+    })
   }
 
   useEffect(() => {
@@ -126,7 +165,9 @@ export function Composer({
   const updateMentions = (next: string, cursor: number) => {
     const before = next.slice(0, cursor)
     const match = /(?:^|\s)@([^\s@]*)$/.exec(before)
-    setMentionOpen(!!match && !!onSearchFiles)
+    // The slash menu owns the keyboard while it's up (TUI parity).
+    const slashing = next.startsWith("/") && !next.includes(" ")
+    setMentionOpen(!slashing && !!match && !!onSearchFiles)
     setMentionQuery(match?.[1] ?? "")
   }
 
@@ -178,6 +219,12 @@ export function Composer({
     }
   }
 
+  // `/model` opens the existing picker instead of a new surface.
+  useEffect(() => {
+    if (!openModelPickerSignal) return
+    handleOpenChange(true)
+  }, [openModelPickerSignal])
+
   const pick = async (m: Model) => {
     if (busy) return
     if (m.ready === false) return
@@ -219,11 +266,24 @@ export function Composer({
           }
           className="max-h-[220px] min-h-[44px] px-3 py-2.5 text-[14px] leading-relaxed"
           onChange={(e) => {
-            setValue(e.target.value)
+            const next = e.target.value
+            setValue(next)
             grow(e.target)
-            updateMentions(e.target.value, e.target.selectionStart)
+            // Escape sticks while the `/token` is still being typed; a space or
+            // a non-slash start means we're past the command and can re-arm.
+            if (!next.startsWith("/") || next.includes(" ")) setSlashDismissed(false)
+            setSlashIndex(0)
+            updateMentions(next, e.target.selectionStart)
           }}
           onKeyDown={(e) => {
+            if (slashOpen) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((old) => Math.max(0, Math.min(slashMatches.length - 1, old + (e.key === "ArrowDown" ? 1 : -1)))) }
+              else if (e.key === "Enter" && !e.shiftKey && slashMatches[slashIndex]) { e.preventDefault(); runCommand(slashMatches[slashIndex]!) }
+              else if (e.key === "Tab" && slashMatches[slashIndex]) { e.preventDefault(); completeCommand(slashMatches[slashIndex]!) }
+              else if (e.key === "Escape") { e.preventDefault(); setSlashDismissed(true) }
+              // Everything else (typing, ⇧⏎ newline) keeps its default behavior.
+              return
+            }
             if (mentionOpen) {
               if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setMentionIndex((old) => Math.max(0, Math.min(mentionItems.length - 1, old + (e.key === "ArrowDown" ? 1 : -1)))) }
               else if ((e.key === "Enter" || e.key === "Tab") && mentionItems[mentionIndex]) { e.preventDefault(); insertMention(mentionItems[mentionIndex]!) }
@@ -236,6 +296,7 @@ export function Composer({
             }
           }}
         />
+        {slashOpen && <div className="mx-2 mb-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-panel">{slashMatches.map((cmd, i) => <button type="button" key={cmd.name} onMouseDown={(e) => { e.preventDefault(); runCommand(cmd) }} onMouseMove={() => setSlashIndex(i)} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === slashIndex && "bg-accent")}><ChevronRight className={cn("size-3 shrink-0 text-primary", i !== slashIndex && "opacity-0")} /><span className="shrink-0 font-medium font-mono text-foreground">{cmd.name}</span><span className="truncate text-muted-foreground">{cmd.description}</span></button>)}</div>}
         {mentionOpen && <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-popover shadow-panel">{mentionItems.length ? mentionItems.map((item, i) => <button type="button" key={item.path} onMouseDown={(e) => { e.preventDefault(); insertMention(item) }} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === mentionIndex && "bg-accent")}><File className="size-3 text-primary" /><span className="truncate">{item.path}</span><span className="ml-auto text-muted-foreground">{item.kind}</span></button>) : <div className="px-3 py-2 text-[12px] text-muted-foreground">No matching files</div>}</div>}
 
         <div className="flex items-center justify-between gap-2 pt-1">

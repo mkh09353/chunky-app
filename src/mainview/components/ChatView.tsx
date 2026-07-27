@@ -36,6 +36,7 @@ export function ChatTopBar({
   reposBusy = false,
   reposDisabled = false,
   headerRight,
+  onToggleBrowser,
   onRename, onFork, onRewind, onGoal, onShip, onStats,
 }: {
   thread: Thread
@@ -48,6 +49,7 @@ export function ChatTopBar({
   reposBusy?: boolean
   reposDisabled?: boolean
   headerRight?: React.ReactNode
+  onToggleBrowser?: () => void
   onRename?: () => void; onFork?: () => void; onRewind?: () => void; onGoal?: () => void; onShip?: () => void; onStats?: () => void
 }) {
   const showRepos =
@@ -88,10 +90,10 @@ export function ChatTopBar({
           <TooltipPopup>Share thread</TooltipPopup>
         </Tooltip>
         <Tooltip>
-          <TooltipTrigger render={<Button variant="ghost" size="icon-sm" />}>
+          <TooltipTrigger render={<Button variant="ghost" size="icon-sm" onClick={onToggleBrowser} aria-label="Toggle browser pane" />}>
             <PanelRightOpen />
           </TooltipTrigger>
-          <TooltipPopup>Toggle panel</TooltipPopup>
+          <TooltipPopup>Toggle browser</TooltipPopup>
         </Tooltip>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" />}>
