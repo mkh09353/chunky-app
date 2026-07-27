@@ -28,6 +28,8 @@ const DEFAULT_HEIGHT = 260
 const MAX_HEIGHT_RATIO = 0.7
 /** Side-by-side panes allowed inside one tab group. */
 const MAX_TERMINALS_PER_GROUP = 4
+/** Custom tab names are trimmed and capped to keep the tab strip readable. */
+const MAX_NAME_LENGTH = 40
 
 const FONT_FAMILY = "JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"
 
@@ -38,6 +40,8 @@ type Persisted = {
   open: boolean
   height: number
   groups: TerminalGroup[]
+  /** Custom tab names by terminal id; absent → the default "Terminal N" label. */
+  names: Record<string, string>
   activeId: string | null
   seq: number
 }
@@ -46,6 +50,7 @@ const EMPTY: Persisted = {
   open: false,
   height: DEFAULT_HEIGHT,
   groups: [],
+  names: {},
   activeId: null,
   seq: 1,
 }
@@ -82,6 +87,15 @@ function readPersisted(): Persisted {
         if (clean.length > 0) groups.push({ id: gid, ids: clean })
       }
     }
+    // Names are kept only for terminals that survived group validation.
+    const names: Record<string, string> = {}
+    if (body.names && typeof body.names === "object") {
+      for (const [id, value] of Object.entries(body.names as Record<string, unknown>)) {
+        if (!seen.has(id) || typeof value !== "string") continue
+        const clean = value.trim().slice(0, MAX_NAME_LENGTH)
+        if (clean) names[id] = clean
+      }
+    }
     const activeId =
       typeof body.activeId === "string" && seen.has(body.activeId) ? body.activeId : (groups[0]?.ids[0] ?? null)
     const seq = typeof body.seq === "number" && Number.isFinite(body.seq) ? Math.max(1, Math.floor(body.seq)) : seen.size + 1
@@ -89,6 +103,7 @@ function readPersisted(): Persisted {
       open: body.open === true,
       height: clampHeight(typeof body.height === "number" ? body.height : DEFAULT_HEIGHT),
       groups,
+      names,
       activeId,
       seq,
     }
@@ -162,7 +177,7 @@ const LIGHT_THEME: ITheme = {
   brightWhite: "#efeef1",
 }
 
-function labelFor(id: string): string {
+function defaultLabelFor(id: string): string {
   const n = id.match(/(\d+)$/)?.[1]
   return n ? `Terminal ${n}` : id
 }
@@ -369,6 +384,10 @@ export function TerminalDrawer({
   const [height, setHeight] = useState(() => clampHeight(initial.height))
   const [groups, setGroups] = useState<TerminalGroup[]>(() => initial.groups)
   const [activeId, setActiveId] = useState<string | null>(() => initial.activeId)
+  const [names, setNames] = useState<Record<string, string>>(() => initial.names)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState("")
+  const cancelRenameRef = useRef(false)
   const [exited, setExited] = useState<Record<string, boolean>>({})
   const [restarts, setRestarts] = useState<Record<string, number>>({})
   const seqRef = useRef(initial.seq)
@@ -382,8 +401,45 @@ export function TerminalDrawer({
 
   // Persist the whole drawer shape (open + height + tabs) on every change.
   useEffect(() => {
-    writePersisted({ open, height, groups, activeId, seq: seqRef.current })
-  }, [open, height, groups, activeId])
+    writePersisted({ open, height, groups, names, activeId, seq: seqRef.current })
+  }, [open, height, groups, names, activeId])
+
+  const labelOf = useCallback((id: string) => names[id] ?? defaultLabelFor(id), [names])
+
+  const startRename = useCallback(
+    (id: string) => {
+      cancelRenameRef.current = false
+      setDraft(names[id] ?? defaultLabelFor(id))
+      setEditingId(id)
+    },
+    [names],
+  )
+
+  /** Commit the inline edit. Empty (or unchanged-from-default) clears the custom name. */
+  const commitRename = useCallback(
+    (id: string) => {
+      const value = draft.trim().slice(0, MAX_NAME_LENGTH)
+      setNames((prev) => {
+        const next = { ...prev }
+        if (!value || value === defaultLabelFor(id)) delete next[id]
+        else next[id] = value
+        return next
+      })
+      // The edit session is over: swallow any blur the unmounting input emits so
+      // it cannot re-commit an already-cleared draft.
+      cancelRenameRef.current = true
+      setEditingId(null)
+      setDraft("")
+    },
+    [draft],
+  )
+
+  const cancelRename = useCallback(() => {
+    // Tell the blur handler this teardown was an explicit cancel, not a commit.
+    cancelRenameRef.current = true
+    setEditingId(null)
+    setDraft("")
+  }, [])
 
   const createTerminal = useCallback(
     (mode: "tab" | "split") => {
@@ -412,6 +468,13 @@ export function TerminalDrawer({
         return next
       })
       setRestarts((prev) => {
+        if (!(id in prev)) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+      setEditingId((current) => (current === id ? null : current))
+      setNames((prev) => {
         if (!(id in prev)) return prev
         const next = { ...prev }
         delete next[id]
@@ -537,13 +600,48 @@ export function TerminalDrawer({
             >
               {group.ids.map((id) => {
                 const active = id === activeId
+                const label = labelOf(id)
+                if (editingId === id) {
+                  return (
+                    <input
+                      key={id}
+                      autoFocus
+                      value={draft}
+                      maxLength={MAX_NAME_LENGTH}
+                      aria-label={`Rename ${defaultLabelFor(id)}`}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onBlur={() => {
+                        if (cancelRenameRef.current) {
+                          cancelRenameRef.current = false
+                          return
+                        }
+                        commitRename(id)
+                      }}
+                      onKeyDown={(event) => {
+                        // Keep Ctrl+` / ⌘K / Escape-to-stop from firing while typing.
+                        event.stopPropagation()
+                        if (event.key === "Enter") {
+                          event.preventDefault()
+                          commitRename(id)
+                        } else if (event.key === "Escape") {
+                          event.preventDefault()
+                          cancelRename()
+                        }
+                      }}
+                      className="h-6 w-32 shrink-0 rounded-md border border-input bg-background/80 px-2 font-medium text-[11.5px] text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                    />
+                  )
+                }
                 return (
                   <div key={id} className="group/tab relative flex shrink-0 items-center">
                     <button
                       type="button"
                       role="tab"
                       aria-selected={active}
+                      title={`${label} — double-click to rename`}
                       onClick={() => setActiveId(id)}
+                      onDoubleClick={() => startRename(id)}
                       className={cn(
                         "inline-flex h-6 max-w-[10rem] cursor-pointer items-center gap-1.5 rounded-md pr-6 pl-2 font-medium text-[11.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                         active
@@ -557,11 +655,11 @@ export function TerminalDrawer({
                           className="size-1.5 shrink-0 rounded-full bg-muted-foreground/60"
                         />
                       )}
-                      <span className="truncate">{labelFor(id)}</span>
+                      <span className="truncate select-none">{label}</span>
                     </button>
                     <button
                       type="button"
-                      aria-label={`Close ${labelFor(id)}`}
+                      aria-label={`Close ${label}`}
                       onClick={() => closeTerminal(id)}
                       className={cn(
                         "-translate-y-1/2 absolute top-1/2 right-0.5 flex size-4 cursor-pointer items-center justify-center rounded opacity-0 outline-none transition-opacity hover:bg-accent focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover/tab:opacity-100",
