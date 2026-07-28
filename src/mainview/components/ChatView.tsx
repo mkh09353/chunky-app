@@ -1,6 +1,5 @@
 import {
   ChevronDown,
-  GitPullRequest,
   Info,
   MoreHorizontal,
   PanelRightOpen,
@@ -101,10 +100,6 @@ export function ChatTopBar({
       </div>
 
       <div className="no-drag flex shrink-0 items-center gap-1.5">
-        <div className="hidden items-stretch sm:flex">
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={onShip}><GitPullRequest className="size-3.5" /><span className="hidden lg:inline">Ship it</span></Button>
-        </div>
-
         {headerRight}
         {onToggleTerminal && (
           <Tooltip>
