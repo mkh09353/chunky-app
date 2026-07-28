@@ -12,8 +12,6 @@ jobs:
   release:
     runs-on: macos-latest
     env:
-      KEYCHAIN_PATH: ${{ runner.temp }}/chunky-signing.keychain-db
-      CERTIFICATE_PATH: ${{ runner.temp }}/chunky-developer-id.p12
       # These names are consumed directly by Electrobun's codesign/notarytool implementation.
       ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
       ELECTROBUN_APPLEID: ${{ secrets.ELECTROBUN_APPLEID }}
@@ -40,6 +38,8 @@ jobs:
       - name: Import Developer ID signing certificate
         shell: bash
         env:
+          KEYCHAIN_PATH: ${{ runner.temp }}/chunky-signing.keychain-db
+          CERTIFICATE_PATH: ${{ runner.temp }}/chunky-developer-id.p12
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
@@ -67,6 +67,9 @@ jobs:
       - name: Remove temporary signing keychain
         if: ${{ always() }}
         shell: bash
+        env:
+          KEYCHAIN_PATH: ${{ runner.temp }}/chunky-signing.keychain-db
+          CERTIFICATE_PATH: ${{ runner.temp }}/chunky-developer-id.p12
         run: |
           security delete-keychain "$KEYCHAIN_PATH" || true
           rm -f "$CERTIFICATE_PATH"
