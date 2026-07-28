@@ -52,12 +52,19 @@ export default {
     bun: {
       entrypoint: "src/bun/index.ts",
     },
-    // The Vite build emits to dist/ (see vite.config.ts). Copy it into the
-    // bundle so the installed app can serve the UI over views://mainview/*.
+    // The Vite build emits to dist/ (see vite.config.ts). Stage the WHOLE dist
+    // tree so the installed app can serve the UI over views://mainview/*.
+    //
+    // This must not be narrowed to index.html + assets/: Vite copies everything
+    // in src/mainview/public/ to the *root* of dist (chunky-mark.svg,
+    // chunky-config.json), not into dist/assets. Listing only those two entries
+    // shipped a bundle where `/chunky-mark.svg` 404'd and the logo rendered as a
+    // broken image. Copying dist wholesale keeps packaging correct for any
+    // future public/ asset. src/bun/rendererAssets.test.ts guards this.
+    //
     // Also stage FFF native bins for production packaging (see above).
     copy: {
-      "dist/index.html": "views/mainview/index.html",
-      "dist/assets": "views/mainview/assets",
+      dist: "views/mainview",
       ...fffBinCopy,
     },
     watchIgnore: ["dist/**"],
