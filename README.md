@@ -112,6 +112,11 @@ server state is the default whenever connected.
 - **Live client** (`src/mainview/lib/api.ts`, `transcript.ts`, `reconnect.ts`) —
   sessions list/create, SSE transcript reduce, send/interrupt, model picker.
 - **Theme** — Chunky brand purple, dark default, pre-paint bootstrap in `index.html`.
+- **Brand** (`scripts/generate-brand-assets.py`) — the logo is defined as geometry,
+  not a hand-edited raster. `bun run icons` regenerates the vector master
+  (`assets/brand/chunky-icon.svg`), the 1024 PNG master, the 10-file
+  `assets/icon.iconset/` that Electrobun turns into `AppIcon.icns`, and the
+  in-app mark (`src/mainview/public/chunky-mark.svg`).
 - **UI kit** (`src/mainview/components/ui/`) — button, input, textarea, dialog,
   dropdown-menu, tooltip, scroll-area, kbd, skeleton, switch, separator.
 - **Screens** — sidebar (real sessions when live), chat view with code blocks +
