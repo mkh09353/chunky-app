@@ -169,7 +169,7 @@ export function ChatView({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
-        <div className="mx-auto flex max-w-3xl flex-col gap-7 px-5 py-8">
+        <div className="mx-auto flex max-w-5xl flex-col gap-4 px-5 py-5">
           <div className="mx-auto mb-1 flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
             <Sparkles className="size-3 text-primary" />
             {loading ? "Loading transcript…" : "Chunky started this thread"}

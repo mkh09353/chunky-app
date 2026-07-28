@@ -201,7 +201,7 @@ function ToolStatus({ tool }: { tool: ToolBlockData }) {
 }
 
 function ToolCard({ tool }: { tool: ToolBlockData }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const Icon = toolIcon(tool.name)
   const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
   return (
@@ -357,7 +357,7 @@ export function MessageView({ message, streaming }: { message: Message; streamin
         {isUser ? <User className="size-4" /> : <Sparkles className="size-4" />}
       </div>
 
-      <div className={cn("flex min-w-0 max-w-[min(46rem,100%)] flex-col gap-1.5", isUser && "items-end")}>
+      <div className={cn("flex min-w-0 max-w-[min(62rem,100%)] flex-col gap-1.5", isUser && "items-end")}>
         <div className="flex items-center gap-2 px-0.5">
           <span className="font-semibold text-[13px]">{isUser ? "You" : "Chunky"}</span>
           {message.model && (

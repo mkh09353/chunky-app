@@ -248,7 +248,7 @@ export function Composer({
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 pb-4">
+    <div className="mx-auto w-full max-w-5xl px-4 pb-4">
       {/* Todos + queued messages render above the composer via TodosPanel /
           QueueChips (see App.tsx) so both surfaces stay in one place. */}
       {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}

@@ -40,7 +40,7 @@ export function TodosPanel({ todos }: { todos: TodoSnapshot[] }) {
   const completed = todos.filter((t) => t.status === "completed").length
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4">
+    <div className="mx-auto w-full max-w-5xl px-4">
       <div className="overflow-hidden rounded-xl border border-border bg-card/70 shadow-xs backdrop-blur-sm">
         <button
           type="button"

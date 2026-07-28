@@ -15,7 +15,7 @@ const KIND_TONE: Record<QueueEntry["kind"], string> = {
 export function QueueChips({ entries }: { entries: QueueEntry[] }) {
   if (!entries || entries.length === 0) return null
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-4">
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-1.5 px-4">
       {entries.map((e) => (
         // TODO: needs server dequeue route — no remove button until then.
         <div
