@@ -327,9 +327,17 @@ export async function openEventStream(
   }
 }
 
-export async function fetchModel(baseUrl: string): Promise<ModelSelection | null> {
+/** Read the executor selection. With `sessionId` the server returns that
+ *  session's EFFECTIVE selection (its pin, else the global default) in the same
+ *  shape; omit it for the global default itself. */
+export async function fetchModel(
+  baseUrl: string,
+  sessionId?: string | null,
+): Promise<ModelSelection | null> {
   try {
-    const res = await fetch(baseUrl + "/api/model")
+    const res = await fetch(
+      baseUrl + (sessionId ? `/api/model?sessionId=${encodeURIComponent(sessionId)}` : "/api/model"),
+    )
     if (!res.ok) return null
     return (await res.json()) as ModelSelection
   } catch {
@@ -365,14 +373,18 @@ export async function listAllModels(baseUrl: string): Promise<ModelRow[]> {
   return groups.flat()
 }
 
+/** Select the executor model. Pass `sessionId` to pin the selection to that
+ *  session only (response = the session's effective selection); omit it to move
+ *  the global default that new/unpinned sessions inherit. */
 export async function selectModel(
   baseUrl: string,
   payload: { provider: string; model: string; effort?: string; speed?: string },
+  sessionId?: string | null,
 ): Promise<ModelSelection> {
   const res = await fetch(baseUrl + "/api/model/select", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(sessionId ? { ...payload, sessionId } : payload),
   })
   const data = (await res.json().catch(() => ({}))) as ModelSelection & { error?: string }
   if (!res.ok || data.error) throw new Error(data.error || `select model failed (${res.status})`)

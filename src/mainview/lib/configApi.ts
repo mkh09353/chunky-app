@@ -271,8 +271,17 @@ export interface SelectModelInput {
   speed?: Speed
 }
 
-export async function selectModel(input: SelectModelInput): Promise<ModelSelection> {
-  return req<ModelSelection>("/api/model/select", jsonInit("POST", input))
+/** Select the executor model. Pass `sessionId` to PIN the selection to that
+ *  session only (the response is that session's effective selection); omit it
+ *  for the GLOBAL default used by new/unpinned sessions. */
+export async function selectModel(
+  input: SelectModelInput,
+  sessionId?: string | null,
+): Promise<ModelSelection> {
+  return req<ModelSelection>(
+    "/api/model/select",
+    jsonInit("POST", sessionId ? { ...input, sessionId } : input),
+  )
 }
 
 // ================================================================
@@ -400,8 +409,13 @@ function normalizeSidekick(data: unknown): SidekickConfig {
   return out
 }
 
-export async function getSidekick(): Promise<SidekickConfig> {
-  return normalizeSidekick(await req<unknown>("/api/sidekick"))
+/** Read sidekick config. With `sessionId` the server returns that session's
+ *  EFFECTIVE config (per-session override merged over the global default). */
+export async function getSidekick(sessionId?: string | null): Promise<SidekickConfig> {
+  const path = sessionId
+    ? `/api/sidekick?sessionId=${encodeURIComponent(sessionId)}`
+    : "/api/sidekick"
+  return normalizeSidekick(await req<unknown>(path))
 }
 
 /** Build a flat patch, omitting null/undefined (server merge-persists it). */
@@ -416,12 +430,26 @@ function seatPatch(cfg: SeatConfig): Record<string, unknown> {
 
 /** Save the DEFAULT seat: POST flat { enabled?, provider?, model?, effort? }
  *  (no `seat`). `enabled` is the master switch; empty model inherits executor. */
-export async function saveDefaultSeat(config: SeatConfig): Promise<SidekickConfig> {
-  return normalizeSidekick(await req<unknown>("/api/sidekick", jsonInit("POST", seatPatch(config))))
+export async function saveDefaultSeat(
+  config: SeatConfig,
+  sessionId?: string | null,
+): Promise<SidekickConfig> {
+  const patch = seatPatch(config)
+  return normalizeSidekick(
+    await req<unknown>(
+      "/api/sidekick",
+      jsonInit("POST", sessionId ? { ...patch, sessionId } : patch),
+    ),
+  )
 }
 
-/** Save a NAMED seat. The server requires provider + model for named seats. */
-export async function saveNamedSeat(seat: string, config: SeatConfig): Promise<SidekickConfig> {
+/** Save a NAMED seat. The server requires provider + model for named seats.
+ *  With `sessionId` the seat becomes a per-session override. */
+export async function saveNamedSeat(
+  seat: string,
+  config: SeatConfig,
+  sessionId?: string | null,
+): Promise<SidekickConfig> {
   return normalizeSidekick(
     await req<unknown>(
       "/api/sidekick",
@@ -431,15 +459,20 @@ export async function saveNamedSeat(seat: string, config: SeatConfig): Promise<S
         provider: config.provider,
         model: config.model,
         ...(config.effort ? { effort: config.effort } : {}),
+        ...(sessionId ? { sessionId } : {}),
       }),
     ),
   )
 }
 
-/** Delete a named seat — server maps { seat, enabled: false } to removal. */
-export async function deleteSeat(seat: string): Promise<SidekickConfig> {
+/** Delete a named seat — server maps { seat, enabled: false } to removal.
+ *  With `sessionId` it removes that session's named-seat override only. */
+export async function deleteSeat(seat: string, sessionId?: string | null): Promise<SidekickConfig> {
   return normalizeSidekick(
-    await req<unknown>("/api/sidekick", jsonInit("POST", { seat, enabled: false })),
+    await req<unknown>(
+      "/api/sidekick",
+      jsonInit("POST", { seat, enabled: false, ...(sessionId ? { sessionId } : {}) }),
+    ),
   )
 }
 

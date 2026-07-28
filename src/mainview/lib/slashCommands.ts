@@ -22,7 +22,7 @@ export const COMMANDS: SlashCommand[] = [
   { name: "/model", description: "Pick the executor model" },
   { name: "/mode", description: "Named model+sidekick+advisor trios (/mode <name>, /mode save <name>)" },
   { name: "/advisor", description: "Set the advisor model (a stronger model, on tap)" },
-  { name: "/sidekick", description: "Configure sidekick seats (default + named, e.g. frontend/backend)" },
+  { name: "/sidekick", description: "Sidekick seats for THIS thread (default + named, e.g. frontend/backend)" },
   { name: "/skills", description: "Browse skills; add/remove/update skill repos" },
   { name: "/provider", description: "Configure available models for a provider" },
   { name: "/usage", description: "This session's tokens and cost, grouped by role" },

@@ -12,6 +12,7 @@ import { TodosPanel } from "./components/TodosPanel"
 import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
 import { GitToolbar } from "./components/GitPanel"
 import { Sidebar } from "./components/Sidebar"
+import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -163,6 +164,18 @@ function modelSelectionToUi(sel: ModelSelection | null, rows: ModelRow[]): Model
   }
 }
 
+/** Same executor pairing? Used to tell a session PIN apart from the inherited
+ *  global default (both come back in the same shape from /api/model). */
+function sameSelection(a: ModelSelection | null, b: ModelSelection | null): boolean {
+  if (!a || !b) return a === b
+  return (
+    a.provider === b.provider &&
+    a.model === b.model &&
+    (a.effort ?? null) === (b.effort ?? null) &&
+    (a.speed ?? null) === (b.speed ?? null)
+  )
+}
+
 function rowsToModels(rows: ModelRow[]): Model[] {
   return rows.map((r) => ({
     id: `${r.provider}/${r.model.id}`,
@@ -192,6 +205,9 @@ export function App() {
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
   const [modelSel, setModelSel] = useState<ModelSelection | null>(null)
+  // Session-pinned executor selections: POST /api/model/select with a sessionId
+  // pins that session only, so its display must survive global refreshes/SSE.
+  const [sessionModelSel, setSessionModelSel] = useState<Record<string, ModelSelection>>({})
   const [modelRows, setModelRows] = useState<ModelRow[]>([])
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
@@ -245,6 +261,8 @@ export function App() {
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
+  // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
+  const [sidekickPickerOpen, setSidekickPickerOpen] = useState(false)
 
   const streamAbort = useRef<AbortController | null>(null)
   const cloneAbort = useRef<AbortController | null>(null)
@@ -275,16 +293,23 @@ export function App() {
   const incognitoSession =
     live && sessions.find((s) => s.sessionId === sessionId)?.incognito === true
 
+  // The CURRENT session's effective executor: its pin when it has one, else the
+  // global default. One session's switch never moves another session's display.
+  const effectiveModelSel = useMemo(
+    () => (live && sessionId ? (sessionModelSel[sessionId] ?? modelSel) : modelSel),
+    [live, sessionId, sessionModelSel, modelSel],
+  )
+
   const uiModels = useMemo(() => {
     if (!live) return MODELS
     const list = rowsToModels(modelRows)
-    return list.length > 0 ? list : [modelSelectionToUi(modelSel, modelRows)]
-  }, [live, modelRows, modelSel])
+    return list.length > 0 ? list : [modelSelectionToUi(effectiveModelSel, modelRows)]
+  }, [live, modelRows, effectiveModelSel])
 
   const uiModel = useMemo(() => {
     if (!live) return demoModel
-    return modelSelectionToUi(modelSel, modelRows)
-  }, [live, demoModel, modelSel, modelRows])
+    return modelSelectionToUi(effectiveModelSel, modelRows)
+  }, [live, demoModel, effectiveModelSel, modelRows])
 
   // ---- Demo helpers (offline fallback only) ----
   const stopDemoStream = useCallback(() => {
@@ -314,16 +339,28 @@ export function App() {
   const threads: Thread[] = useMemo(() => {
     if (!live) return demoThreads
     return sessions.map((s) => {
+      // Each row labels itself with ITS OWN pinned model when it has one.
+      const rowSel = sessionModelSel[s.sessionId] ?? modelSel
       const t = sessionToThread(s, {
         liveStatus: s.sessionId === sessionId ? transcript.status : undefined,
         isActive: s.sessionId === sessionId,
-        modelName: uiModel.name,
+        modelName: modelSelectionToUi(rowSel, modelRows).name,
       })
       // Prefer repo identity over raw workspace path for project linkage.
       if (activeRepo) t.projectId = `repo:${activeRepo.id}`
       return t
     })
-  }, [live, demoThreads, sessions, sessionId, transcript.status, uiModel.name, activeRepo])
+  }, [
+    live,
+    demoThreads,
+    sessions,
+    sessionId,
+    transcript.status,
+    sessionModelSel,
+    modelSel,
+    modelRows,
+    activeRepo,
+  ])
 
   const activeThread: Thread = useMemo(() => {
     if (!live) {
@@ -354,22 +391,22 @@ export function App() {
       buildComposerStatus({
         mode: live ? "live" : "demo",
         incognito: incognitoSession,
-        executor: live ? modelSel : null,
+        executor: live ? effectiveModelSel : null,
         sidekick: sidekickConfig,
         advisor: advisorStatus,
         goal,
       }),
-    [live, incognitoSession, modelSel, sidekickConfig, advisorStatus, goal],
+    [live, incognitoSession, effectiveModelSel, sidekickConfig, advisorStatus, goal],
   )
 
   // Active model's context limit for the context-window meter (undefined in demo).
   const contextLimit = useMemo(() => {
     if (!live) return undefined
     const row = modelRows.find(
-      (r) => r.provider === modelSel?.provider && r.model.id === modelSel?.model,
+      (r) => r.provider === effectiveModelSel?.provider && r.model.id === effectiveModelSel?.model,
     )
     return row?.model.contextLimit
-  }, [live, modelRows, modelSel])
+  }, [live, modelRows, effectiveModelSel])
 
   // Working directory for the git panel: the active session's own workspace
   // wins, then the open repo, then the server workspace.
@@ -384,6 +421,30 @@ export function App() {
   const liveUsage = live ? transcript.usage : null
   const liveCompacted = live ? transcript.compacted : 0
   const liveQueue = live ? transcript.queue.entries : []
+
+  /** Read the global default AND (when given) a session's EFFECTIVE selection,
+   *  so pins survive an app reload and pins made in the TUI/another window show
+   *  up here. The session entry is kept only when it differs from the global
+   *  default — an unpinned session keeps tracking the global (which the 15s
+   *  poll refreshes) instead of freezing at load-time state. */
+  const hydrateSessionModel = useCallback(async (baseUrl: string, id: string | null) => {
+    const [globalSel, sessionSel] = await Promise.all([
+      fetchModel(baseUrl),
+      id ? fetchModel(baseUrl, id) : Promise.resolve(null),
+    ])
+    if (globalSel) setModelSel(globalSel)
+    if (!id || !sessionSel) return
+    setSessionModelSel((prev) => {
+      if (sameSelection(globalSel, sessionSel)) {
+        if (!(id in prev)) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      }
+      if (sameSelection(prev[id] ?? null, sessionSel)) return prev
+      return { ...prev, [id]: sessionSel }
+    })
+  }, [])
 
   // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
   const refreshSessions = useCallback(
@@ -407,6 +468,8 @@ export function App() {
     const gen = ++attachGen.current
 
     setSessionId(id)
+    // Pins are server state: read this session's effective executor on attach.
+    void hydrateSessionModel(baseUrl, id)
     void getGoal(baseUrl, id).then(setGoalState).catch(() => setGoalState(null))
     const repoForSession = activeRepoIdRef.current
     if (repoForSession) {
@@ -476,7 +539,7 @@ export function App() {
       setTranscript(initialState)
       setTranscriptLoading(true)
     }
-  }, [refreshSessions])
+  }, [refreshSessions, hydrateSessionModel])
 
   /** Load sessions for a repo and attach last/newest/created session. */
   const openRepoThreads = useCallback(
@@ -589,29 +652,34 @@ export function App() {
   /** Refresh current selection + full provider catalogs (picker open / retry). */
   const refreshModels = useCallback(async () => {
     if (!config || appMode !== "live") return
-    const [sel, rows] = await Promise.all([
-      fetchModel(config.baseUrl),
+    const [rows] = await Promise.all([
       listAllModels(config.baseUrl),
+      hydrateSessionModel(config.baseUrl, sessionIdRef.current),
     ])
-    if (sel) setModelSel(sel)
     setModelRows(rows)
-  }, [config, appMode])
+  }, [config, appMode, hydrateSessionModel])
 
-  /** Advisor + sidekick config for the composer status rule. Demo/offline never
-   *  touches the server, and a failed read degrades to "no chip" (never noise). */
+  /** Advisor + sidekick config for the composer status rule. The sidekick read
+   *  is SESSION-SCOPED (effective = per-session override over the global
+   *  default) so another session's change never rewrites this one's chip.
+   *  Demo/offline never touches the server, and a failed read degrades to
+   *  "no chip" (never noise). */
   const refreshAgents = useCallback(async () => {
     if (appMode !== "live") {
       setAdvisorStatus(null)
       setSidekickConfig(null)
       return
     }
+    const sid = sessionId
     const [advisor, sidekick] = await Promise.all([
       getAdvisorStatus().catch(() => null),
-      getSidekick().catch(() => null),
+      getSidekick(sid).catch(() => null),
     ])
+    // A session switch can land mid-flight; drop a stale session's answer.
+    if (sid !== sessionIdRef.current) return
     setAdvisorStatus(advisor)
     setSidekickConfig(sidekick)
-  }, [appMode])
+  }, [appMode, sessionId])
 
   /** Saved modes → slash aliases. Demo/offline never touches the server. */
   const refreshModes = useCallback(async () => {
@@ -1262,7 +1330,10 @@ export function App() {
           openSettingsAt("advisor")
           return true
         case "/sidekick":
-          openSettingsAt("sidekick")
+          // From a live session this is a per-session override surface; without
+          // a session (demo/offline) fall back to the global Settings page.
+          if (live && sessionId) setSidekickPickerOpen(true)
+          else openSettingsAt("sidekick")
           return true
         case "/skills":
           openSettingsAt("skills")
@@ -1301,14 +1372,19 @@ export function App() {
       if (!config) throw new Error("Not connected")
       const parts = splitModelKey(m.id)
       if (!parts) throw new Error(`Invalid model id: ${m.id}`)
+      const sid = sessionId
       // Await server confirmation before the picker treats the switch as done.
-      const next = await selectModel(config.baseUrl, {
-        provider: parts.provider,
-        model: parts.model,
-      })
-      setModelSel(next)
+      // This picker is SESSION-scoped: the selection is pinned to this session
+      // (the global default lives in Settings → Models).
+      const next = await selectModel(
+        config.baseUrl,
+        { provider: parts.provider, model: parts.model },
+        sid,
+      )
+      if (sid) setSessionModelSel((prev) => ({ ...prev, [sid]: next }))
+      else setModelSel(next)
     },
-    [live, config],
+    [live, config, sessionId],
   )
 
   const enterDemo = useCallback(() => {
@@ -1632,6 +1708,20 @@ export function App() {
           onOpenChange={setOnboardingOpen}
           onComplete={() => { void refreshModels() }}
         />
+        {live && sessionId && (
+          <SidekickPicker
+            open={sidekickPickerOpen}
+            onOpenChange={setSidekickPickerOpen}
+            sessionId={sessionId}
+            rows={modelRows}
+            onChanged={(next) => {
+              // Repaint the composer status now, then re-read the effective
+              // (per-session) config authoritatively.
+              setSidekickConfig(next)
+              void refreshAgents()
+            }}
+          />
+        )}
         {notice && <div className="fixed right-5 bottom-5 z-50 max-h-[60vh] max-w-sm overflow-y-auto rounded-xl border border-primary/25 bg-popover px-4 py-3 text-[13px] shadow-panel"><span className="whitespace-pre-line">{notice}</span><button type="button" className="ml-3 text-primary" onClick={() => setNotice(null)}>Dismiss</button></div>}
         <Dialog open={dialog !== null} onOpenChange={(open) => !open && setDialog(null)}><DialogPopup>
           <DialogHeader><DialogTitle>{dialog === "rename" ? "Rename session" : dialog === "fork" ? "Fork session" : dialog === "rewind" ? "Rewind session" : dialog === "goal" ? "Goal mode" : dialog === "ship" ? "Ship it" : dialog === "incognito" ? "Go incognito" : "Usage & scoreboard"}</DialogTitle><DialogDescription>{dialog === "rewind" ? "Choose a completed turn, then explicitly confirm restoring files and conversation." : dialog === "ship" ? "Optional notes for the handoff brief." : dialog === "incognito" ? "Pick an incognito mode. Applying it takes NEW sessions off the record — this one stays as it is." : ""}</DialogDescription></DialogHeader>
