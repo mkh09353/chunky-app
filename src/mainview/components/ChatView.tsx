@@ -26,9 +26,8 @@ import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
 import type { TranscriptState } from "~/lib/transcript"
 
-/** Top chrome strip: repo tabs + compact thread title + actions. */
+/** Top chrome strip: repo tabs + actions. */
 export function ChatTopBar({
-  thread,
   repos,
   activeRepoId,
   onSelectRepo,
@@ -47,7 +46,6 @@ export function ChatTopBar({
   terminalOpen = false,
   onRename, onFork, onRewind, onGoal, onShip, onStats,
 }: {
-  thread: Thread
   /** Optional; when omitted, repo tabs are hidden (demo / offline). */
   repos?: Repo[]
   activeRepoId?: string | null
@@ -92,12 +90,6 @@ export function ChatTopBar({
       ) : (
         <div className="min-w-0 flex-1" />
       )}
-
-      <div className="no-drag hidden min-w-0 max-w-[28%] items-center gap-1.5 md:flex">
-        <span className="truncate text-[12px] text-muted-foreground" title={thread.title}>
-          {thread.title}
-        </span>
-      </div>
 
       <div className="no-drag flex shrink-0 items-center gap-1.5">
         {headerRight}
