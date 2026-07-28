@@ -4,6 +4,7 @@ import {
   ROUTES,
   readSSE,
   type AgentEvent,
+  type CreateSessionRequest,
   type CreateSessionResponse,
   type ListSessionsResponse,
   type MessageDelivery,
@@ -206,11 +207,22 @@ export interface CreatedSession {
   incognito: boolean
 }
 
-export async function createSession(baseUrl: string, repoId?: string | null): Promise<CreatedSession> {
+/** `cwd` pins the session to an arbitrary directory (it wins over `repoId`
+ *  server-side) — used by the clone bootstrap session, which has to run in a
+ *  folder that is not a registered repo yet. */
+export async function createSession(
+  baseUrl: string,
+  repoId?: string | null,
+  cwd?: string | null,
+): Promise<CreatedSession> {
+  const body: CreateSessionRequest = {
+    ...(repoId ? { repoId } : {}),
+    ...(cwd ? { cwd } : {}),
+  }
   const res = await fetch(baseUrl + ROUTES.createSession, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(repoId ? { repoId } : {}),
+    body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`create session failed (${res.status})`)
   const data = (await res.json()) as CreateSessionResponse & { incognito?: boolean }

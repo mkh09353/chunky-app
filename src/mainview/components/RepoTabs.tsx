@@ -1,4 +1,4 @@
-import { Folder, FolderOpen, Loader2, Plus, Search, X } from "lucide-react"
+import { CloudDownload, Eye, Folder, FolderOpen, Loader2, Plus, Search, X } from "lucide-react"
 import {
   useCallback,
   useEffect,
@@ -15,6 +15,9 @@ import {
   type DirSearchHit,
 } from "~/lib/dirSearch"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
+import { parseGitUrl } from "~/lib/cloneRepo"
+import { scmClone } from "~/lib/git"
+import { nativeRpcAvailable } from "~/lib/rpc"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -26,6 +29,19 @@ import {
 
 const SEARCH_DEBOUNCE_MS = 180
 
+/** Live state of an in-flight clone, owned by App and rendered here. */
+export interface CloneStatus {
+  phase: "running" | "registering" | "error"
+  url: string
+  /** The bootstrap session, once it exists — enables "View thread". */
+  sessionId: string | null
+  /** Recent agent activity, oldest first. */
+  lines: string[]
+  error: string | null
+  /** The agent's last message, shown with a failure so it isn't a dead end. */
+  agentMessage?: string
+}
+
 export function RepoTabs({
   repos,
   activeId,
@@ -34,6 +50,11 @@ export function RepoTabs({
   onRemove,
   busy = false,
   disabled = false,
+  onClone,
+  cloneStatus = null,
+  onCancelClone,
+  onViewCloneThread,
+  defaultCloneParent = "",
 }: {
   repos: Repo[]
   activeId: string | null
@@ -42,6 +63,14 @@ export function RepoTabs({
   onRemove: (id: string) => void | Promise<void>
   busy?: boolean
   disabled?: boolean
+  /** Clone a git URL through an agent session. Omitted → the section is hidden
+   *  (demo/offline), so the three local add paths keep working untouched. */
+  onClone?: (url: string, parentDir: string) => Promise<void>
+  cloneStatus?: CloneStatus | null
+  onCancelClone?: () => void
+  onViewCloneThread?: (sessionId: string) => void
+  /** Pre-filled destination folder (first native root, else the repo's parent). */
+  defaultCloneParent?: string
 }) {
   const [adding, setAdding] = useState(false)
   const [path, setPath] = useState("")
@@ -58,6 +87,19 @@ export function RepoTabs({
   const [searchError, setSearchError] = useState<string | null>(null)
   const [activeHit, setActiveHit] = useState(-1)
 
+  // Clone-from-URL form. `cloneDest` starts from the app-provided default and
+  // is then the user's to change (folder picker or free text).
+  const [cloneUrl, setCloneUrl] = useState("")
+  const [cloneDest, setCloneDest] = useState(defaultCloneParent)
+  const [cloneError, setCloneError] = useState<string | null>(null)
+  const [cloneStarting, setCloneStarting] = useState(false)
+  const [directCloning, setDirectCloning] = useState(false)
+  const cloneUrlRef = useRef<HTMLInputElement>(null)
+  const cloneLogRef = useRef<HTMLDivElement>(null)
+  const cloning = cloneStatus?.phase === "running" || cloneStatus?.phase === "registering"
+  const canClone = !!onClone
+  const canDirectClone = nativeRpcAvailable()
+
   const rootRef = useRef<HTMLDivElement>(null)
   const pathInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -65,10 +107,23 @@ export function RepoTabs({
   const formId = useId()
   const listboxId = useId()
 
+  // The default only seeds the field; never clobber what the user typed.
+  useEffect(() => {
+    setCloneDest((current) => (current ? current : defaultCloneParent))
+  }, [defaultCloneParent])
+
+  // Keep the newest agent activity in view (the log is short and scrolls).
+  useEffect(() => {
+    const el = cloneLogRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [cloneStatus?.lines])
+
+
   const closeAdd = useCallback(() => {
     setAdding(false)
     setPath("")
     setError(null)
+    setCloneError(null)
     setQuery("")
     setHits([])
     setSearchError(null)
@@ -78,11 +133,13 @@ export function RepoTabs({
 
   useEffect(() => {
     if (!adding) return
+    // A running clone keeps the popover open: its progress lines are the point.
     const onDown = (e: MouseEvent) => {
+      if (cloning) return
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) closeAdd()
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeAdd()
+      if (e.key === "Escape" && !cloning) closeAdd()
     }
     document.addEventListener("mousedown", onDown)
     document.addEventListener("keydown", onKey)
@@ -90,7 +147,7 @@ export function RepoTabs({
       document.removeEventListener("mousedown", onDown)
       document.removeEventListener("keydown", onKey)
     }
-  }, [adding, closeAdd])
+  }, [adding, closeAdd, cloning])
 
   useEffect(() => {
     if (!adding) return
@@ -177,27 +234,96 @@ export function RepoTabs({
     [path, onAdd, closeAdd],
   )
 
+  /** Hand the URL + destination to the agent-backed clone flow (App owns the
+   *  session, streaming, and the addRepo that follows). */
+  const submitClone = useCallback(async () => {
+    if (!onClone || cloning || cloneStarting) return
+    const parsed = parseGitUrl(cloneUrl)
+    if (!parsed) {
+      setCloneError("Enter a git URL, e.g. https://github.com/owner/repo")
+      return
+    }
+    const dest = cloneDest.trim()
+    if (!dest.startsWith("/")) {
+      setCloneError("Choose an absolute destination folder.")
+      return
+    }
+    setCloneError(null)
+    setCloneStarting(true)
+    try {
+      await onClone(parsed.url, dest)
+      closeAdd()
+      setCloneUrl("")
+    } catch (err) {
+      // The detailed failure (plus the agent's last message) renders from
+      // cloneStatus; keep the form filled in so retry is one click.
+      setCloneError((err as Error).message || "The clone didn't finish.")
+    } finally {
+      setCloneStarting(false)
+    }
+  }, [onClone, cloning, cloneStarting, cloneUrl, cloneDest, closeAdd])
+
+  /** Fallback when the agent session can't be started: clone natively, then
+   *  register the result through the ordinary add path. */
+  const cloneDirectly = useCallback(async () => {
+    const parsed = parseGitUrl(cloneUrl)
+    if (!parsed) {
+      setCloneError("Enter a git URL, e.g. https://github.com/owner/repo")
+      return
+    }
+    const dest = cloneDest.trim()
+    if (!dest.startsWith("/")) {
+      setCloneError("Choose an absolute destination folder.")
+      return
+    }
+    setDirectCloning(true)
+    setCloneError(null)
+    try {
+      const result = await scmClone({ url: parsed.url, parentDir: dest })
+      if (!result.ok || !result.path) {
+        setCloneError(result.output || "git clone failed.")
+        return
+      }
+      await onAdd(result.path)
+      closeAdd()
+      setCloneUrl("")
+    } catch (err) {
+      setCloneError((err as Error).message || "Couldn't clone that repository.")
+    } finally {
+      setDirectCloning(false)
+    }
+  }, [cloneUrl, cloneDest, onAdd, closeAdd])
+
   const fillFromHit = useCallback((hit: DirSearchHit) => {
     setPath(hit.path)
     setError(null)
     pathInputRef.current?.focus()
   }, [])
 
-  const onChooseFolder = useCallback(async () => {
-    if (!canNative || picking || submitting) return
-    setPicking(true)
-    setError(null)
-    try {
-      const picked = await pickFolder()
-      if (picked) {
-        setPath(picked)
-        // Fill only — user confirms with Add (unambiguous).
-        pathInputRef.current?.focus()
+  /** `target` picks which field the chosen folder fills: the repo to add, or
+   *  the destination a clone lands in. Fill only — the user still confirms. */
+  const onChooseFolder = useCallback(
+    async (target: "path" | "clone" = "path") => {
+      if (!canNative || picking || submitting) return
+      setPicking(true)
+      setError(null)
+      try {
+        const picked = await pickFolder()
+        if (!picked) return
+        if (target === "clone") {
+          setCloneDest(picked)
+          setCloneError(null)
+          cloneUrlRef.current?.focus()
+        } else {
+          setPath(picked)
+          pathInputRef.current?.focus()
+        }
+      } finally {
+        setPicking(false)
       }
-    } finally {
-      setPicking(false)
-    }
-  }, [canNative, picking, submitting])
+    },
+    [canNative, picking, submitting],
+  )
 
   const onSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
     if (e.key === "ArrowDown") {
@@ -326,7 +452,7 @@ export function RepoTabs({
                 variant="secondary"
                 size="sm"
                 disabled={submitting || picking}
-                onClick={() => void onChooseFolder()}
+                onClick={() => void onChooseFolder("path")}
                 className="mb-2.5 w-full justify-center gap-1.5"
               >
                 {picking ? (
@@ -461,6 +587,155 @@ export function RepoTabs({
                 {submitting ? "Adding…" : "Add"}
               </Button>
             </div>
+
+            {canClone && (
+              <div className="mt-3 border-border/70 border-t pt-2.5">
+                <div className="mb-1 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  <CloudDownload className="size-3" />
+                  Clone from a URL
+                </div>
+                <p className="mb-2 text-[11px] text-muted-foreground">
+                  An agent clones it into the destination folder — you can watch it work — then
+                  Chunky adds the result here.
+                </p>
+
+                <input
+                  ref={cloneUrlRef}
+                  value={cloneUrl}
+                  spellCheck={false}
+                  disabled={cloning || cloneStarting || directCloning}
+                  placeholder="https://github.com/owner/repo"
+                  aria-label="Repository URL"
+                  onChange={(e) => {
+                    setCloneUrl(e.target.value)
+                    setCloneError(null)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      void submitClone()
+                    }
+                  }}
+                  className="h-9 w-full rounded-lg border border-border bg-background px-2.5 font-mono text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                />
+
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <input
+                    value={cloneDest}
+                    spellCheck={false}
+                    disabled={cloning || cloneStarting || directCloning}
+                    placeholder="/Users/you/code"
+                    aria-label="Destination folder"
+                    onChange={(e) => {
+                      setCloneDest(e.target.value)
+                      setCloneError(null)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault()
+                        void submitClone()
+                      }
+                    }}
+                    className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-2.5 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                  />
+                  {canNative && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      title="Choose destination folder"
+                      aria-label="Choose destination folder"
+                      disabled={picking || cloning || cloneStarting || directCloning}
+                      onClick={() => void onChooseFolder("clone")}
+                    >
+                      {picking ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <FolderOpen className="size-3.5" />
+                      )}
+                    </Button>
+                  )}
+                </div>
+
+                {cloneStatus && (
+                  <div className="mt-2 rounded-lg border border-border bg-muted/40 px-2.5 py-1.5">
+                    <div className="flex items-center gap-1.5 text-[11px] font-medium text-foreground">
+                      {cloning ? (
+                        <Loader2 className="size-3 animate-spin text-primary" />
+                      ) : (
+                        <X className="size-3 text-destructive" />
+                      )}
+                      {cloneStatus.phase === "registering"
+                        ? "Registering the clone…"
+                        : cloneStatus.phase === "error"
+                          ? "The clone didn't finish"
+                          : "Agent is cloning…"}
+                    </div>
+                    {cloneStatus.lines.length > 0 && (
+                      <div
+                        ref={cloneLogRef}
+                        className="mt-1 max-h-24 overflow-y-auto font-mono text-[10.5px] leading-snug text-muted-foreground"
+                      >
+                        {cloneStatus.lines.map((line, i) => (
+                          <div key={`${i}-${line}`} className="truncate" title={line}>
+                            {line}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {cloneStatus.agentMessage && cloneStatus.phase === "error" && (
+                      <div className="mt-1.5 max-h-20 overflow-y-auto whitespace-pre-wrap text-[10.5px] text-muted-foreground">
+                        {cloneStatus.agentMessage}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {cloneError && <div className="mt-1.5 text-[11px] text-destructive">{cloneError}</div>}
+
+                <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+                  {cloneStatus?.sessionId && onViewCloneThread && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={() => {
+                        onViewCloneThread(cloneStatus.sessionId!)
+                        setAdding(false)
+                      }}
+                    >
+                      <Eye className="size-3.5" />
+                      View thread
+                    </Button>
+                  )}
+                  {cloning && onCancelClone && (
+                    <Button type="button" variant="ghost" size="sm" onClick={onCancelClone}>
+                      Stop
+                    </Button>
+                  )}
+                  {!cloning && cloneStatus?.phase === "error" && canDirectClone && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={directCloning}
+                      onClick={() => void cloneDirectly()}
+                    >
+                      {directCloning ? "Cloning…" : "Clone without an agent"}
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={cloning || cloneStarting || directCloning || !cloneUrl.trim()}
+                    onClick={() => void submitClone()}
+                  >
+                    {cloning ? "Cloning…" : cloneStatus?.phase === "error" ? "Try again" : "Clone & add"}
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

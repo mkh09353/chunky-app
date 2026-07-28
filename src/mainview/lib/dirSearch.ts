@@ -15,6 +15,24 @@ export function nativeDirSearchAvailable(): boolean {
 }
 
 /**
+ * Existing, bounded roots a clone can be dropped into (~/code, ~/Projects, …).
+ * Empty in the browser build — the destination field then starts from the
+ * active repo's parent instead.
+ */
+export async function cloneRoots(): Promise<string[]> {
+  const rpc = await getRpc()
+  const fn = rpc?.request?.cloneRoots
+  if (!fn) return []
+  try {
+    const raw = (await fn()) as { roots?: unknown } | null
+    if (!raw || !Array.isArray(raw.roots)) return []
+    return raw.roots.filter((r): r is string => typeof r === "string" && r.startsWith("/"))
+  } catch {
+    return []
+  }
+}
+
+/**
  * Fuzzy directory search under bounded roots in the Electrobun main process.
  * Returns empty items (and optional error) when RPC is unavailable.
  */

@@ -45,6 +45,15 @@ import {
 import { applyMode, deleteMode, getAdvisorStatus, getCacheGuard, getModes, getSidekick, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SidekickConfig } from "./lib/configApi"
 import { buildComposerStatus } from "./lib/composerStatus"
 import { ComposerStatus } from "./components/ComposerStatus"
+import {
+  defaultCloneParent,
+  extractClonePath,
+  joinPath,
+  parseGitUrl,
+  runCloneSession,
+} from "./lib/cloneRepo"
+import { cloneRoots } from "./lib/dirSearch"
+import type { CloneStatus } from "./components/RepoTabs"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
 import {
   incognitoAppliedLine,
@@ -88,6 +97,9 @@ type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" |
 type AppMode = "live" | "demo"
 
 const REPLAY_SETTLE_MS = 120
+/** Recent agent-activity lines kept for the clone popover's progress log. */
+const CLONE_LOG_LINES = 8
+
 /** How long a local apply suppresses the echoed mode.applied notice. */
 const SELF_APPLY_WINDOW_MS = 10_000
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
@@ -187,6 +199,9 @@ export function App() {
   const [repos, setRepos] = useState<Repo[]>([])
   const [activeRepoId, setActiveRepoId] = useState<string | null>(null)
   const [addingRepo, setAddingRepo] = useState(false)
+  // Live state of the "clone from a URL" bootstrap session (null = idle).
+  const [cloneStatus, setCloneStatus] = useState<CloneStatus | null>(null)
+  const [cloneRootDirs, setCloneRootDirs] = useState<string[]>([])
   const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: MessageDelivery } | null>(null)
   const [foldThreads, setFoldThreads] = useState(false)
   const [terminalsOpen, setTerminalsOpen] = useState(loadTerminalsOpen)
@@ -232,6 +247,7 @@ export function App() {
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
 
   const streamAbort = useRef<AbortController | null>(null)
+  const cloneAbort = useRef<AbortController | null>(null)
   // handleSend runs before the dialog/settings actions are declared, so slash
   // dispatch is reached through a ref (same trick as the TUI's doModeRef).
   const dispatchSlashRef = useRef<(command: string) => Promise<boolean>>(async () => false)
@@ -322,6 +338,13 @@ export function App() {
   const liveStreamingId = useMemo(
     () => (live ? streamingMessageId(activeThread.messages, streaming) : demoStreamingId),
     [live, activeThread.messages, streaming, demoStreamingId],
+  )
+
+  // Pre-filled clone destination: a native root (~/code, ~/Projects, …) when the
+  // app can see the filesystem, else the folder holding the active repo.
+  const cloneParentDefault = useMemo(
+    () => defaultCloneParent(cloneRootDirs, activeRepo?.path || workspace || null),
+    [cloneRootDirs, activeRepo, workspace],
   )
 
   // TUI-parity status rule under the composer: which mode/config is actually
@@ -722,6 +745,103 @@ export function App() {
       }
     },
     [config, openRepoThreads],
+  )
+
+  /** Bounded destination roots for the clone form (native only; harmless empty
+   *  in the browser build, where the fallback is the active repo's parent). */
+  useEffect(() => {
+    void cloneRoots().then(setCloneRootDirs).catch(() => setCloneRootDirs([]))
+  }, [])
+
+  useEffect(() => () => cloneAbort.current?.abort(), [])
+
+  /**
+   * "Add repo from a git URL": spin up a throwaway BOOTSTRAP session pinned to
+   * the destination folder, give it a clone goal, and stream its work into the
+   * popover. Registration stays here — the agent's shell has no server
+   * credentials — so on completion we resolve the path and run the normal
+   * addRepo flow, which also switches the UI to the new repo.
+   */
+  const handleCloneRepo = useCallback(
+    async (rawUrl: string, rawParent: string) => {
+      if (!config || appMode !== "live") throw new Error("Connect to the server to clone a repository.")
+      const parsed = parseGitUrl(rawUrl)
+      if (!parsed) throw new Error("That doesn't look like a git URL.")
+      const parentDir = rawParent.trim().replace(/\/+$/, "")
+      if (!parentDir.startsWith("/")) throw new Error("Enter an absolute destination folder.")
+
+      cloneAbort.current?.abort()
+      const ac = new AbortController()
+      cloneAbort.current = ac
+      const push = (line: string) =>
+        setCloneStatus((prev) =>
+          prev ? { ...prev, lines: [...prev.lines, line].slice(-CLONE_LOG_LINES) } : prev,
+        )
+      setCloneStatus({
+        phase: "running",
+        url: parsed.url,
+        sessionId: null,
+        lines: [`◎ Starting an agent in ${parentDir}…`],
+        error: null,
+      })
+
+      let lastMessage = ""
+      try {
+        const run = await runCloneSession(
+          config.baseUrl,
+          { url: parsed.url, parentDir, leaf: parsed.leaf },
+          {
+            onSession: (id) => setCloneStatus((prev) => (prev ? { ...prev, sessionId: id } : prev)),
+            onProgress: push,
+          },
+          ac.signal,
+        )
+        if (ac.signal.aborted) return
+        lastMessage = run.lastMessage
+        // The agent is asked to print the absolute path; fall back to the
+        // conventional destination. addRepo validates existence either way.
+        const path =
+          extractClonePath(run.text, { parentDir, leaf: parsed.leaf }) ??
+          joinPath(parentDir, parsed.leaf)
+        setCloneStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                phase: "registering",
+                lines: [...prev.lines, `◎ Registering ${path}…`].slice(-CLONE_LOG_LINES),
+              }
+            : prev,
+        )
+        await handleAddRepo(path)
+        setCloneStatus(null)
+      } catch (err) {
+        if (ac.signal.aborted) return
+        const detail = (err as Error).message || "The clone didn't finish."
+        setCloneStatus((prev) =>
+          prev ? { ...prev, phase: "error", error: detail, agentMessage: lastMessage } : prev,
+        )
+        throw new Error(detail)
+      } finally {
+        if (cloneAbort.current === ac) cloneAbort.current = null
+      }
+    },
+    [config, appMode, handleAddRepo],
+  )
+
+  const handleCancelClone = useCallback(() => {
+    cloneAbort.current?.abort()
+    cloneAbort.current = null
+    setCloneStatus(null)
+  }, [])
+
+  /** "View thread": attach the main transcript to the bootstrap session so the
+   *  user can watch the clone in the normal chat surface. */
+  const handleViewCloneThread = useCallback(
+    (id: string) => {
+      if (!config) return
+      void attachSession(config.baseUrl, id)
+    },
+    [config, attachSession],
   )
 
   const handleRemoveRepo = useCallback(
@@ -1411,6 +1531,13 @@ export function App() {
             onSelectRepo={(id) => void handleSelectRepo(id)}
             onAddRepo={handleAddRepo}
             onRemoveRepo={(id) => void handleRemoveRepo(id)}
+            // Cloning needs a reachable server (the agent does the work), so the
+            // section disappears entirely in demo/offline mode.
+            onCloneRepo={live && connectionState === "connected" ? handleCloneRepo : undefined}
+            cloneStatus={cloneStatus}
+            onCancelClone={handleCancelClone}
+            onViewCloneThread={handleViewCloneThread}
+            defaultCloneParent={cloneParentDefault}
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
             onToggleBrowser={() => setBrowserOpen((open) => !open)}

@@ -19,7 +19,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu"
-import { RepoTabs } from "./RepoTabs"
+import { RepoTabs, type CloneStatus } from "./RepoTabs"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
@@ -37,6 +37,11 @@ export function ChatTopBar({
   onRemoveRepo,
   reposBusy = false,
   reposDisabled = false,
+  onCloneRepo,
+  cloneStatus,
+  onCancelClone,
+  onViewCloneThread,
+  defaultCloneParent,
   headerRight,
   onToggleBrowser,
   onToggleTerminal,
@@ -52,6 +57,12 @@ export function ChatTopBar({
   onRemoveRepo?: (id: string) => void | Promise<void>
   reposBusy?: boolean
   reposDisabled?: boolean
+  /** Clone a git URL via an agent session; omitted → that section is hidden. */
+  onCloneRepo?: (url: string, parentDir: string) => Promise<void>
+  cloneStatus?: CloneStatus | null
+  onCancelClone?: () => void
+  onViewCloneThread?: (sessionId: string) => void
+  defaultCloneParent?: string
   headerRight?: React.ReactNode
   onToggleBrowser?: () => void
   /** Bottom terminal drawer toggle; omitted → the button is hidden. */
@@ -73,6 +84,11 @@ export function ChatTopBar({
           onRemove={onRemoveRepo}
           busy={reposBusy}
           disabled={reposDisabled}
+          onClone={onCloneRepo}
+          cloneStatus={cloneStatus}
+          onCancelClone={onCancelClone}
+          onViewCloneThread={onViewCloneThread}
+          defaultCloneParent={defaultCloneParent}
         />
       ) : (
         <div className="min-w-0 flex-1" />

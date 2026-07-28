@@ -2,6 +2,7 @@ import { BrowserWindow, ApplicationMenu, createRPC, Updater, Utils } from "elect
 import { join } from "node:path"
 import { homedir } from "node:os"
 import {
+  candidateRoots,
   destroyFinders,
   ensureFinders,
   parentRoot,
@@ -217,6 +218,14 @@ rpc = createRPC({
         return { items: [] as { name: string; path: string }[], error: message }
       }
     },
+
+    /**
+     * Bounded, existing directories a clone can land in (~/code, ~/Projects, …
+     * plus the launch workspace's parent). Used to pre-fill the clone
+     * destination; the webview has no filesystem of its own.
+     * Output: { roots: string[] }
+     */
+    cloneRoots: async () => ({ roots: candidateRoots(extraRoots) }),
 
     terminalOpen: async (params: unknown) => terminals.open(params),
     terminalWrite: async (params: unknown) => terminals.write(params),
