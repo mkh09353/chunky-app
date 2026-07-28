@@ -20,6 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # package.json resolves @chunky/protocol from ../chunky/packages/protocol.
+      - name: Checkout pinned Chunky protocol dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/mkh09353/chunky.git "$GITHUB_WORKSPACE/../chunky"
+          git -C "$GITHUB_WORKSPACE/../chunky" checkout --detach 9271240007febd62b5b2fb3b1239a4c262d7de85
+
       - uses: oven-sh/setup-bun@v2
 
       - name: Verify tag matches package version
