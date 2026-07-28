@@ -197,6 +197,48 @@ rpc = createRPC({
     },
 
     /**
+     * Open a link in the user's default browser — the WebView cannot open
+     * windows of its own. Only http(s) is ever handed to the OS, and the URL
+     * travels as an argv entry (never through a shell).
+     * Input: { url: string } | string
+     * Output: { ok: boolean, error?: string }
+     */
+    openExternal: async (params: unknown) => {
+      const raw =
+        params && typeof params === "object" ? (params as { url?: unknown }).url : params
+      const value = typeof raw === "string" ? raw.trim() : ""
+      if (!value || value.includes("\0") || value.length > 4096) {
+        return { ok: false, error: "Invalid URL" }
+      }
+      let parsed: URL
+      try {
+        parsed = new URL(value)
+      } catch {
+        return { ok: false, error: "Invalid URL" }
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { ok: false, error: `Refused scheme: ${parsed.protocol}` }
+      }
+      try {
+        const child = Bun.spawn(["open", parsed.href], { stdout: "ignore", stderr: "pipe" })
+        const [exitCode, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stderr).text(),
+        ])
+        if (exitCode !== 0) {
+          const error = stderr.trim() || `open exited with ${exitCode}`
+          console.warn("[chunky] openExternal failed:", error)
+          return { ok: false, error }
+        }
+        return { ok: true }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : "Failed to open URL"
+        console.warn("[chunky] openExternal failed:", error)
+        return { ok: false, error }
+      }
+    },
+
+    /**
      * Fuzzy directory search under bounded roots (Downloads/Projects/…).
      * Input: { query: string, limit?: number }
      * Output: { items: { name, path }[], error?: string }

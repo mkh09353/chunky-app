@@ -8,6 +8,7 @@ import {
   startProviderLogin,
 } from "~/lib/configApi"
 import type { CustomProviderInput, LoginInitiation, ProviderInfo } from "~/lib/configApi"
+import { openExternal } from "~/lib/openExternal"
 import { Button } from "../ui/button"
 import {
   Badge,
@@ -90,11 +91,8 @@ export function ProvidersSection() {
           return
         }
         if (initiation.kind === "url" && initiation.url) {
-          try {
-            window.open(initiation.url, "_blank", "noopener")
-          } catch {
-            /* user can copy the URL from the panel */
-          }
+          // Native app: hands off to the OS browser; browser dev: new tab.
+          openExternal(initiation.url)
         }
         beginPoll(provider)
       } catch (err) {

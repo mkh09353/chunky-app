@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { Fragment, type ReactNode } from "react"
 import { cn } from "~/lib/cn"
 import { CodeBlock } from "~/components/CodeBlock"
 
@@ -6,10 +6,48 @@ import { CodeBlock } from "~/components/CodeBlock"
  * A deliberately tiny markdown renderer — enough to make assistant prose look
  * like a real shadcn transcript, with zero dependencies. Handles headings,
  * unordered/ordered lists, fenced code, paragraphs, and inline
- * **bold** / *italic* / `code` / [links](href).
+ * **bold** / *italic* / `code` / [links](href) / bare http(s) URLs.
  */
 
-const INLINE_RE = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g
+// Order matters only where two alternatives can start at the same index: code
+// spans and [label](href) are listed before the bare-URL branch, so a URL that
+// lives inside `backticks` or a markdown link is consumed by those first.
+const INLINE_RE =
+  /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>"'`]+)/g
+
+const LINK_CLASS = "font-medium text-primary underline-offset-2 hover:underline"
+
+function count(text: string, char: string): number {
+  let n = 0
+  for (const c of text) if (c === char) n++
+  return n
+}
+
+/**
+ * Prose punctuation that trails a bare URL belongs to the sentence, not the
+ * link: "see http://localhost:4700." or "(http://a.dev/x)". A closing paren is
+ * only given back when it is unbalanced, so /wiki/Foo_(bar) survives.
+ */
+export function splitTrailingPunctuation(url: string): [string, string] {
+  let end = url.length
+  while (end > 0) {
+    const ch = url[end - 1] ?? ""
+    if (".,;:!?'\"".includes(ch)) {
+      end--
+      continue
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      const open = ch === ")" ? "(" : ch === "]" ? "[" : "{"
+      const slice = url.slice(0, end)
+      if (count(slice, ch) > count(slice, open)) {
+        end--
+        continue
+      }
+    }
+    break
+  }
+  return [url.slice(0, end), url.slice(end)]
+}
 
 function renderInline(text: string, keyBase: string): ReactNode[] {
   return text.split(INLINE_RE).map((part, i) => {
@@ -43,16 +81,23 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
     if (link) {
       const [, label, href] = link
       return (
-        <a
-          key={k}
-          className="font-medium text-primary underline-offset-2 hover:underline"
-          href={href ?? "#"}
-          rel="noreferrer"
-          target="_blank"
-        >
+        <a key={k} className={LINK_CLASS} href={href ?? "#"} rel="noreferrer" target="_blank">
           {label}
         </a>
       )
+    }
+    if (/^https?:\/\//.test(part)) {
+      const [href, tail] = splitTrailingPunctuation(part)
+      if (href) {
+        return (
+          <Fragment key={k}>
+            <a className={LINK_CLASS} href={href} rel="noreferrer" target="_blank">
+              {href}
+            </a>
+            {tail}
+          </Fragment>
+        )
+      }
     }
     return <span key={k}>{part}</span>
   })

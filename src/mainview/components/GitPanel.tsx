@@ -38,6 +38,7 @@ import {
   type ScmInfo,
   type ScmPr,
 } from "~/lib/git"
+import { openExternal } from "~/lib/openExternal"
 import { Button } from "./ui/button"
 import {
   Dialog,
@@ -60,14 +61,6 @@ type PanelTab = "changes" | "branches" | "prs"
 export function isAbsolutePath(path: string | undefined | null): path is string {
   if (!path) return false
   return path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)
-}
-
-function openExternal(url: string) {
-  try {
-    window.open(url, "_blank", "noopener,noreferrer")
-  } catch {
-    /* popup blocked — the URL stays visible in the panel */
-  }
 }
 
 function cliHint(info: ScmInfo): string {
