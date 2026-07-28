@@ -472,6 +472,12 @@ export function App() {
       if (cancelled) return
       setConfig(cfg)
 
+      if (cfg.connectionError) {
+        setConnectionState("offline")
+        setConnError(cfg.connectionError)
+        return
+      }
+
       try {
         const [info, reg, sel, rows] = await Promise.all([
           fetchServerInfo(cfg.baseUrl),
@@ -506,7 +512,7 @@ export function App() {
         if (cancelled) return
         setConnectionState("offline")
         setConnError(
-          `Can't reach Chunky server at ${cfg.baseUrl}. Start it with \`bun run server\`, or continue in demo mode. (${(err as Error).message})`,
+          `Can't reach Chunky server at ${cfg.baseUrl}. (${(err as Error).message})`,
         )
       }
     })()

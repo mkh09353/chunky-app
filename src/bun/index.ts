@@ -1,5 +1,4 @@
 import { BrowserWindow, ApplicationMenu, createRPC, Updater, Utils } from "electrobun/bun"
-import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
 import {
@@ -10,6 +9,7 @@ import {
 } from "./dirSearch"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
+import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -24,33 +24,7 @@ async function getMainViewUrl(): Promise<string> {
   }
 }
 
-// Local Chunky harness URL. Dev default 4620 matches `bun run server`.
-// CHUNKY_URL / CHUNKY_PORT override when set intentionally.
-const baseUrl =
-  process.env.CHUNKY_URL || `http://localhost:${process.env.CHUNKY_PORT || 4620}`
 const workspace = process.env.CHUNKY_WORKSPACE || process.cwd()
-const workspaceName = workspace.split(/[\\/]/).filter(Boolean).pop() || "workspace"
-
-function serverToken(): string | undefined {
-  try {
-    const raw = readFileSync(
-      process.env.CHUNKY_SETTINGS || join(homedir(), ".chunky", "state", "settings.json"),
-      "utf8",
-    )
-    const tok = (JSON.parse(raw) as { serverToken?: unknown }).serverToken
-    return typeof tok === "string" && tok ? tok : undefined
-  } catch {
-    return undefined
-  }
-}
-
-// Served to the webview over getConfig RPC. Never log the token.
-const config = {
-  baseUrl,
-  workspace,
-  workspaceName,
-  serverToken: serverToken(),
-}
 
 const extraRoots = [parentRoot(workspace)].filter((p): p is string => !!p)
 
@@ -190,7 +164,15 @@ const terminals = createTerminalManager((name, payload) => {
 rpc = createRPC({
   maxRequestTime: 180_000,
   requestHandler: {
-    getConfig: async () => config,
+    // Served to the webview over RPC. Connection resolution and the bearer
+    // token stay in Bun; production renderer assets never contain credentials.
+    getConfig: async () => {
+      const config = await resolveChunkyConnection()
+      return {
+        ...config,
+        workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
+      }
+    },
 
     /** OS directory picker. Returns absolute path or "" on cancel. */
     openFolderDialog: async () => {
@@ -204,7 +186,9 @@ rpc = createRPC({
           allowsMultipleSelection: false,
         })
         const picked = paths.find((p) => typeof p === "string" && p.trim())
-        return picked?.trim() ?? ""
+        const path = picked?.trim() ?? ""
+        rememberChunkyWorkspace(path)
+        return path
       } catch (err) {
         console.warn("[chunky] openFolderDialog failed:", err)
         return ""
@@ -276,6 +260,7 @@ const win = new BrowserWindow({
 const cleanup = () => {
   terminals.destroy()
   destroyFinders()
+  void releaseChunkyConnection()
 }
 process.on("exit", cleanup)
 process.on("SIGINT", () => {
@@ -290,7 +275,7 @@ process.on("SIGTERM", () => {
 // typically exits; keep the hook for explicit destroy if the API surfaces it.
 void win
 
-console.log(`[chunky] window ready · server ${baseUrl}`)
+console.log("[chunky] window ready")
 
 // Do not delay window startup or surface a dialog unless an update exists.
 setTimeout(() => void checkForUpdates(), 4_000)

@@ -28,6 +28,8 @@ export interface AppConfig {
   /** Present for auth; never log or render. */
   serverToken?: string
   workspace: string
+  /** Bun-side startup/discovery failure safe to show in the connection banner. */
+  connectionError?: string
 }
 
 export interface ModelSelection {
@@ -112,6 +114,7 @@ export async function loadConfig(): Promise<AppConfig> {
           baseUrl: data.baseUrl,
           serverToken: data.serverToken,
           workspace: data.workspace || DEFAULT_CONFIG.workspace,
+          connectionError: data.connectionError,
         }
       }
     }
@@ -147,6 +150,7 @@ export async function loadConfig(): Promise<AppConfig> {
 }
 
 export async function fetchServerInfo(baseUrl: string): Promise<ServerInfoResponse> {
+  if (!baseUrl) throw new Error("Chunky server is unavailable")
   const res = await fetch(baseUrl + ROUTES.serverInfo)
   if (!res.ok) throw new Error(`server info failed (${res.status})`)
   return (await res.json()) as ServerInfoResponse
