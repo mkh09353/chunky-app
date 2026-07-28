@@ -71,6 +71,10 @@ export default {
     linux: { bundleCEF: false },
     win: { bundleCEF: false },
   },
+  // Electrobun signs Mach-O files in Contents/MacOS and .node files under
+  // Resources/app/bun, but not dylibs copied into Resources/app/node_modules.
+  // This hook runs after staging and before Electrobun signs/notarizes the app.
+  scripts: signAndNotarize ? { postBuild: "scripts/sign-nested-macho.ts" } : undefined,
   release: {
     baseUrl: "https://github.com/mkh09353/chunky-app/releases/latest/download",
   },
