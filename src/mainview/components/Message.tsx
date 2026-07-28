@@ -201,7 +201,7 @@ function ToolStatus({ tool }: { tool: ToolBlockData }) {
 }
 
 function ToolCard({ tool }: { tool: ToolBlockData }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const Icon = toolIcon(tool.name)
   const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
   return (
