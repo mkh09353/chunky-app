@@ -52,6 +52,7 @@ export function Composer({
   onStop,
   disabled = false,
   contextMeter,
+  status,
   cacheGuard,
   onCacheConfirm,
   onCacheCancel,
@@ -73,6 +74,8 @@ export function Composer({
   disabled?: boolean
   /** Optional context-window meter rendered in the composer footer. */
   contextMeter?: React.ReactNode
+  /** TUI-parity status rule (executor + sidekick/advisor/goal/incognito chips). */
+  status?: React.ReactNode
   cacheGuard?: { approxTokens: number; reason: string } | null
   onCacheConfirm?: () => void
   onCacheCancel?: () => void
@@ -298,6 +301,8 @@ export function Composer({
         />
         {slashOpen && <div className="mx-2 mb-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-panel">{slashMatches.map((cmd, i) => <button type="button" key={cmd.name} onMouseDown={(e) => { e.preventDefault(); runCommand(cmd) }} onMouseMove={() => setSlashIndex(i)} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === slashIndex && "bg-accent")}><ChevronRight className={cn("size-3 shrink-0 text-primary", i !== slashIndex && "opacity-0")} /><span className="shrink-0 font-medium font-mono text-foreground">{cmd.name}</span><span className="truncate text-muted-foreground">{cmd.description}</span></button>)}</div>}
         {mentionOpen && <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-popover shadow-panel">{mentionItems.length ? mentionItems.map((item, i) => <button type="button" key={item.path} onMouseDown={(e) => { e.preventDefault(); insertMention(item) }} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === mentionIndex && "bg-accent")}><File className="size-3 text-primary" /><span className="truncate">{item.path}</span><span className="ml-auto text-muted-foreground">{item.kind}</span></button>) : <div className="px-3 py-2 text-[12px] text-muted-foreground">No matching files</div>}</div>}
+
+        {status}
 
         <div className="flex items-center justify-between gap-2 pt-1">
           <div className="flex min-w-0 items-center gap-1">

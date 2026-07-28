@@ -311,6 +311,19 @@ export async function setAdvisor(cfg: AgentModelConfig): Promise<AgentModelConfi
   return normalizeAgentConfig(await req<unknown>("/api/advisor", jsonInit("POST", cfg)))
 }
 
+/** GET /api/advisor also reports readiness: `active: false` means the advisor is
+ *  configured but currently suppressed (e.g. not logged in), which the composer
+ *  status rule marks with `✕` instead of hiding. */
+export interface AdvisorStatus {
+  config: AgentModelConfig
+  active: boolean
+}
+
+export async function getAdvisorStatus(): Promise<AdvisorStatus> {
+  const body = (await req<unknown>("/api/advisor")) as { config?: unknown; active?: unknown }
+  return { config: normalizeAgentConfig(body?.config), active: body?.active === true }
+}
+
 export async function getReviewer(): Promise<AgentModelConfig> {
   return normalizeAgentConfig(await req<unknown>(ROUTES.review))
 }

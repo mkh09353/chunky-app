@@ -42,7 +42,9 @@ import {
 } from "./lib/api"
 // `setCacheGuard` is aliased: the local state setter of the same name owns the
 // pre-send confirm bar, while this one persists the server-side threshold.
-import { applyMode, deleteMode, getCacheGuard, getModes, saveMode, setCacheGuard as saveCacheGuardTokens } from "./lib/configApi"
+import { applyMode, deleteMode, getAdvisorStatus, getCacheGuard, getModes, getSidekick, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SidekickConfig } from "./lib/configApi"
+import { buildComposerStatus } from "./lib/composerStatus"
+import { ComposerStatus } from "./components/ComposerStatus"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
 import {
   incognitoAppliedLine,
@@ -189,6 +191,10 @@ export function App() {
   const [foldThreads, setFoldThreads] = useState(false)
   const [terminalsOpen, setTerminalsOpen] = useState(loadTerminalsOpen)
   const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
+  // Server-side agent config behind the composer status rule. Null = unknown
+  // (demo/offline or a failed read) and simply renders no chip.
+  const [advisorStatus, setAdvisorStatus] = useState<AdvisorStatus | null>(null)
+  const [sidekickConfig, setSidekickConfig] = useState<SidekickConfig | null>(null)
   const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | "incognito" | null>(null)
   const [incognitoModes, setIncognitoModes] = useState<SavedMode[]>([])
   const [dialogText, setDialogText] = useState("")
@@ -316,6 +322,21 @@ export function App() {
   const liveStreamingId = useMemo(
     () => (live ? streamingMessageId(activeThread.messages, streaming) : demoStreamingId),
     [live, activeThread.messages, streaming, demoStreamingId],
+  )
+
+  // TUI-parity status rule under the composer: which mode/config is actually
+  // live (executor + sidekick/advisor/goal/incognito). Demo yields one dim chip.
+  const statusChips = useMemo(
+    () =>
+      buildComposerStatus({
+        mode: live ? "live" : "demo",
+        incognito: incognitoSession,
+        executor: live ? modelSel : null,
+        sidekick: sidekickConfig,
+        advisor: advisorStatus,
+        goal,
+      }),
+    [live, incognitoSession, modelSel, sidekickConfig, advisorStatus, goal],
   )
 
   // Active model's context limit for the context-window meter (undefined in demo).
@@ -553,6 +574,22 @@ export function App() {
     setModelRows(rows)
   }, [config, appMode])
 
+  /** Advisor + sidekick config for the composer status rule. Demo/offline never
+   *  touches the server, and a failed read degrades to "no chip" (never noise). */
+  const refreshAgents = useCallback(async () => {
+    if (appMode !== "live") {
+      setAdvisorStatus(null)
+      setSidekickConfig(null)
+      return
+    }
+    const [advisor, sidekick] = await Promise.all([
+      getAdvisorStatus().catch(() => null),
+      getSidekick().catch(() => null),
+    ])
+    setAdvisorStatus(advisor)
+    setSidekickConfig(sidekick)
+  }, [appMode])
+
   /** Saved modes → slash aliases. Demo/offline never touches the server. */
   const refreshModes = useCallback(async () => {
     if (appMode !== "live") {
@@ -574,7 +611,8 @@ export function App() {
     }
     if (connectionState !== "connected") return
     void refreshModes()
-  }, [appMode, connectionState, refreshModes])
+    void refreshAgents()
+  }, [appMode, connectionState, refreshModes, refreshAgents])
 
   const slashCommands = useMemo<SlashCommand[]>(() => [...COMMANDS, ...slashModes], [slashModes])
 
@@ -590,6 +628,7 @@ export function App() {
     (name: string, spec: ModeSpec) => {
       void refreshModels()
       void refreshModes()
+      void refreshAgents()
       const self = selfAppliedMode.current
       if (self && self.name === name.toLowerCase() && Date.now() - self.at < SELF_APPLY_WINDOW_MS) {
         selfAppliedMode.current = null
@@ -600,7 +639,7 @@ export function App() {
         : ""
       setNotice(`Mode "${name}" applied${detail}`)
     },
-    [refreshModels, refreshModes],
+    [refreshModels, refreshModes, refreshAgents],
   )
   modeAppliedRef.current = handleModeApplied
 
@@ -899,6 +938,7 @@ export function App() {
         const applied = await applyMode(name)
         await refreshModels()
         void refreshModes()
+        void refreshAgents()
         const detail = applied?.model
           ? `: ${prettyModel(applied.model)}${applied.effort ? ` (${applied.effort})` : ""} · ${applied.provider}`
           : ""
@@ -907,7 +947,7 @@ export function App() {
         setNotice(`Mode "${name}": ${(err as Error).message}`)
       }
     },
-    [refreshModels, refreshModes, markSelfApplied],
+    [refreshModels, refreshModes, refreshAgents, markSelfApplied],
   )
 
   /** `/mode` subcommands: bare opens Settings → Modes, save/rm hit the server. */
@@ -964,6 +1004,7 @@ export function App() {
         const applied = await applyMode(action.name)
         await refreshModels()
         void refreshModes()
+        void refreshAgents()
         setNotice(
           incognitoAppliedLine(
             applied?.applied || action.name,
@@ -974,7 +1015,7 @@ export function App() {
         setNotice(`Incognito request failed: ${(err as Error).message}`)
       }
     },
-    [refreshModels, refreshModes, markSelfApplied],
+    [refreshModels, refreshModes, refreshAgents, markSelfApplied],
   )
 
   /** `/cacheguard [tokens|off]` — same parsing + wording as the TUI, backed by
@@ -1417,6 +1458,7 @@ export function App() {
                 streaming={streaming}
                 onStop={handleStop}
                 contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
+                status={<ComposerStatus chips={statusChips} />}
                 cacheGuard={cacheGuard}
                 onCacheConfirm={() => void confirmCacheGuard()}
                 onCacheCancel={() => setCacheGuard(null)}
@@ -1442,12 +1484,14 @@ export function App() {
             if (!open && live && config) {
               void refreshModels()
               void refreshModes()
+              void refreshAgents()
             }
           }}
           initialSection={settingsSection}
           onModesChanged={() => {
             void refreshModels()
             void refreshModes()
+            void refreshAgents()
           }}
           connection={{
             state: live ? connectionState : "offline",
