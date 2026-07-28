@@ -66,8 +66,9 @@ export default {
       // Electrobun runs `iconutil -c icns` on this folder and writes
       // Contents/Resources/AppIcon.icns, which the generated Info.plist already
       // references via CFBundleIconFile. Without it Electrobun silently ships a
-      // bundle with a dangling icon reference. Regenerate the iconset with
-      // `bun run icons` (scripts/generate-brand-assets.py) after design changes.
+      // bundle with a dangling icon reference. The iconset is derived
+      // mechanically from the approved artwork in assets/brand/ — regenerate it
+      // with `bun run icons` and verify with `bun run icons:check`.
       icons: "assets/icon.iconset",
       // Electrobun's default hardened-runtime entitlements include the Bun/JIT
       // allowances it needs, so no project-specific entitlements file is needed.

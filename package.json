@@ -10,7 +10,8 @@
     "build:web": "vite build",
     "build": "vite build && electrobun build --env=stable",
     "preview": "vite preview --port 5173 --strictPort",
-    "icons": "python3 scripts/generate-brand-assets.py --check",
+    "icons": "python3 scripts/generate-brand-assets.py",
+    "icons:check": "python3 scripts/generate-brand-assets.py --check",
     "test": "bun test src/bun/connectionManager.test.ts",
     "typecheck": "tsgo --noEmit",
     "typecheck:tsc": "tsc --noEmit"
