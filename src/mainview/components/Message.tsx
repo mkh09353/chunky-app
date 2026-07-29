@@ -29,6 +29,7 @@ import type {
 import { cn } from "~/lib/cn"
 import { renderMarkdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
+import { isRunLit, runLinkProps, useRunLink } from "./RunLink"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
 /** Collapsible "Worked for 3m 11s ›" divider between the prompt and the reply. */
@@ -200,12 +201,32 @@ function ToolStatus({ tool }: { tool: ToolBlockData }) {
   return <Check className="size-3.5 text-success" />
 }
 
-function ToolCard({ tool }: { tool: ToolBlockData }) {
+function ToolCard({
+  tool,
+  runId,
+  accent,
+}: {
+  tool: ToolBlockData
+  /** Present when this call spawned a delegate: wires the pill to its card. */
+  runId?: string
+  accent?: string
+}) {
   const [open, setOpen] = useState(false)
   const Icon = toolIcon(tool.name)
   const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
+  const link = useRunLink()
+  const lit = isRunLit(runId, link)
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-border bg-card/50 shadow-xs">
+    <div
+      {...(runId ? { "data-run-pill": runId } : {})}
+      {...runLinkProps(runId, link)}
+      style={accent ? { borderLeftColor: accent } : undefined}
+      className={cn(
+        "my-2 overflow-hidden rounded-lg border border-border bg-card/50 shadow-xs transition-colors",
+        accent && "border-l-2",
+        lit && "bg-accent/40 ring-1 ring-ring/40",
+      )}
+    >
       <button
         type="button"
         onClick={() => hasBody && setOpen((o) => !o)}
@@ -311,7 +332,13 @@ function AssistantBlock({
     return <ThinkingCard label={block.content} steps={block.steps} />
   }
   if (block.type === "tool" && block.tool) {
-    return <ToolCard tool={block.tool} />
+    return (
+      <ToolCard
+        tool={block.tool}
+        {...(block.runId ? { runId: block.runId } : {})}
+        {...(block.accent ? { accent: block.accent } : {})}
+      />
+    )
   }
   if (block.type === "files" && block.files) {
     return <ChangedFilesCard data={block.files} />
@@ -329,12 +356,28 @@ function AssistantBlock({
   )
 }
 
-export function MessageView({ message, streaming }: { message: Message; streaming?: boolean }) {
+export function MessageView({
+  message,
+  streaming,
+  blocks: blocksProp,
+  continuation = false,
+  lastSegment = true,
+}: {
+  message: Message
+  streaming?: boolean
+  /** Render only this slice of the message (transcript row segmentation). */
+  blocks?: MessageBlock[]
+  /** A continuation row: no avatar/header, indented to the avatar gutter. */
+  continuation?: boolean
+  /** False for every segment but the last: hides the caret and action row. */
+  lastSegment?: boolean
+}) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === "user"
+  const blocks = blocksProp ?? message.blocks
 
   const copyAll = () => {
-    const text = message.blocks.map((b) => b.content).join("\n\n")
+    const text = blocks.map((b) => b.content).join("\n\n")
     try {
       void navigator.clipboard?.writeText(text)
     } catch {
@@ -342,6 +385,24 @@ export function MessageView({ message, streaming }: { message: Message; streamin
     }
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
+  }
+
+  // Continuation segment: the avatar/name already rendered in an earlier row,
+  // so this one only indents to keep the text column aligned.
+  if (continuation) {
+    return (
+      <div className="group/msg ps-[46px]">
+        {blocks.map((block, bi) => (
+          <AssistantBlock
+            key={bi}
+            block={block}
+            bi={bi}
+            {...(streaming ? { streaming } : {})}
+            last={lastSegment && bi === blocks.length - 1}
+          />
+        ))}
+      </div>
+    )
   }
 
   return (
@@ -369,7 +430,7 @@ export function MessageView({ message, streaming }: { message: Message; streamin
 
         {isUser ? (
           <div className="rounded-2xl bg-foreground/[0.06] px-4 py-2.5 text-[14px] leading-[1.6] text-foreground">
-            {message.blocks.map((block, bi) => (
+            {blocks.map((block, bi) => (
               <p key={bi} className={cn("whitespace-pre-wrap", bi > 0 && "mt-3")}>
                 {block.content}
               </p>
@@ -377,19 +438,19 @@ export function MessageView({ message, streaming }: { message: Message; streamin
           </div>
         ) : (
           <div className="w-full">
-            {message.blocks.map((block, bi) => (
+            {blocks.map((block, bi) => (
               <AssistantBlock
                 key={bi}
                 block={block}
                 bi={bi}
                 streaming={streaming}
-                last={bi === message.blocks.length - 1}
+                last={lastSegment && bi === blocks.length - 1}
               />
             ))}
           </div>
         )}
 
-        {!isUser && !streaming && (
+        {!isUser && !streaming && lastSegment && (
           <div className="flex items-center gap-0.5 px-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
             <button
               type="button"

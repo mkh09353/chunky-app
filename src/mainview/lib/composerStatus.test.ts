@@ -52,6 +52,22 @@ describe("buildComposerStatus", () => {
     ).toContain("⚒ sidekick GPT 5.5 +2")
   })
 
+  it("carries every seat and its effective model for the hover breakdown", () => {
+    const chips = buildComposerStatus({
+      ...live,
+      sidekick: {
+        default: { enabled: true },
+        seats: { frontend: { enabled: true, model: "grok-4.5" }, websearch: { enabled: true } },
+      },
+    })
+    expect(chips.find((c) => c.key === "sidekick")?.details).toEqual([
+      { name: "default", model: "Claude Fable 5" },
+      { name: "frontend", model: "Grok 4.5" },
+      // Unset seat inherits the default seat, which inherits the executor.
+      { name: "websearch", model: "Claude Fable 5" },
+    ])
+  })
+
   it("shows the advisor only when enabled with a model, marking suppression", () => {
     expect(texts({ ...live, advisor: { config: { enabled: false, model: "gpt-5.5" }, active: true } })).toEqual([
       "Claude Fable 5 (low)",

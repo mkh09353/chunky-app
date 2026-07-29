@@ -18,6 +18,7 @@ import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
 import { providerLabel } from "~/lib/api"
 import { filterCommands, type SlashCommand } from "~/lib/slashCommands"
+import { modeEmoji } from "~/lib/modes"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -39,9 +40,19 @@ function providerSortKey(vendor: string): string {
   return i >= 0 ? `${i}-${vendor}` : `9-${vendor}`
 }
 
+/** A saved mode as the selector lists it: the server's name plus the compact
+ *  "what it switches you to" line the caller already knows how to word. */
+export interface ModeOption {
+  name: string
+  detail?: string
+}
+
 export function Composer({
   model,
   models = MODELS,
+  modes = [],
+  activeMode = null,
+  onSelectMode,
   onModelChange,
   onRefreshModels,
   onSend,
@@ -59,6 +70,12 @@ export function Composer({
 }: {
   model: Model
   models?: Model[]
+  /** Saved modes for the selector's Modes section; empty hides the section. */
+  modes?: ModeOption[]
+  /** Name of the mode currently in effect — the button's label, when set. */
+  activeMode?: string | null
+  /** Apply a saved mode (the same path `/mode <name>` / `/<name>` takes). */
+  onSelectMode?: (name: string) => void | Promise<void>
   /** Must resolve only after the server confirms (live) or local apply (demo). */
   onModelChange: (m: Model) => void | Promise<void>
   /** Re-fetch current selection + catalogs when the menu opens (live). */
@@ -74,7 +91,8 @@ export function Composer({
   disabled?: boolean
   /** Optional context-window meter rendered in the composer footer. */
   contextMeter?: React.ReactNode
-  /** TUI-parity status rule (executor + sidekick/advisor/goal/incognito chips). */
+  /** TUI-parity status rule (executor + sidekick/advisor/goal/incognito chips).
+   *  Rendered INLINE, right of the model selector — one action row, not two. */
   status?: React.ReactNode
   cacheGuard?: { approxTokens: number; reason: string } | null
   onCacheConfirm?: () => void
@@ -302,8 +320,6 @@ export function Composer({
         {slashOpen && <div className="mx-2 mb-1 max-h-64 overflow-y-auto rounded-lg border border-border bg-popover shadow-panel">{slashMatches.map((cmd, i) => <button type="button" key={cmd.name} onMouseDown={(e) => { e.preventDefault(); runCommand(cmd) }} onMouseMove={() => setSlashIndex(i)} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === slashIndex && "bg-accent")}><ChevronRight className={cn("size-3 shrink-0 text-primary", i !== slashIndex && "opacity-0")} /><span className="shrink-0 font-medium font-mono text-foreground">{cmd.name}</span><span className="truncate text-muted-foreground">{cmd.description}</span></button>)}</div>}
         {mentionOpen && <div className="mx-2 mb-1 overflow-hidden rounded-lg border border-border bg-popover shadow-panel">{mentionItems.length ? mentionItems.map((item, i) => <button type="button" key={item.path} onMouseDown={(e) => { e.preventDefault(); insertMention(item) }} className={cn("flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] hover:bg-accent", i === mentionIndex && "bg-accent")}><File className="size-3 text-primary" /><span className="truncate">{item.path}</span><span className="ml-auto text-muted-foreground">{item.kind}</span></button>) : <div className="px-3 py-2 text-[12px] text-muted-foreground">No matching files</div>}</div>}
 
-        {status}
-
         <div className="flex items-center justify-between gap-2 pt-1">
           <div className="flex min-w-0 items-center gap-1">
             <Tooltip>
@@ -327,11 +343,20 @@ export function Composer({
               >
                 {busy ? (
                   <Loader2 className="size-3.5 animate-spin text-primary" />
+                ) : activeMode ? (
+                  // Same 14px slot as the chip icon, so swapping in a glyph
+                  // can't change the button's height.
+                  <span className="flex size-3.5 shrink-0 items-center justify-center text-[12px] leading-none">
+                    {modeEmoji(activeMode)}
+                  </span>
                 ) : (
                   <Cpu className="size-3.5 shrink-0 text-primary" />
                 )}
                 <span className="truncate font-medium text-foreground">
-                  {busy ? "Switching…" : model.name}
+                  {/* A mode is the coarser choice: while one is in effect it
+                      names the selector, and the executor chip beside it says
+                      which model that resolves to. */}
+                  {busy ? "Switching…" : activeMode || model.name}
                 </span>
                 <ChevronDown className="size-3.5 shrink-0 opacity-60" />
               </DropdownMenuTrigger>
@@ -351,6 +376,45 @@ export function Composer({
                 </div>
 
                 <div className="overflow-y-auto p-1">
+                  {/* Modes first: applying one switches executor + sidekick +
+                      advisor as a unit, so it supersedes a bare model pick.
+                      No saved modes → no section, not an empty header. */}
+                  {modes.length > 0 && onSelectMode && (
+                    <>
+                      <DropdownMenuLabel>Modes</DropdownMenuLabel>
+                      {modes.map((m) => {
+                        const selected = m.name === activeMode
+                        return (
+                          <DropdownMenuItem
+                            key={m.name}
+                            disabled={busy}
+                            onClick={() => void onSelectMode(m.name)}
+                            className={cn(selected && "bg-accent/60")}
+                          >
+                            <span className="flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
+                              {modeEmoji(m.name)}
+                            </span>
+                            <div className="flex min-w-0 flex-col">
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <span className="truncate font-medium text-[13px] text-foreground">
+                                  {m.name}
+                                </span>
+                                {/* The emoji is identity; the check is state. */}
+                                {selected && <Check className="size-3.5 shrink-0 text-primary" />}
+                              </span>
+                              {m.detail && (
+                                <span className="truncate text-[11px] text-muted-foreground">
+                                  {m.detail}
+                                </span>
+                              )}
+                            </div>
+                          </DropdownMenuItem>
+                        )
+                      })}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel>Models</DropdownMenuLabel>
+                    </>
+                  )}
                   {models.length === 0 ? (
                     <DropdownMenuItem disabled>
                       {refreshing ? "Loading models…" : "No models available"}
@@ -412,6 +476,8 @@ export function Composer({
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
+
+            {status}
           </div>
 
           <div className="flex shrink-0 items-center gap-2">

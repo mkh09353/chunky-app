@@ -14,6 +14,7 @@ import { extractDiff, prettyJson, truncateText } from "./toolDiff"
 import { relativeTime, threadLabel, workspaceMark, workspaceName } from "./format"
 import type { Item, ThreadNode, TranscriptState } from "./transcript"
 import { isStreaming, mainItems } from "./transcript"
+import type { RunAnchor } from "./runs"
 
 function toolInputPreview(input: unknown): string {
   if (input == null) return ""
@@ -80,7 +81,8 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
     lastToolIndex = -1
   }
 
-  for (const it of items) {
+  for (const [srcIndex, it] of items.entries()) {
+    const before = asstBlocks.length
     switch (it.kind) {
       case "user": {
         flushAssistant()
@@ -168,6 +170,11 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
       default:
         break
     }
+    // Stamp every block this item produced with its source index — that is what
+    // lets a delegated run park beside the exact pill that spawned it.
+    for (let i = Math.min(before, asstBlocks.length); i < asstBlocks.length; i++) {
+      asstBlocks[i] = { ...asstBlocks[i]!, srcIndex }
+    }
   }
 
   // Always flush remaining assistant content (including mid-stream).
@@ -176,6 +183,79 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   }
 
   return messages
+}
+
+/** One rendered transcript row: a message, or a *slice* of an assistant message
+ *  that starts at a run-spawning tool pill so the gutter card can sit level with
+ *  it. Splitting is structural — driven by the run anchors, not by offsets. */
+export interface TranscriptRow {
+  id: string
+  message: Message
+  blocks: MessageBlock[]
+  /** Later slices of the same message: no avatar/header, indented instead. */
+  continuation: boolean
+  /** Only the final slice shows the streaming caret and hover actions. */
+  lastSegment: boolean
+  /** Settled runs that park in this row's gutter. */
+  parkedRunIds: string[]
+}
+
+export function buildTranscriptRows(
+  messages: Message[],
+  anchors: Map<number, RunAnchor>,
+): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  for (const message of messages) {
+    if (message.role !== "assistant" || anchors.size === 0) {
+      rows.push({
+        id: message.id,
+        message,
+        blocks: message.blocks,
+        continuation: false,
+        lastSegment: true,
+        parkedRunIds: [],
+      })
+      continue
+    }
+
+    let blocks: MessageBlock[] = []
+    let parkedRunIds: string[] = []
+    let seg = 0
+    const flush = () => {
+      if (blocks.length === 0) return
+      rows.push({
+        id: `${message.id}:${seg}`,
+        message,
+        blocks,
+        continuation: seg > 0,
+        lastSegment: false,
+        parkedRunIds,
+      })
+      seg++
+      blocks = []
+      parkedRunIds = []
+    }
+
+    for (const block of message.blocks) {
+      const anchor = block.srcIndex != null ? anchors.get(block.srcIndex) : undefined
+      if (anchor) {
+        // The pill starts its own row, so its card can ride level with it.
+        flush()
+        blocks.push({
+          ...block,
+          ...(anchor.liveRunId ? { runId: anchor.liveRunId } : {}),
+          accent: anchor.accent,
+        })
+        parkedRunIds = anchor.parkedRunIds
+        continue
+      }
+      blocks.push(block)
+    }
+    flush()
+    const last = rows[rows.length - 1]
+    if (last && last.message === message) last.lastSegment = true
+  }
+  return rows
 }
 
 /** Child nodes are deliberately kept separate from main messages so the view can

@@ -51,6 +51,32 @@ export interface ThreadNode {
   items: Item[]
 }
 
+/** One delegated *run* (a sidekick brief, a spawned subagent, a workflow leg).
+ *
+ * A seat's thread is persistent — it goes running → idle → running as briefs
+ * arrive — so the thread alone cannot say "which run parks where". A RunRecord
+ * pins each pass to the parent-transcript position it was spawned from, which
+ * is what lets a settled run park in the gutter beside its own tool pill
+ * instead of at the bottom of the transcript. */
+export interface RunRecord {
+  /** `${threadId}#${nth}` — stable across replays of the same event stream. */
+  id: string
+  threadId: string
+  parentId: string
+  title: string
+  model?: string
+  status: "running" | "done"
+  /** Index of the PARENT thread's tool item that spawned this run: the pill the
+   *  gutter card aligns to. Frozen when the run opens — resolving it later would
+   *  let a newer pill steal an older run's slot. -1 when no pill was open. */
+  anchorIndex: number
+  /** Slice of the child thread's items produced by this run. */
+  itemStart: number
+  itemEnd?: number
+  /** Tool calls observed inside the run (the card's "N tools"). */
+  toolCount: number
+}
+
 export interface TranscriptState {
   threads: Record<string, ThreadNode>
   order: string[]
@@ -64,6 +90,8 @@ export interface TranscriptState {
   usage: UsageDelta | null
   /** How many times older context was summarized (context.compacted). */
   compacted: number
+  /** Delegated runs in spawn order — drives the live rail and gutter cards. */
+  runs: RunRecord[]
 }
 
 export const initialState: TranscriptState = {
@@ -77,6 +105,64 @@ export const initialState: TranscriptState = {
   background: { tasks: 0, monitors: 0 },
   usage: null,
   compacted: 0,
+  runs: [],
+}
+
+/** The tool pill a delegate hangs off: the last tool item in the parent when the
+ *  run opened (`thread.spawn` lands just after its `tool.start`). */
+function anchorPill(items: Item[]): number {
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i]?.kind === "tool") return i
+  }
+  return -1
+}
+
+/** Index of the still-open run for a thread, or -1. */
+function openRunIndex(runs: RunRecord[], threadId: string): number {
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i]!
+    if (run.threadId === threadId && run.status === "running") return i
+  }
+  return -1
+}
+
+/** Open a run for `threadId` unless one is already open. */
+function openRun(
+  state: TranscriptState,
+  threadId: string,
+  parentId: string,
+  title: string,
+  model: string | undefined,
+): RunRecord[] {
+  if (openRunIndex(state.runs, threadId) >= 0) return state.runs
+  const nth = state.runs.filter((r) => r.threadId === threadId).length
+  return [
+    ...state.runs,
+    {
+      id: `${threadId}#${nth}`,
+      threadId,
+      parentId,
+      title,
+      ...(model ? { model } : {}),
+      status: "running" as const,
+      anchorIndex: anchorPill(state.threads[parentId]?.items ?? []),
+      itemStart: state.threads[threadId]?.items.length ?? 0,
+      toolCount: 0,
+    },
+  ]
+}
+
+/** Settle the open run for `threadId`, recording where its output ended. */
+function closeRun(state: TranscriptState, threadId: string): RunRecord[] {
+  const at = openRunIndex(state.runs, threadId)
+  if (at < 0) return state.runs
+  const runs = [...state.runs]
+  runs[at] = {
+    ...runs[at]!,
+    status: "done",
+    itemEnd: state.threads[threadId]?.items.length ?? runs[at]!.itemStart,
+  }
+  return runs
 }
 
 const PROGRESS_MAX_BYTES = 64 * 1024
@@ -206,9 +292,24 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
   switch (ev.type) {
     case "session.status": {
       const main = state.threads[MAIN]!
+      // A settled session cannot have live delegates: sweep any run whose
+      // thread.status idle we never saw (dropped frame, reattach, crash).
+      const runs =
+        ev.status === "idle" && state.runs.some((r) => r.status === "running")
+          ? state.runs.map((r) =>
+              r.status === "running"
+                ? {
+                    ...r,
+                    status: "done" as const,
+                    itemEnd: state.threads[r.threadId]?.items.length ?? r.itemStart,
+                  }
+                : r,
+            )
+          : state.runs
       return {
         ...state,
         status: ev.status,
+        runs,
         threads: { ...state.threads, [MAIN]: { ...main, status: ev.status } },
       }
     }
@@ -288,6 +389,7 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
         ...state,
         order: existing ? state.order : [...state.order, ev.threadId],
         threads: { ...state.threads, [ev.threadId]: node },
+        runs: openRun(state, ev.threadId, parentId, ev.title, node.model),
       }
     }
 
@@ -306,6 +408,10 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
         ...state,
         order: existing ? state.order : [...state.order, ev.threadId],
         threads: { ...state.threads, [ev.threadId]: node },
+        runs:
+          ev.status === "running"
+            ? openRun(state, ev.threadId, node.parentId ?? MAIN, node.title, node.model)
+            : closeRun(state, ev.threadId),
       }
     }
 
@@ -353,7 +459,18 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
     case "tool.end":
     case "error": {
       const threadId = ("threadId" in ev && ev.threadId) || MAIN
-      return updateThreadItems(state, threadId, (items) => reduceItems(items, ev))
+      // Tool calls inside a delegate count toward its card's "N tools".
+      const runs =
+        ev.type === "tool.start" && threadId !== MAIN
+          ? (() => {
+              const at = openRunIndex(state.runs, threadId)
+              if (at < 0) return state.runs
+              const next = [...state.runs]
+              next[at] = { ...next[at]!, toolCount: next[at]!.toolCount + 1 }
+              return next
+            })()
+          : state.runs
+      return updateThreadItems({ ...state, runs }, threadId, (items) => reduceItems(items, ev))
     }
 
     default: {

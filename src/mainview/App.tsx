@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
-import { Composer } from "./components/Composer"
+import { Composer, type ModeOption } from "./components/Composer"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
 import { needsOnboarding, OnboardingWizard } from "./components/settings/OnboardingWizard"
 import { ContextMeter } from "./components/ContextMeter"
@@ -74,7 +74,8 @@ import {
   savedModeForCommand,
   type SlashCommand,
 } from "./lib/slashCommands"
-import type { GoalSnapshot, ModeSpec, RewindPoint } from "@chunky/protocol"
+import type { GoalSnapshot, ModeInfo, ModeSpec, RewindPoint } from "@chunky/protocol"
+import { activeModeName } from "./lib/modes"
 import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
 import {
@@ -265,6 +266,10 @@ export function App() {
   // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
+  // The same saved modes, as the composer's selector lists them, plus the
+  // server's snapshot of the live pairing (what makes one of them "active").
+  const [savedModes, setSavedModes] = useState<ModeInfo[]>([])
+  const [currentModeSpec, setCurrentModeSpec] = useState<ModeSpec | null>(null)
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
   const [sidekickPickerOpen, setSidekickPickerOpen] = useState(false)
@@ -310,6 +315,24 @@ export function App() {
     const list = rowsToModels(modelRows)
     return list.length > 0 ? list : [modelSelectionToUi(effectiveModelSel, modelRows)]
   }, [live, modelRows, effectiveModelSel])
+
+  // The mode in effect, derived from the server's own `current` pairing (see
+  // lib/modes) — it names the selector, and dissolves the moment the live
+  // configuration stops matching any saved mode.
+  const activeMode = useMemo(
+    () => (live ? activeModeName(savedModes, currentModeSpec) : null),
+    [live, savedModes, currentModeSpec],
+  )
+  const modeOptions = useMemo<ModeOption[]>(
+    () =>
+      live
+        ? savedModes.map((m) => ({
+            name: m.name,
+            detail: `${prettyModel(m.model)}${m.effort ? ` (${m.effort})` : ""}`,
+          }))
+        : [],
+    [live, savedModes],
+  )
 
   const uiModel = useMemo(() => {
     if (!live) return demoModel
@@ -690,11 +713,15 @@ export function App() {
   const refreshModes = useCallback(async () => {
     if (appMode !== "live") {
       setSlashModes([])
+      setSavedModes([])
+      setCurrentModeSpec(null)
       return
     }
     try {
-      const { modes } = await getModes()
+      const { modes, current } = await getModes()
       setSlashModes(modeCommands(modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
+      setSavedModes(modes)
+      setCurrentModeSpec(current ?? null)
     } catch {
       /* keep the last known aliases; the menu is a convenience, not state */
     }
@@ -703,6 +730,8 @@ export function App() {
   useEffect(() => {
     if (appMode !== "live") {
       setSlashModes([])
+      setSavedModes([])
+      setCurrentModeSpec(null)
       return
     }
     if (connectionState !== "connected") return
@@ -1388,8 +1417,12 @@ export function App() {
       )
       if (sid) setSessionModelSel((prev) => ({ ...prev, [sid]: next }))
       else setModelSel(next)
+      // Picking a model by hand breaks the mode's pairing (the server drops its
+      // own activeMode here too), so re-read what is now current: the selector
+      // must fall back from the mode name to the model name.
+      void refreshModes()
     },
-    [live, config, sessionId],
+    [live, config, sessionId, refreshModes],
   )
 
   const enterDemo = useCallback(() => {
@@ -1661,11 +1694,14 @@ export function App() {
                 }
                 onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
                 commands={slashCommands}
+                modes={modeOptions}
+                activeMode={activeMode}
+                onSelectMode={live ? applyModeByName : undefined}
                 openModelPickerSignal={modelPickerSignal}
                 streaming={streaming}
                 onStop={handleStop}
                 contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
-                status={<ComposerStatus chips={statusChips} />}
+                status={<ComposerStatus chips={statusChips} selectorLabel={activeMode ?? uiModel.name} />}
                 cacheGuard={cacheGuard}
                 onCacheConfirm={() => void confirmCacheGuard()}
                 onCacheCancel={() => setCacheGuard(null)}
@@ -1722,9 +1758,11 @@ export function App() {
             rows={modelRows}
             onChanged={(next) => {
               // Repaint the composer status now, then re-read the effective
-              // (per-session) config authoritatively.
+              // (per-session) config authoritatively. Modes too: the seat is
+              // part of a mode's pairing, so this can end the active mode.
               setSidekickConfig(next)
               void refreshAgents()
+              void refreshModes()
             }}
           />
         )}

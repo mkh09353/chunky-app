@@ -1,5 +1,4 @@
 import {
-  ChevronDown,
   Info,
   MoreHorizontal,
   PanelRightOpen,
@@ -7,9 +6,9 @@ import {
   Sparkles,
   SquareTerminal,
 } from "lucide-react"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Repo } from "~/lib/api"
-import type { Message, Project, Thread } from "~/lib/mock"
+import type { Project, Thread } from "~/lib/mock"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -22,9 +21,16 @@ import { RepoTabs, type CloneStatus } from "./RepoTabs"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
+import { AgentCard } from "./AgentCard"
+import { AgentRail, AgentRailBar } from "./AgentRail"
+import { RunLinkProvider } from "./RunLink"
+import { RunWires } from "./RunWires"
 import { cn } from "~/lib/cn"
-import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
-import type { TranscriptState } from "~/lib/transcript"
+import { buildTranscriptRows, type TranscriptRow } from "~/lib/mapTranscript"
+import { hasLiveAgents, hasRuns, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
+import { useRunClock } from "~/lib/useRunClock"
+import { useFullSizeWindow } from "~/lib/windowSize"
+import type { RunRecord, TranscriptState } from "~/lib/transcript"
 
 /** Top chrome strip: repo tabs + actions. */
 export function ChatTopBar({
@@ -142,7 +148,36 @@ export function ChatTopBar({
   )
 }
 
-/** Transcript body only — lives inside the curved content panel. */
+/** Bottom inset of the transcript, and the rail's sticky offset: keeping these
+ *  equal makes the rail rest exactly where it pins. */
+const RAIL_INSET = 26
+
+/** Within this many px of the end still counts as "reading the bottom", so the
+ *  transcript keeps following the stream. Past it the reader is scrolled away
+ *  and we leave the viewport alone. */
+const BOTTOM_SLACK = 48
+
+/** Breathing room above the answer when we park its first line at the top. */
+const ANSWER_TOP_GAP = 12
+
+/** Id of the answer that just landed: the trailing assistant message. A turn
+ *  that ended without one (stopped, error before any reply) yields undefined —
+ *  nothing to re-anchor to, so the viewport is left where it is. */
+function lastAnswerId(rows: TranscriptRow[]): string | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const role = rows[i]!.message.role
+    if (role === "assistant") return rows[i]!.message.id
+    if (role === "user") return undefined
+  }
+  return undefined
+}
+
+/** Transcript body — left-pinned text column, with a right gutter that carries
+ *  settled agent runs and a bottom-anchored rail for the live ones.
+ *
+ *  Both columns live in ONE scrollport so the gutter cards scroll with the
+ *  conversation; only the live rail is sticky (a zero-height layer, so it costs
+ *  no flow space and cannot leave a dead region bottom-right). */
 export function ChatView({
   thread,
   streamingId,
@@ -163,60 +198,332 @@ export function ChatView({
   compacted?: number
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const innerRef = useRef<HTMLDivElement>(null)
+
+  // Is the reader parked at the end of the thread? Only then do we follow the
+  // stream; scrolling up mid-turn must stay put.
+  const stuckToBottom = useRef(true)
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onScroll = () => {
+      stuckToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK
+    }
+    el.addEventListener("scroll", onScroll, { passive: true })
+    return () => el.removeEventListener("scroll", onScroll)
+  }, [])
+
+  // Run state → anchors (which pill owns which run) → rows split at those pills.
+  const anchors = useMemo(
+    () => (transcript ? runAnchors(transcript) : new Map<number, RunAnchor>()),
+    [transcript],
+  )
+  const runIndex = useMemo(
+    () => (transcript ? runsById(transcript) : new Map<string, RunRecord>()),
+    [transcript],
+  )
+  const rows = useMemo(
+    () => buildTranscriptRows(thread.messages, anchors),
+    [thread.messages, anchors],
+  )
+  const elapsedOf = useRunClock(transcript?.runs)
+
+  // A turn ends when the session goes running → idle: `session.status` from the
+  // SSE reducer (transcript.status), or — in demo/offline mode, where there is
+  // no transcript — when the streaming message settles.
+  const running = transcript ? transcript.status === "running" || streamingId != null : streamingId != null
+  // Bumped once per settled turn: folds every agent card back to its condensed
+  // summary. Because it only moves at turn end, a card the reader opens
+  // afterwards stays open until the NEXT turn finishes.
+  const [turnEnd, setTurnEnd] = useState(0)
+  const wasRunning = useRef(running)
+  const messageCount = thread.messages.length
+  const lastRole = thread.messages[messageCount - 1]?.role
+  // Read at turn end (not a dep — the effect must fire on the transition only).
+  const rowsRef = useRef(rows)
+  rowsRef.current = rows
+
+  // A fresh user turn always re-anchors to the bottom, even if the reader had
+  // scrolled away to re-read the previous answer.
+  useEffect(() => {
+    if (lastRole === "user") stuckToBottom.current = true
+  }, [messageCount, lastRole])
+
+  // Switching sessions starts at the end of the new thread, not wherever the
+  // previous one had parked us.
+  useEffect(() => {
+    stuckToBottom.current = true
+  }, [thread.id])
 
   useEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [thread.messages.length, streamingId, loading])
+    if (!el) return
+    const justEnded = wasRunning.current && !running
+    wasRunning.current = running
+
+    if (!justEnded) {
+      // Streaming (or replaying): follow the bottom unless the reader left it.
+      if (stuckToBottom.current) el.scrollTop = el.scrollHeight
+      return
+    }
+
+    setTurnEnd((n) => n + 1)
+
+    // The turn is done: park the START of the answer at the top of the
+    // scrollport rather than leaving the reader at its tail. One frame later,
+    // so the rail leaving / cards parking have settled the layout first.
+    const answerId = lastAnswerId(rowsRef.current)
+    if (!answerId) return
+    const frame = requestAnimationFrame(() => {
+      const inner = innerRef.current
+      if (!inner) return
+      const first = inner.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(answerId)}"]`)
+      if (!first) return
+      const top =
+        first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
+      // Clamped by the browser when the answer is short — its start is visible
+      // either way, which is the point.
+      el.scrollTo({ top: Math.max(0, top - ANSWER_TOP_GAP), behavior: "smooth" })
+      stuckToBottom.current = false
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [running, messageCount, streamingId, loading])
+
+  // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
+  // in the same commit can never cancel each other out.
+  const collapseSignal = turnEnd * 2 + (foldAll ? 1 : 0)
+  // The rail + gutter only earn their space on a maximized/fullscreen window,
+  // AND only once this session has actually delegated. Any smaller window gets
+  // the plain full-width chat, whatever the run state.
+  const fullSizeWindow = useFullSizeWindow()
+  const liveAgents = hasLiveAgents(transcript)
+  const gutterOn = fullSizeWindow && hasRuns(transcript)
+  const railOn = fullSizeWindow && liveAgents
+  // Space reserved under the last row so the last parked card can scroll clear
+  // of the floating rail. Reserve only what is actually needed: if the thread
+  // already runs well past its last parked card, nothing is added — no
+  // gratuitous empty region at the end of the conversation.
+  const [railHeight, setRailHeight] = useState(0)
+  const [railClearance, setRailClearance] = useState(0)
+  const spacerRef = useRef<HTMLDivElement>(null)
+  const revision = transcript
+    ? `${transcript.runs.length}:${transcript.runs.filter((r) => r.status === "running").length}:${rows.length}`
+    : ""
+
+  useEffect(() => {
+    const inner = innerRef.current
+    if (!inner) return
+
+    const measure = () => {
+      // The rail only floats over the gutter on wide panels; as an in-flow
+      // strip it already occupies space and can't cover anything.
+      if (railHeight <= 0) return setRailClearance(0)
+      const cards = inner.querySelectorAll<HTMLElement>("[data-chat-gutter] [data-run-parked]")
+      const last = cards[cards.length - 1]
+      if (!last) return setRailClearance(0)
+
+      const innerTop = inner.getBoundingClientRect().top
+      // Measure the content as if the spacer weren't there, so the result is a
+      // fixed point rather than a feedback loop.
+      const spacer = spacerRef.current?.getBoundingClientRect().height ?? 0
+      const contentEnd = inner.getBoundingClientRect().height - spacer
+      const cardBottom = last.getBoundingClientRect().bottom - innerTop
+      // At full scroll the rail's bottom rests RAIL_INSET above the content end
+      // (the container's bottom padding), so the card has to clear
+      // railHeight + RAIL_INSET + a small gap.
+      const needed = Math.max(
+        0,
+        Math.round(cardBottom + RAIL_INSET + railHeight + 14 - contentEnd),
+      )
+      setRailClearance((prev) => (Math.abs(prev - needed) > 1 ? needed : prev))
+    }
+
+    measure()
+    if (typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(measure)
+    ro.observe(inner)
+    return () => ro.disconnect()
+  }, [railHeight, rows.length, revision])
+
+  /** Scroll a settled run's gutter card into view (idle card → last run). */
+  const scrollToParked = useCallback((runId: string) => {
+    const card = innerRef.current?.querySelector<HTMLElement>(
+      `[data-run-parked="${CSS.escape(runId)}"]`,
+    )
+    if (!card) return false
+    card.scrollIntoView({ block: "center", behavior: "smooth" })
+    return true
+  }, [])
+
+  const body = (
+    /* pb matches the rail's sticky offset, so the panel rests exactly where it
+       pins instead of hopping as you reach the end of the thread. */
+    <div ref={innerRef} className="relative flex flex-col gap-4 pt-5 pr-7 pb-[26px] pl-[22px]">
+      {gutterOn && (
+        <RunWires scrollRef={scrollRef} containerRef={innerRef} revision={revision} />
+      )}
+
+      <Row gutterOn={gutterOn}>
+        <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+          <Sparkles className="size-3 text-primary" />
+          {loading ? "Loading transcript…" : "Chunky started this thread"}
+        </div>
+      </Row>
+
+      {loading && thread.messages.length === 0 ? (
+        <p className="py-12 text-[13px] text-muted-foreground">Replaying session history…</p>
+      ) : thread.messages.length === 0 ? (
+        <p className="py-12 text-[13px] text-muted-foreground">Send a message to begin.</p>
+      ) : (
+        rows.map((row) => {
+          const parked = row.parkedRunIds
+            .map((id) => runIndex.get(id))
+            .filter((run): run is RunRecord => !!run)
+          return (
+            <Row key={row.id} msgId={row.message.id} gutterOn={gutterOn} gutter={
+              parked.length > 0 && transcript ? (
+                <div className="flex flex-col gap-2">
+                  {parked.map((run) => (
+                    <AgentCard
+                      key={run.id}
+                      variant="parked"
+                      transcript={transcript}
+                      threadId={run.threadId}
+                      run={run}
+                      {...(modelName ? { modelName } : {})}
+                      {...(elapsedOf(run) != null ? { elapsedMs: elapsedOf(run)! } : {})}
+                      collapseSignal={collapseSignal}
+                    />
+                  ))}
+                </div>
+              ) : null
+            }>
+              <MessageView
+                message={row.message}
+                streaming={row.message.id === streamingId}
+                blocks={row.blocks}
+                continuation={row.continuation}
+                lastSegment={row.lastSegment}
+              />
+            </Row>
+          )
+        })
+      )}
+
+      {compacted > 0 && (
+        <Row gutterOn={gutterOn}>
+          <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+            <Info className="size-3" />
+            Context compacted — older turns summarized{compacted > 1 ? ` · ×${compacted}` : ""}
+          </div>
+        </Row>
+      )}
+
+      {/* Live rail: zero-height sticky layer parked at the END of the column
+          (order-2), so it anchors bottom-right beside the newest turn. Below the
+          gutter breakpoint it keeps its height and becomes a bottom strip. */}
+      {/* Clearance so the last parked cards can scroll clear of the floating
+          rail rather than ending up underneath it. Sits between the rows
+          (order-0) and the rail layer (order-2), so the rail's resting position
+          is unchanged. */}
+      <div
+        ref={spacerRef}
+        aria-hidden
+        className="order-1 shrink-0"
+        style={{ height: railClearance }}
+      />
+
+      {transcript && railOn && (
+        <div className="sticky bottom-[26px] z-20 order-2 h-auto @[1074px]:h-0 @max-[699px]:hidden">
+          <AgentRail
+            transcript={transcript}
+            {...(modelName ? { modelName } : {})}
+            elapsedOf={elapsedOf}
+            collapseSignal={collapseSignal}
+            onFloatingHeight={setRailHeight}
+          />
+        </div>
+      )}
+    </div>
+  )
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
-        <div className="mx-auto flex max-w-5xl flex-col gap-4 px-5 py-5">
-          <div className="mx-auto mb-1 flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
-            <Sparkles className="size-3 text-primary" />
-            {loading ? "Loading transcript…" : "Chunky started this thread"}
-          </div>
-          {loading && thread.messages.length === 0 ? (
-            <p className="py-12 text-center text-[13px] text-muted-foreground">
-              Replaying session history…
-            </p>
-          ) : thread.messages.length === 0 ? (
-            <p className="py-12 text-center text-[13px] text-muted-foreground">
-              Send a message to begin.
-            </p>
-          ) : (
-            thread.messages.map((m: Message) => (
-              <MessageView key={m.id} message={m} streaming={m.id === streamingId} />
-            ))
-          )}
-          {transcript && childThreads(transcript, "main").map((node) => (
-            <ThreadCard key={node.id} nodeId={node.id} transcript={transcript} modelName={modelName} foldAll={foldAll} />
-          ))}
-          {compacted > 0 && (
-            <div className="mx-auto flex items-center gap-2 rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
-              <Info className="size-3" />
-              Context compacted — older turns summarized{compacted > 1 ? ` · ×${compacted}` : ""}
-            </div>
-          )}
-        </div>
-      </ScrollArea>
+    // @container: every breakpoint below keys off the CHAT PANEL's width, so the
+    // sidebar's width (and its collapsing) can never skew them.
+    <div className="@container flex min-h-0 min-w-0 flex-1 flex-col">
+      <RunLinkProvider onJump={scrollToParked}>
+        <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
+          {body}
+        </ScrollArea>
+        {/* Live activity must stay visible even where the rail doesn't render:
+            in a small window, and (when maximized) on a narrow chat panel. */}
+        {transcript && liveAgents && (
+          <AgentRailBar transcript={transcript} always={!fullSizeWindow} />
+        )}
+      </RunLinkProvider>
     </div>
   )
 }
 
-function ThreadCard({ nodeId, transcript, modelName, foldAll }: { nodeId: string; transcript: TranscriptState; modelName?: string; foldAll: boolean }) {
-  const node = transcript.threads[nodeId]!
-  const [open, setOpen] = useState(!foldAll)
-  useEffect(() => setOpen(!foldAll), [foldAll])
-  const messages = itemsToMessages(node.items, node.model ?? modelName)
-  return <section className="ml-4 overflow-hidden rounded-xl border border-primary/20 bg-primary/[0.035] shadow-xs sm:ml-8">
-    <button type="button" onClick={() => setOpen((value) => !value)} className="flex w-full items-center gap-2 px-3 py-2.5 text-left hover:bg-primary/[0.06]">
-      <ChevronDown className={`size-4 text-primary transition-transform ${open ? "" : "-rotate-90"}`} />
-      <Sparkles className="size-3.5 text-primary" /><span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{node.title}</span>
-      {node.model && <span className="max-w-32 truncate rounded-full border border-border bg-card px-2 py-0.5 text-[10px] text-muted-foreground">{node.model}</span>}
-      <span className={node.status === "running" ? "text-[11px] text-primary" : "text-[11px] text-muted-foreground"}>{node.status === "running" ? "Running" : "Idle"}</span>
-    </button>
-    {open && <div className="border-border/70 border-t px-3 py-3"><div className="flex flex-col gap-5">{messages.length ? messages.map((message) => <MessageView key={message.id} message={message} />) : <span className="text-[12px] text-muted-foreground">Waiting for work…</span>}{childThreads(transcript, node.id).map((child) => <ThreadCard key={child.id} nodeId={child.id} transcript={transcript} modelName={modelName} foldAll={foldAll} />)}</div></div>}
-  </section>
+/** One transcript row: text column pinned left, connector, then the gutter.
+ *
+ *  Breakpoints are CONTAINER queries, not viewport ones: the chat panel sits
+ *  beside a ~288px sidebar, so a viewport breakpoint would dissolve the gutter
+ *  at the wrong moment (and differently once the sidebar collapses).
+ *  Below GUTTER_AT the row stacks and cards fall inline under their pill.
+ *
+ *  Note the row never wraps: the text column SHRINKS (flex-[0_1_58rem]) so the
+ *  gutter always stays beside it instead of dropping to the next line.
+ *
+ *  `gutterOn` is the session-level switch: with no runs anywhere there is no
+ *  gutter cell and no cap-for-the-gutter, so the conversation simply uses the
+ *  width it always had. */
+function Row({
+  children,
+  gutter,
+  gutterOn,
+  msgId,
+}: {
+  children: React.ReactNode
+  gutter?: React.ReactNode
+  gutterOn: boolean
+  /** The message this row belongs to; a split message tags every segment, so
+   *  the FIRST match in the DOM is where that message starts. */
+  msgId?: string
+}) {
+  if (!gutterOn) {
+    return (
+      <div data-chat-row="" data-msg-id={msgId}>
+        <div data-chat-col="" className="min-w-0 max-w-[76rem]">
+          {children}
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div
+      data-chat-row=""
+      data-msg-id={msgId}
+      className="flex flex-col gap-2 @[1074px]:flex-row @[1074px]:items-start @[1074px]:gap-x-6 @[1074px]:gap-y-0"
+    >
+      <div data-chat-col="" className="min-w-0 @[1074px]:max-w-[58rem] @[1074px]:flex-[0_1_58rem]">
+        {children}
+      </div>
+      <div
+        className={cn(
+          "mt-[19px] hidden h-px min-w-0 flex-1 @[1074px]:block",
+          gutter && "border-success/30 border-t border-dashed",
+        )}
+      />
+      <div
+        data-chat-gutter=""
+        /* The cell keeps its width even when empty: every row's text column must
+           be the same width, and the wire origin must stay left of the rail.
+           Only when stacked does an empty gutter collapse away. */
+        className="ps-[46px] @max-[1073px]:empty:hidden @[1074px]:w-[380px] @[1074px]:shrink-0 @[1074px]:ps-0"
+      >
+        {gutter}
+      </div>
+    </div>
+  )
 }

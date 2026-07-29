@@ -64,6 +64,12 @@ export interface MessageBlock {
   files?: ChangedFiles
   /** tool block: rich per-tool-call render data. */
   tool?: ToolBlockData
+  /** Index of the transcript Item this block came from (anchors agent runs). */
+  srcIndex?: number
+  /** Set when this tool call spawned a delegated run: ties the pill to its card. */
+  runId?: string
+  /** The run's accent hue, worn by both the pill and its card. */
+  accent?: string
 }
 
 export interface Message {

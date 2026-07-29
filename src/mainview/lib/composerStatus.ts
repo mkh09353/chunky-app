@@ -16,12 +16,20 @@ import type { AdvisorStatus, SidekickConfig } from "./configApi"
 /** Visual weight, mapped to Tailwind classes by the component. */
 export type ChipTone = "danger" | "accent" | "dim" | "warning"
 
+/** One line of a chip's hover breakdown (a sidekick seat and its model). */
+export interface ChipDetail {
+  name: string
+  model: string
+}
+
 export interface StatusChip {
   key: string
   text: string
   tone: ChipTone
   /** Longer hover text; the chip itself stays compact. */
   title?: string
+  /** What the chip's compact suffix collapses — revealed on hover. */
+  details?: ChipDetail[]
 }
 
 export interface ComposerStatusInput {
@@ -84,12 +92,23 @@ export function buildComposerStatus(input: ComposerStatusInput): StatusChip[] {
           ? ` +${seatNames[0]}`
           : ` +${seatNames.length}`
     const model = sidekick.default.model ? prettyModel(sidekick.default.model) : label
+    // Every seat with the model a handoff actually RUNS on: an unset seat
+    // inherits the default seat, which itself inherits the executor. This is
+    // what the `+name` / `+N` suffix collapses, so hover can spell it out.
+    const details: ChipDetail[] = [
+      { name: "default", model },
+      ...seatNames.map((name) => {
+        const seatModel = sidekick.seats[name]?.model
+        return { name, model: seatModel ? prettyModel(seatModel) : model }
+      }),
+    ]
     chips.push({
       key: "sidekick",
       text: `⚒ sidekick ${model}${seatSuffix}`,
       tone: "dim",
       title:
         seatNames.length > 1 ? `Sidekick seats: ${seatNames.join(", ")}` : "Sidekick worker model",
+      details,
     })
   }
 

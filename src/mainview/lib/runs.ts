@@ -1,0 +1,257 @@
+// View model for delegated agent runs: what the live rail tails, what parks in
+// the transcript gutter, and how a run is tied to the pill that spawned it.
+//
+// Everything here is derived from the SSE-fed TranscriptState (lib/transcript)
+// — no renderer fetches, and it degrades to empty arrays in demo/offline mode
+// where there is no transcript at all.
+import type { Item, RunRecord, ThreadNode, TranscriptState } from "./transcript"
+import { MAIN } from "./transcript"
+
+/** Subtle, low-chroma hues. A run keeps one for its whole life, worn by both
+ *  its tool pill (left edge) and its card (left edge). Deliberately few and
+ *  muted — this is an identity cue, not a category colour. */
+const RUN_ACCENTS = [
+  "oklch(0.71 0.14 300)", // violet
+  "oklch(0.73 0.10 218)", // blue
+  "oklch(0.74 0.12 165)", // teal
+  "oklch(0.76 0.11 85)", // amber
+] as const
+
+/** Stable per-run hue (same run → same colour across re-renders and replays). */
+export function runAccent(runId: string): string {
+  let hash = 0
+  for (let i = 0; i < runId.length; i++) hash = (hash * 31 + runId.charCodeAt(i)) | 0
+  return RUN_ACCENTS[Math.abs(hash) % RUN_ACCENTS.length]!
+}
+
+/** Child threads of the main transcript = the delegates we surface. */
+function delegates(state: TranscriptState): ThreadNode[] {
+  return state.order
+    .map((id) => state.threads[id])
+    .filter((t): t is ThreadNode => !!t && t.id !== MAIN && t.parentId === MAIN)
+}
+
+/** Has this session delegated at all?
+ *
+ * The gutter is the whole reason the chat column is narrowed and pinned left, so
+ * a session that never delegates must not pay for it: no gutter cell, no rail,
+ * no wires — just a full-width conversation. */
+export function hasRuns(state: TranscriptState | undefined): boolean {
+  return !!state && state.runs.length > 0
+}
+
+/** Agents to show in the live rail right now. Empty → no rail at all. */
+export function hasLiveAgents(state: TranscriptState | undefined): boolean {
+  if (!state) return false
+  return runningThreads(state).length > 0 || idleThreads(state).length > 0
+}
+
+/** A persistent sidekick SEAT, as opposed to a one-shot delegate.
+ *
+ * The server gives seats a stable thread id (`${rootId}:sidekick[:seat]`) and
+ * re-uses it for every brief, so a seat is an agent that outlives its runs.
+ * Subagents and workflow legs are one-shot: when they finish they are simply
+ * done, and their card belongs in the transcript, not in the live rail. */
+export function isSeat(thread: ThreadNode): boolean {
+  return thread.id.includes(":sidekick") || /^sidekick\b/i.test(thread.title)
+}
+
+/** Agents with work in flight — the rail's tailing cards (seats and one-shots). */
+export function runningThreads(state: TranscriptState): ThreadNode[] {
+  return delegates(state).filter((t) => t.status === "running")
+}
+
+/** Seats that have run at least once and are between briefs. One-shot delegates
+ *  are deliberately excluded: a finished subagent is parked in the gutter, not
+ *  idling in the rail. */
+export function idleThreads(state: TranscriptState): ThreadNode[] {
+  return delegates(state).filter(
+    (t) => t.status !== "running" && isSeat(t) && state.runs.some((r) => r.threadId === t.id),
+  )
+}
+
+/** The open run for a thread (what a running card is showing). */
+export function activeRun(state: TranscriptState, threadId: string): RunRecord | undefined {
+  for (let i = state.runs.length - 1; i >= 0; i--) {
+    const run = state.runs[i]!
+    if (run.threadId === threadId && run.status === "running") return run
+  }
+  return undefined
+}
+
+/** Most recent settled run for a thread — what an idle seat links back to. */
+export function lastSettledRun(state: TranscriptState, threadId: string): RunRecord | undefined {
+  for (let i = state.runs.length - 1; i >= 0; i--) {
+    const run = state.runs[i]!
+    if (run.threadId === threadId && run.status === "done") return run
+  }
+  return undefined
+}
+
+function runsByItem(
+  state: TranscriptState,
+  status: RunRecord["status"],
+): Map<number, RunRecord[]> {
+  const byItem = new Map<number, RunRecord[]>()
+  for (const run of state.runs) {
+    // anchorIndex was frozen against the parent's items when the run opened.
+    if (run.status !== status || run.parentId !== MAIN || run.anchorIndex < 0) continue
+    const list = byItem.get(run.anchorIndex)
+    if (list) list.push(run)
+    else byItem.set(run.anchorIndex, [run])
+  }
+  return byItem
+}
+
+/** Settled runs grouped by the tool pill they park beside. */
+export function parkedRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
+  return runsByItem(state, "done")
+}
+
+/** Running runs keyed by the tool pill that spawned them (wire origin). */
+export function liveRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
+  return runsByItem(state, "running")
+}
+
+/** What a single tool pill in the main transcript owns. */
+export interface RunAnchor {
+  /** A run still in flight from this pill — the wire target in the rail. */
+  liveRunId?: string
+  /** Settled runs that park in this row's gutter. */
+  parkedRunIds: string[]
+  /** Shared hue for the pill's left edge and its cards'. */
+  accent: string
+}
+
+/** Tool-item index → the runs it spawned. This is what makes gutter alignment
+ *  structural: the row is split at the pill, and the card rides in its gutter. */
+export function runAnchors(state: TranscriptState): Map<number, RunAnchor> {
+  const anchors = new Map<number, RunAnchor>()
+  const add = (at: number, run: RunRecord) => {
+    const cur = anchors.get(at) ?? { parkedRunIds: [], accent: runAccent(run.id) }
+    if (run.status === "running") cur.liveRunId = run.id
+    else cur.parkedRunIds.push(run.id)
+    anchors.set(at, cur)
+  }
+  for (const [at, runs] of liveRunsByItem(state)) for (const run of runs) add(at, run)
+  for (const [at, runs] of parkedRunsByItem(state)) for (const run of runs) add(at, run)
+  // A live run owns the hue when a pill has both (re-briefed seat).
+  for (const [at, anchor] of anchors) {
+    const owner = anchor.liveRunId ?? anchor.parkedRunIds[0]
+    if (owner) anchors.set(at, { ...anchor, accent: runAccent(owner) })
+  }
+  return anchors
+}
+
+/** Runs by id, for turning anchor ids back into records. */
+export function runsById(state: TranscriptState): Map<string, RunRecord> {
+  return new Map(state.runs.map((run) => [run.id, run]))
+}
+
+export type TailTone = "cmd" | "ok" | "fail" | "text" | "dim"
+export interface TailLine {
+  text: string
+  tone: TailTone
+}
+
+const LINE_MAX = 160
+
+function clip(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim()
+  return flat.length > LINE_MAX ? `${flat.slice(0, LINE_MAX - 1)}…` : flat
+}
+
+function argPreview(input: unknown): string {
+  if (input == null) return ""
+  if (typeof input === "string") return clip(input)
+  try {
+    const obj = input as Record<string, unknown>
+    // Prefer the fields that actually say what the call is doing.
+    for (const key of ["path", "file", "command", "pattern", "task", "title", "query"]) {
+      const v = obj?.[key]
+      if (typeof v === "string" && v.trim()) return clip(v)
+    }
+    return clip(JSON.stringify(input))
+  } catch {
+    return ""
+  }
+}
+
+/** Flatten a run's items into terminal-ish lines for the live tail. */
+export function runLines(items: Item[], from = 0, to?: number): TailLine[] {
+  const lines: TailLine[] = []
+  for (const it of items.slice(from, to)) {
+    switch (it.kind) {
+      case "tool": {
+        const arg = argPreview(it.input)
+        lines.push({ text: `› ${it.name}${arg ? ` ${arg}` : ""}`, tone: "cmd" })
+        if (it.done) {
+          const head = (it.output ?? "").split("\n").find((l) => l.trim())
+          if (it.ok === false) lines.push({ text: `  ✗ ${clip(head ?? "failed")}`, tone: "fail" })
+          else if (head) lines.push({ text: `  ✓ ${clip(head)}`, tone: "ok" })
+        } else if (it.progress) {
+          const tail = it.progress.split("\n").filter((l) => l.trim()).at(-1)
+          if (tail) lines.push({ text: `  ${clip(tail)}`, tone: "dim" })
+        }
+        break
+      }
+      case "assistant":
+        for (const line of it.text.split("\n")) {
+          if (line.trim()) lines.push({ text: clip(line), tone: "text" })
+        }
+        break
+      case "error":
+        lines.push({ text: `✗ ${clip(it.text)}`, tone: "fail" })
+        break
+      case "workflow-phase":
+        lines.push({ text: `▸ ${clip(it.title)}`, tone: "cmd" })
+        break
+      case "workflow-log":
+        lines.push({ text: clip(it.message), tone: "dim" })
+        break
+      default:
+        break
+    }
+  }
+  return lines
+}
+
+/** Last `max` lines — the tail a running card shows. */
+export function runTail(items: Item[], from = 0, max = 5): TailLine[] {
+  const lines = runLines(items, from)
+  return lines.slice(Math.max(0, lines.length - max))
+}
+
+/** One-line gist for a condensed card: the delegate's last words, else its last
+ *  tool result, else a placeholder. */
+export function runSummary(items: Item[], from = 0, to?: number): string {
+  const slice = items.slice(from, to)
+  for (let i = slice.length - 1; i >= 0; i--) {
+    const it = slice[i]!
+    if (it.kind === "assistant" && it.text.trim()) {
+      const line = it.text
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .at(-1)
+      if (line) return clip(line)
+    }
+  }
+  const lines = runLines(slice)
+  return lines.length ? lines[lines.length - 1]!.text : "No output captured."
+}
+
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  if (m < 60) return `${m}m ${String(s).padStart(2, "0")}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
+}
+
+/** "Sidekick (frontend)" → "frontend"; falls back to the whole title. */
+export function seatName(title: string): string {
+  const m = /\(([^)]+)\)\s*$/.exec(title)
+  return m?.[1] ?? title
+}
