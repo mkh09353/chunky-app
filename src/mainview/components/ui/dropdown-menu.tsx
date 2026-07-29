@@ -17,15 +17,18 @@ export function DropdownMenuContent({
   side = "bottom",
   align = "start",
   sideOffset = 6,
+  anchor,
   ...props
 }: MenuPrimitive.Popup.Props & {
   side?: MenuPrimitive.Positioner.Props["side"]
   align?: MenuPrimitive.Positioner.Props["align"]
   sideOffset?: MenuPrimitive.Positioner.Props["sideOffset"]
+  /** Position against something other than the trigger (e.g. a cursor point). */
+  anchor?: MenuPrimitive.Positioner.Props["anchor"]
 }) {
   return (
     <MenuPrimitive.Portal>
-      <MenuPrimitive.Positioner side={side} align={align} sideOffset={sideOffset} className="z-50">
+      <MenuPrimitive.Positioner side={side} align={align} sideOffset={sideOffset} anchor={anchor} className="z-50">
         <MenuPrimitive.Popup
           data-slot="dropdown-content"
           className={cn(

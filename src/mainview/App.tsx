@@ -14,6 +14,8 @@ import { GitToolbar } from "./components/GitPanel"
 import { Sidebar } from "./components/Sidebar"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
+import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
+import { subscribeBrowserNavigation } from "./lib/browserNav"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import {
@@ -257,6 +259,9 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
+  // The link context menu's "Open in Chunky browser" mounts the pane; the pane
+  // itself picks the URL up from the same store.
+  useEffect(() => subscribeBrowserNavigation(() => setBrowserOpen(true)), [])
   // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
@@ -1675,6 +1680,7 @@ export function App() {
               </div>
             </div>
             {browserOpen ? <BrowserPane onClose={() => setBrowserOpen(false)} /> : null}
+            <ExternalLinkMenu />
           </section>
         </div>
 

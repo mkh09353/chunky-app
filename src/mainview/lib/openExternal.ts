@@ -55,6 +55,22 @@ export function openExternal(url: string): void {
   })()
 }
 
+export type LinkMenuRequest = { url: string; x: number; y: number }
+
+const menuListeners = new Set<(request: LinkMenuRequest) => void>()
+
+/**
+ * Listen for right-clicks on external links. The menu UI lives in React
+ * (`ExternalLinkMenu`); this module only owns the delegated DOM listener.
+ * Returns a disposer.
+ */
+export function subscribeLinkMenu(listener: (request: LinkMenuRequest) => void): () => void {
+  menuListeners.add(listener)
+  return () => {
+    menuListeners.delete(listener)
+  }
+}
+
 /** Anchors we take over: real external targets, not in-page fragments or downloads. */
 function externalAnchor(target: EventTarget | null): HTMLAnchorElement | null {
   if (!(target instanceof Element)) return null
@@ -83,11 +99,25 @@ export function installExternalLinkHandler(doc: Document = document): () => void
     openExternal(anchor.href)
   }
 
+  const onContextMenu = (event: MouseEvent) => {
+    if (event.defaultPrevented) return
+    // Without a mounted menu, swallowing the event would leave the user with no
+    // menu at all — let the platform one through instead.
+    if (menuListeners.size === 0) return
+    const anchor = externalAnchor(event.target)
+    if (!anchor) return
+    event.preventDefault()
+    const request: LinkMenuRequest = { url: anchor.href, x: event.clientX, y: event.clientY }
+    for (const listener of Array.from(menuListeners)) listener(request)
+  }
+
   doc.addEventListener("click", onClick)
   // Middle-click never fires `click` — it arrives as `auxclick`.
   doc.addEventListener("auxclick", onClick)
+  doc.addEventListener("contextmenu", onContextMenu)
   return () => {
     doc.removeEventListener("click", onClick)
     doc.removeEventListener("auxclick", onClick)
+    doc.removeEventListener("contextmenu", onContextMenu)
   }
 }

@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent } from "react"
+import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browserNav"
 import { cn } from "~/lib/cn"
 import { Button } from "./ui/button"
 
@@ -256,7 +257,9 @@ export function BrowserPane({ onClose }: { onClose: () => void }) {
   const webviewRef = useRef<ElectrobunWebviewElement | null>(null)
   const [available] = useState(desktopWebviewAvailable)
   const initialUrlRef = useRef<string>("")
-  if (!initialUrlRef.current) initialUrlRef.current = readLastUrl()
+  // A link right-clicked into "Open in Chunky browser" while the pane was
+  // closed is parked in the store; it wins over the last visited URL.
+  if (!initialUrlRef.current) initialUrlRef.current = takePendingBrowserUrl() || readLastUrl()
   const [url, setUrl] = useState(initialUrlRef.current)
   const [draft, setDraft] = useState(initialUrlRef.current)
   const [loading, setLoading] = useState(available)
@@ -366,6 +369,17 @@ export function BrowserPane({ onClose }: { onClose: () => void }) {
     setLoading(true)
     webviewRef.current?.loadURL(nextUrl)
   }, [])
+
+  // Navigation requests that arrive while the pane is already open.
+  useEffect(
+    () =>
+      subscribeBrowserNavigation((next) => {
+        // Clear the parked request so a later remount does not repeat it.
+        takePendingBrowserUrl()
+        navigate(next)
+      }),
+    [navigate],
+  )
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
