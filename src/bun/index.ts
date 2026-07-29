@@ -14,9 +14,13 @@ import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnecti
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
-// Prefer the Vite HMR server in dev; fall back to the bundled view.
+// Prefer the Vite HMR server in dev; fall back to the bundled view. Packaged
+// (non-dev channel) builds must never probe: a random Vite server on :5173
+// would hijack the window and break the /chunky-api proxy contract.
 async function getMainViewUrl(): Promise<string> {
   try {
+    const channel = await Updater.localInfo.channel().catch(() => "dev")
+    if (channel !== "dev" && !process.env.VITE_DEV_URL) return "views://mainview/index.html"
     await fetch(DEV_SERVER_URL, { method: "HEAD" })
     console.log(`[chunky] HMR: ${DEV_SERVER_URL}`)
     return DEV_SERVER_URL
