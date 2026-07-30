@@ -1,6 +1,12 @@
 export type ZooBackfillState = "idle" | "running" | "done" | "error"
-export type ZooSource = { id: string; kind: "linear"; label: string; createdAt: number; backfill: { state: ZooBackfillState; fetched: number; error?: string; completedAt?: number } }
+export type ZooSource = { id: string; kind: "linear" | "transcripts"; label: string; createdAt: number; backfill: { state: ZooBackfillState; fetched: number; error?: string; completedAt?: number } }
 export type ZooArtifactMeta = { id: string; sourceId: string; kind: string; externalId: string; title: string; url?: string; fetchedAt: number }
 export type ZooEvidence = { artifactId: string; quote: string }
 export type ZooInsight = { id: string; passId: string; title: string; summary: string; priority?: number; evidence: ZooEvidence[]; createdAt: number }
 export type ZooPass = { id: string; startedAt: number; status: "running" | "done" | "error"; note?: string }
+export type ZooIdeaType = "close" | "investigate" | "build" | "needs-detail"
+export type ZooIdeaStatus = "proposed" | "promoted" | "dismissed"
+export type ZooIdea = { id: string; type: ZooIdeaType; title: string; rationale: string; status: ZooIdeaStatus; insightIds: string[]; createdAt: number; itemId?: string }
+export type ZooItemStage = "research" | "decision" | "building" | "review" | "shipped" | "dropped"
+export type ZooDecision = { at: number; actor: "user" | "agent"; note: string }
+export type ZooItem = { id: string; ideaId: string; title: string; stage: ZooItemStage; sessionIds: string[]; decisions: ZooDecision[]; createdAt: number; updatedAt: number }

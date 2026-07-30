@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test"
-import { existsSync, mkdtempSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createZooManager, type ZooManager } from "./zoo"
@@ -95,4 +95,50 @@ test("exports bounded bundles and records insights with valid evidence only", as
   expect(await zoo.recordInsights({ passId: exported.passId, insights: [{ title: "Need", summary: "Important", priority: 7, evidence: [{ artifactId: artifacts.artifacts[0]!.id, quote: "proof" }, { artifactId: "missing", quote: "drop" }] }] })).toEqual({ ok: true, insightCount: 1 })
   const insights = await zoo.listInsights({})
   expect(insights).toMatchObject({ ok: true, insights: [{ passId: exported.passId, title: "Need", priority: 7, evidence: [{ artifactId: artifacts.artifacts[0]!.id, quote: "proof" }] }] })
+})
+
+test("connects and versions transcript artifacts while skipping hidden and oversized files", async () => {
+  const zoo = setup()
+  const folder = join(cleanup[0]!.path, "transcripts")
+  mkdirSync(join(folder, "nested"), { recursive: true })
+  mkdirSync(join(folder, ".hidden"))
+  writeFileSync(join(folder, "one.md"), "first")
+  writeFileSync(join(folder, "nested", "two.txt"), "second")
+  writeFileSync(join(folder, ".hidden", "skip.md"), "hidden")
+  writeFileSync(join(folder, "large.txt"), "x".repeat(1_000_001))
+  expect(await zoo.connectTranscripts({ folder: join(folder, "missing") })).toMatchObject({ ok: false })
+  const source = await zoo.connectTranscripts({ folder }); if (!source.ok) throw new Error(source.error)
+  expect((await zoo.connectTranscripts({ folder })).ok).toBe(true)
+  expect((await backfillDone(zoo, source.source.id)).artifactCount).toBe(2)
+  expect((await backfillDone(zoo, source.source.id)).artifactCount).toBe(2)
+  writeFileSync(join(folder, "one.md"), "changed")
+  await backfillDone(zoo, source.source.id)
+  expect((await zoo.status({})).artifactCount).toBe(3)
+})
+
+test("synthesizes insights into ideas and promotes them to mutable items", async () => {
+  const zoo = setup()
+  const connected = await zoo.connectLinear({ apiKey: "good" }); if (!connected.ok) throw new Error(connected.error)
+  await backfillDone(zoo, connected.source.id)
+  const artifact = await zoo.listArtifacts({}); if (!artifact.ok) throw new Error(artifact.error)
+  const extraction = await zoo.exportForExtraction({}); if (!extraction.ok) throw new Error(extraction.error)
+  await zoo.recordInsights({ passId: extraction.passId, insights: [{ title: "Signal", summary: "A signal", evidence: [{ artifactId: artifact.artifacts[0]!.id, quote: "proof" }] }] })
+  const insight = await zoo.listInsights({}); if (!insight.ok) throw new Error(insight.error)
+  const synthesis = await zoo.exportInsightsForSynthesis({ maxChars: 80 }); if (!synthesis.ok) throw new Error(synthesis.error)
+  expect(synthesis.bundle.length).toBeLessThanOrEqual(80)
+  expect(await zoo.recordIdeas({ passId: "unknown", ideas: [] })).toMatchObject({ ok: false, error: "Unknown pass" })
+  expect(await zoo.recordIdeas({ passId: synthesis.passId, ideas: [{ type: "wrong", title: "Bad", rationale: "No", insightIds: [] }] })).toMatchObject({ ok: false, error: "Invalid idea type" })
+  expect(await zoo.recordIdeas({ passId: synthesis.passId, ideas: [{ type: "build", title: "Build it", rationale: "Demand", insightIds: [insight.insights[0]!.id, "missing"] }] })).toEqual({ ok: true, ideaCount: 1 })
+  const ideas = await zoo.listIdeas({}); if (!ideas.ok) throw new Error(ideas.error)
+  expect(ideas.ideas[0]).toMatchObject({ type: "build", status: "proposed", insightIds: [insight.insights[0]!.id] })
+  const dismissed = await zoo.setIdeaStatus({ ideaId: ideas.ideas[0]!.id, status: "dismissed" })
+  expect(dismissed).toMatchObject({ ok: true, idea: { status: "dismissed" } })
+  const item = await zoo.createItem({ ideaId: ideas.ideas[0]!.id }); if (!item.ok) throw new Error(item.error)
+  expect(item.item).toMatchObject({ stage: "research", sessionIds: [], decisions: [] })
+  expect(await zoo.createItem({ ideaId: ideas.ideas[0]!.id })).toMatchObject({ ok: false, error: "Idea already has an item" })
+  expect(await zoo.updateItem({ itemId: item.item.id, stage: "nope" })).toMatchObject({ ok: false, error: "Invalid item stage" })
+  const updated = await zoo.updateItem({ itemId: item.item.id, stage: "building", addSessionId: "session-1", addDecision: { actor: "user", note: "Ship it" } })
+  expect(updated).toMatchObject({ ok: true, item: { stage: "building", sessionIds: ["session-1"], decisions: [{ actor: "user", note: "Ship it" }] } })
+  expect(await zoo.listItems({})).toMatchObject({ ok: true, items: [{ id: item.item.id }] })
+  expect(await zoo.status({})).toMatchObject({ ok: true, ideaCount: 1, itemCount: 1 })
 })

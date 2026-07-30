@@ -301,6 +301,7 @@ rpc = createRPC({
 
     zooStatus: async (params: unknown) => zoo.status(params),
     zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),
+    zooConnectTranscripts: async (params: unknown) => zoo.connectTranscripts(params),
     zooStartBackfill: async (params: unknown) => zoo.startBackfill(params),
     zooListArtifacts: async (params: unknown) => zoo.listArtifacts(params),
     zooGetArtifact: async (params: unknown) => zoo.getArtifact(params),
@@ -308,6 +309,13 @@ rpc = createRPC({
     zooRecordInsights: async (params: unknown) => zoo.recordInsights(params),
     zooFailPass: async (params: unknown) => zoo.failPass(params),
     zooListInsights: async (params: unknown) => zoo.listInsights(params),
+    zooExportInsightsForSynthesis: async (params: unknown) => zoo.exportInsightsForSynthesis(params),
+    zooRecordIdeas: async (params: unknown) => zoo.recordIdeas(params),
+    zooListIdeas: async (params: unknown) => zoo.listIdeas(params),
+    zooSetIdeaStatus: async (params: unknown) => zoo.setIdeaStatus(params),
+    zooCreateItem: async (params: unknown) => zoo.createItem(params),
+    zooUpdateItem: async (params: unknown) => zoo.updateItem(params),
+    zooListItems: async (params: unknown) => zoo.listItems(params),
 
     terminalOpen: async (params: unknown) => terminals.open(params),
     terminalWrite: async (params: unknown) => terminals.write(params),

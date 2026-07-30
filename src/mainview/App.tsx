@@ -1747,6 +1747,8 @@ export function App() {
               <FactoryPane
                 onClose={() => setFactoryOpen(false)}
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
+                repoId={activeRepoId}
+                onOpenSession={live ? handleSelectThread : undefined}
               />
             ) : null}
             <ExternalLinkMenu />

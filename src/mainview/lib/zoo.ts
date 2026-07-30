@@ -7,8 +7,14 @@
 import { getRpc, nativeRpcAvailable } from "./rpc"
 import type {
   ZooArtifactMeta,
+  ZooDecision,
   ZooEvidence,
+  ZooIdea,
+  ZooIdeaStatus,
+  ZooIdeaType,
   ZooInsight,
+  ZooItem,
+  ZooItemStage,
   ZooPass,
   ZooSource,
 } from "../../shared/zooTypes"
@@ -16,11 +22,27 @@ import type {
 export type {
   ZooArtifactMeta,
   ZooBackfillState,
+  ZooDecision,
   ZooEvidence,
+  ZooIdea,
+  ZooIdeaStatus,
+  ZooIdeaType,
   ZooInsight,
+  ZooItem,
+  ZooItemStage,
   ZooPass,
   ZooSource,
 } from "../../shared/zooTypes"
+
+export const IDEA_TYPES: readonly ZooIdeaType[] = ["close", "investigate", "build", "needs-detail"]
+export const ITEM_STAGES: readonly ZooItemStage[] = [
+  "research",
+  "decision",
+  "building",
+  "review",
+  "shipped",
+  "dropped",
+]
 
 export const ZOO_UNAVAILABLE = "The Factory requires the desktop app."
 
@@ -32,6 +54,8 @@ export type ZooStatus = {
   sources: ZooSource[]
   artifactCount: number
   insightCount: number
+  ideaCount: number
+  itemCount: number
   passes: ZooPass[]
 }
 export type ZooArtifactDetail = ZooArtifactMeta & { content: string }
@@ -40,6 +64,17 @@ export type ZooInsightInput = {
   summary: string
   priority?: number
   evidence: ZooEvidence[]
+}
+export type ZooIdeaInput = {
+  type: ZooIdeaType
+  title: string
+  rationale: string
+  insightIds: string[]
+}
+export type ZooItemUpdate = {
+  stage?: ZooItemStage
+  addSessionId?: string
+  addDecision?: { actor: ZooDecision["actor"]; note: string }
 }
 
 /** True only inside the Electrobun app. */
@@ -65,6 +100,10 @@ function num(value: unknown): number | null {
 
 const BACKFILL_STATES = new Set(["idle", "running", "done", "error"])
 const PASS_STATES = new Set(["running", "done", "error"])
+const SOURCE_KINDS = new Set<string>(["linear", "transcripts"])
+const IDEA_TYPE_SET = new Set<string>(IDEA_TYPES)
+const IDEA_STATUSES = new Set<string>(["proposed", "promoted", "dismissed"])
+const ITEM_STAGE_SET = new Set<string>(ITEM_STAGES)
 
 function parseSource(value: unknown): ZooSource | null {
   const row = obj(value)
@@ -73,7 +112,8 @@ function parseSource(value: unknown): ZooSource | null {
   const label = str(row.label)
   const createdAt = num(row.createdAt)
   const backfill = obj(row.backfill)
-  if (!id || !label || createdAt === null || row.kind !== "linear" || !backfill) return null
+  const kind = str(row.kind)
+  if (!id || !label || createdAt === null || !kind || !SOURCE_KINDS.has(kind) || !backfill) return null
   const state = str(backfill.state)
   const fetched = num(backfill.fetched)
   if (!state || !BACKFILL_STATES.has(state) || fetched === null) return null
@@ -81,7 +121,7 @@ function parseSource(value: unknown): ZooSource | null {
   const completedAt = num(backfill.completedAt)
   return {
     id,
-    kind: "linear",
+    kind: kind as ZooSource["kind"],
     label,
     createdAt,
     backfill: {
@@ -159,6 +199,83 @@ function parsePass(value: unknown): ZooPass | null {
   }
 }
 
+function parseIdea(value: unknown): ZooIdea | null {
+  const row = obj(value)
+  if (!row) return null
+  const id = str(row.id)
+  const type = str(row.type)
+  const title = str(row.title)
+  const rationale = str(row.rationale)
+  const status = str(row.status)
+  const createdAt = num(row.createdAt)
+  if (!id || !type || !IDEA_TYPE_SET.has(type)) return null
+  if (!title || !rationale || !status || !IDEA_STATUSES.has(status) || createdAt === null) return null
+  if (!Array.isArray(row.insightIds)) return null
+  const insightIds: string[] = []
+  for (const item of row.insightIds) {
+    const insightId = str(item)
+    if (!insightId) return null
+    insightIds.push(insightId)
+  }
+  const itemId = str(row.itemId)
+  return {
+    id,
+    type: type as ZooIdeaType,
+    title,
+    rationale,
+    status: status as ZooIdeaStatus,
+    insightIds,
+    createdAt,
+    ...(itemId ? { itemId } : {}),
+  }
+}
+
+function parseDecision(value: unknown): ZooDecision | null {
+  const row = obj(value)
+  if (!row) return null
+  const at = num(row.at)
+  const note = str(row.note)
+  const actor = row.actor
+  if (at === null || !note || (actor !== "user" && actor !== "agent")) return null
+  return { at, actor, note }
+}
+
+function parseItem(value: unknown): ZooItem | null {
+  const row = obj(value)
+  if (!row) return null
+  const id = str(row.id)
+  const ideaId = str(row.ideaId)
+  const title = str(row.title)
+  const stage = str(row.stage)
+  const createdAt = num(row.createdAt)
+  const updatedAt = num(row.updatedAt)
+  if (!id || !ideaId || !title || !stage || !ITEM_STAGE_SET.has(stage)) return null
+  if (createdAt === null || updatedAt === null) return null
+  if (!Array.isArray(row.sessionIds) || !Array.isArray(row.decisions)) return null
+  const sessionIds: string[] = []
+  for (const item of row.sessionIds) {
+    const sessionId = str(item)
+    if (!sessionId) return null
+    sessionIds.push(sessionId)
+  }
+  const decisions: ZooDecision[] = []
+  for (const item of row.decisions) {
+    const decision = parseDecision(item)
+    if (!decision) return null
+    decisions.push(decision)
+  }
+  return {
+    id,
+    ideaId,
+    title,
+    stage: stage as ZooItemStage,
+    sessionIds,
+    decisions,
+    createdAt,
+    updatedAt,
+  }
+}
+
 /** Collect a homogeneous list, rejecting the whole response on any bad entry. */
 function parseList<T>(value: unknown, parse: (item: unknown) => T | null): T[] | null {
   if (!Array.isArray(value)) return null
@@ -199,8 +316,11 @@ export function parseStatusResponse(raw: unknown): ZooResult<ZooStatus> {
   const passes = parseList(body.passes, parsePass)
   const artifactCount = num(body.artifactCount)
   const insightCount = num(body.insightCount)
+  const ideaCount = num(body.ideaCount)
+  const itemCount = num(body.itemCount)
   if (!sources || !passes || artifactCount === null || insightCount === null) return malformed()
-  return { ok: true, sources, artifactCount, insightCount, passes }
+  if (ideaCount === null || itemCount === null) return malformed()
+  return { ok: true, sources, artifactCount, insightCount, ideaCount, itemCount, passes }
 }
 
 export function parseSourceResponse(raw: unknown): ZooResult<{ source: ZooSource }> {
@@ -259,6 +379,41 @@ export function parseInsightsResponse(raw: unknown): ZooResult<{ insights: ZooIn
   return insights ? { ok: true, insights } : malformed()
 }
 
+export function parseRecordIdeasResponse(raw: unknown): ZooResult<{ ideaCount: number }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const ideaCount = num(body.ideaCount)
+  return ideaCount === null ? malformed() : { ok: true, ideaCount }
+}
+
+export function parseIdeasResponse(raw: unknown): ZooResult<{ ideas: ZooIdea[] }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const ideas = parseList(body.ideas, parseIdea)
+  return ideas ? { ok: true, ideas } : malformed()
+}
+
+export function parseIdeaResponse(raw: unknown): ZooResult<{ idea: ZooIdea }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const idea = parseIdea(body.idea)
+  return idea ? { ok: true, idea } : malformed()
+}
+
+export function parseItemsResponse(raw: unknown): ZooResult<{ items: ZooItem[] }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const items = parseList(body.items, parseItem)
+  return items ? { ok: true, items } : malformed()
+}
+
+export function parseItemResponse(raw: unknown): ZooResult<{ item: ZooItem }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const item = parseItem(body.item)
+  return item ? { ok: true, item } : malformed()
+}
+
 // ---- RPC ------------------------------------------------------------------
 
 function unavailable(): ZooFailure {
@@ -287,6 +442,10 @@ export function zooStatus(): Promise<ZooResult<ZooStatus>> {
 
 export function zooConnectLinear(apiKey: string): Promise<ZooResult<{ source: ZooSource }>> {
   return call("zooConnectLinear", { apiKey }, parseSourceResponse)
+}
+
+export function zooConnectTranscripts(folder: string): Promise<ZooResult<{ source: ZooSource }>> {
+  return call("zooConnectTranscripts", { folder }, parseSourceResponse)
 }
 
 export function zooStartBackfill(sourceId: string): Promise<ZooResult<Record<never, never>>> {
@@ -326,4 +485,47 @@ export function zooFailPass(passId: string, error: string): Promise<ZooResult<Re
 
 export function zooListInsights(): Promise<ZooResult<{ insights: ZooInsight[] }>> {
   return call("zooListInsights", {}, parseInsightsResponse)
+}
+
+export function zooExportInsightsForSynthesis(
+  maxChars?: number,
+): Promise<ZooResult<{ passId: string; bundle: string }>> {
+  return call(
+    "zooExportInsightsForSynthesis",
+    maxChars === undefined ? {} : { maxChars },
+    parseExportResponse,
+  )
+}
+
+export function zooRecordIdeas(
+  passId: string,
+  ideas: ZooIdeaInput[],
+): Promise<ZooResult<{ ideaCount: number }>> {
+  return call("zooRecordIdeas", { passId, ideas }, parseRecordIdeasResponse)
+}
+
+export function zooListIdeas(): Promise<ZooResult<{ ideas: ZooIdea[] }>> {
+  return call("zooListIdeas", {}, parseIdeasResponse)
+}
+
+export function zooSetIdeaStatus(
+  ideaId: string,
+  status: ZooIdeaStatus,
+): Promise<ZooResult<{ idea: ZooIdea }>> {
+  return call("zooSetIdeaStatus", { ideaId, status }, parseIdeaResponse)
+}
+
+export function zooCreateItem(ideaId: string): Promise<ZooResult<{ item: ZooItem }>> {
+  return call("zooCreateItem", { ideaId }, parseItemResponse)
+}
+
+export function zooUpdateItem(
+  itemId: string,
+  update: ZooItemUpdate,
+): Promise<ZooResult<{ item: ZooItem }>> {
+  return call("zooUpdateItem", { itemId, ...update }, parseItemResponse)
+}
+
+export function zooListItems(): Promise<ZooResult<{ items: ZooItem[] }>> {
+  return call("zooListItems", {}, parseItemsResponse)
 }

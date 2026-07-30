@@ -50,6 +50,8 @@ describe("zoo response validation", () => {
       sources: [source],
       artifactCount: 12,
       insightCount: 3,
+      ideaCount: 2,
+      itemCount: 1,
       passes: [{ id: "p-1", startedAt: 5000, status: "done", note: "clean" }],
     })
     expect(result.ok).toBe(true)
@@ -80,25 +82,22 @@ describe("zoo response validation", () => {
   })
 
   it("rejects a status response with missing or wrong-typed fields", () => {
+    const counts = { artifactCount: 0, insightCount: 0, ideaCount: 0, itemCount: 0 }
     expect(parseStatusResponse({ ok: true, sources: [], passes: [], insightCount: 0 }).ok).toBe(false)
+    expect(parseStatusResponse({ ok: true, sources: {}, ...counts, passes: [] }).ok).toBe(false)
     expect(
-      parseStatusResponse({ ok: true, sources: {}, artifactCount: 0, insightCount: 0, passes: [] }).ok,
+      parseStatusResponse({ ok: true, sources: [], ...counts, artifactCount: "12", passes: [] }).ok,
     ).toBe(false)
-    expect(
-      parseStatusResponse({
-        ok: true,
-        sources: [],
-        artifactCount: "12",
-        insightCount: 0,
-        passes: [],
-      }).ok,
-    ).toBe(false)
+    // The pipeline counters are part of the contract, not optional extras.
+    expect(parseStatusResponse({ ok: true, sources: [], ...counts, ideaCount: undefined, passes: [] }).ok).toBe(false)
+    expect(parseStatusResponse({ ok: true, sources: [], ...counts, itemCount: null, passes: [] }).ok).toBe(false)
   })
 
-  it("rejects a source with a bad kind, backfill state, or counter", () => {
+  it("accepts both source kinds and rejects unknown ones", () => {
     const bad = (patch: Record<string, unknown>) =>
       parseSourceResponse({ ok: true, source: { ...source, ...patch } }).ok
     expect(parseSourceResponse({ ok: true, source }).ok).toBe(true)
+    expect(bad({ kind: "transcripts" })).toBe(true)
     expect(bad({ kind: "posthog" })).toBe(false)
     expect(bad({ id: "" })).toBe(false)
     expect(bad({ createdAt: "1000" })).toBe(false)

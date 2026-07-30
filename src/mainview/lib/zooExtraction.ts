@@ -4,6 +4,9 @@
 // The model work runs through the ordinary server session API (lib/api.ts) —
 // there is no dedicated endpoint for this — and only the minimal slice of the
 // event stream is consumed: main-thread assistant text plus turn completion.
+//
+// The fenced-JSON parser and the session-prompt runner here are shared with
+// lib/zooSynthesis.ts (ideas) — keep them generic.
 
 import type { AgentEvent } from "@chunky/protocol"
 import { createSession, loadConfig, openEventStream, sendMessage } from "./api"
@@ -15,7 +18,7 @@ import {
 } from "./zoo"
 
 /** Hard stop so a stalled turn cannot leave the pane spinning forever. */
-const RUN_TIMEOUT_MS = 10 * 60_000
+export const DEFAULT_RUN_TIMEOUT_MS = 10 * 60_000
 
 export type ExtractionPhase = "exporting" | "starting" | "thinking" | "recording"
 
@@ -30,7 +33,9 @@ export type ParsedInsights =
 /** Fenced block, optionally tagged ```json. Prose either side is expected. */
 const FENCE = /```[ \t]*([a-zA-Z0-9_-]*)[ \t]*\r?\n([\s\S]*?)```/g
 
-function pickFencedBlock(text: string): string | null {
+/** Last ```json block, else the last untagged fence. Null when there is none. */
+export function pickFencedBlock(text: string): string | null {
+  if (typeof text !== "string") return null
   let tagged: string | null = null
   let untagged: string | null = null
   FENCE.lastIndex = 0
@@ -40,22 +45,21 @@ function pickFencedBlock(text: string): string | null {
     if (tag === "json") tagged = body
     else if (!tag) untagged = body
   }
-  // Prefer the last ```json block; fall back to the last untagged fence.
   return tagged ?? untagged
 }
 
-function clampPriority(value: unknown): number | undefined {
-  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
-  return Math.min(5, Math.max(1, Math.round(value)))
-}
+export type FencedRows =
+  | { ok: true; rows: Record<string, unknown>[] }
+  | { ok: false; error: string }
 
 /**
- * Parse the model's reply into insights. The reply is REQUIRED to carry a
- * fenced block — a bare JSON body is treated as a failed instruction-follow so
- * the pass is recorded as an error rather than silently guessed at.
+ * Shared shape check for every "reply with ONLY a fenced json array" prompt.
+ *
+ * A fence is REQUIRED — a bare JSON body is treated as a failed
+ * instruction-follow so the pass is recorded as an error rather than guessed at.
  */
-export function parseFencedInsights(text: string): ParsedInsights {
-  const block = typeof text === "string" ? pickFencedBlock(text) : null
+export function parseFencedRows(text: string): FencedRows {
+  const block = pickFencedBlock(text)
   if (block === null) {
     return { ok: false, error: "The model reply contained no fenced JSON block." }
   }
@@ -69,14 +73,35 @@ export function parseFencedInsights(text: string): ParsedInsights {
     }
   }
   if (!Array.isArray(parsed)) {
-    return { ok: false, error: "The fenced JSON block was not an array of insights." }
+    return { ok: false, error: "The fenced JSON block was not an array." }
   }
-  const insights: ZooInsightInput[] = []
-  for (const item of parsed) {
-    if (item === null || typeof item !== "object" || Array.isArray(item)) {
-      return { ok: false, error: "An insight entry was not an object." }
+  const rows: Record<string, unknown>[] = []
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: "An entry in the fenced array was not an object." }
     }
-    const row = item as Record<string, unknown>
+    rows.push(entry as Record<string, unknown>)
+  }
+  return { ok: true, rows }
+}
+
+function clampPriority(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+  return Math.min(5, Math.max(1, Math.round(value)))
+}
+
+/**
+ * Parse the model's reply into insights.
+ *
+ * Strict on purpose: any malformed entry fails the whole pass, because a
+ * half-understood evidence set is worse than none (contrast with the ideas
+ * parser in lib/zooSynthesis.ts, which drops bad entries — see the note there).
+ */
+export function parseFencedInsights(text: string): ParsedInsights {
+  const fenced = parseFencedRows(text)
+  if (!fenced.ok) return fenced
+  const insights: ZooInsightInput[] = []
+  for (const row of fenced.rows) {
     const title = typeof row.title === "string" ? row.title.trim() : ""
     const summary = typeof row.summary === "string" ? row.summary.trim() : ""
     if (!title || !summary) {
@@ -138,6 +163,7 @@ export function buildExtractionPrompt(bundle: string): string {
 function awaitAssistantText(
   baseUrl: string,
   sessionId: string,
+  timeoutMs: number,
   onOpen: () => void,
 ): { promise: Promise<string>; cancel: () => void } {
   const controller = new AbortController()
@@ -161,7 +187,7 @@ function awaitAssistantText(
       controller.abort()
     }
 
-    timer = setTimeout(() => fail(new Error("The extraction run timed out.")), RUN_TIMEOUT_MS) as unknown as number
+    timer = setTimeout(() => fail(new Error("The run timed out.")), timeoutMs) as unknown as number
 
     const onEvent = (ev: AgentEvent) => {
       if (ev.type === "message.start") {
@@ -202,8 +228,64 @@ function awaitAssistantText(
   }
 }
 
-function message(err: unknown, fallback: string): string {
+export function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback
+}
+
+export type SessionPromptResult =
+  | { ok: true; sessionId: string; text: string }
+  | { ok: false; error: string }
+
+/**
+ * One prompt, one fresh session, one reply. `repoId` binds the session to a
+ * workspace so the agent can explore that codebase (triage); omit it for pure
+ * reasoning passes.
+ */
+export async function runSessionPrompt(opts: {
+  prompt: string
+  baseUrl?: string | null
+  repoId?: string | null
+  timeoutMs?: number
+  onSession?: (sessionId: string) => void
+}): Promise<SessionPromptResult> {
+  let baseUrl = opts.baseUrl ?? null
+  if (!baseUrl) {
+    try {
+      baseUrl = (await loadConfig()).baseUrl
+    } catch (err) {
+      return { ok: false, error: errorMessage(err, "Could not resolve the Chunky server.") }
+    }
+  }
+  if (!baseUrl) return { ok: false, error: "No Chunky server is available." }
+
+  let sessionId: string
+  try {
+    sessionId = (await createSession(baseUrl, opts.repoId ?? null)).sessionId
+  } catch (err) {
+    return { ok: false, error: errorMessage(err, "Could not create a session.") }
+  }
+  opts.onSession?.(sessionId)
+
+  let opened = false
+  const stream = awaitAssistantText(
+    baseUrl,
+    sessionId,
+    opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+    () => {
+      opened = true
+    },
+  )
+  try {
+    // Wait for the stream to accept before sending, so no delta is missed.
+    for (let i = 0; i < 100 && !opened; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    await sendMessage(baseUrl, sessionId, opts.prompt)
+    return { ok: true, sessionId, text: await stream.promise }
+  } catch (err) {
+    stream.cancel()
+    return { ok: false, error: errorMessage(err, "The run failed.") }
+  }
 }
 
 /**
@@ -226,43 +308,15 @@ export async function runExtraction(
   }
 
   phase("starting")
-  let baseUrl = opts.baseUrl ?? null
-  if (!baseUrl) {
-    try {
-      baseUrl = (await loadConfig()).baseUrl
-    } catch (err) {
-      return failPass(message(err, "Could not resolve the Chunky server."))
-    }
-  }
-  if (!baseUrl) return failPass("No Chunky server is available for extraction.")
-
-  let sessionId: string
-  try {
-    sessionId = (await createSession(baseUrl)).sessionId
-  } catch (err) {
-    return failPass(message(err, "Could not create an extraction session."))
-  }
-
-  let opened = false
-  const stream = awaitAssistantText(baseUrl, sessionId, () => {
-    opened = true
+  const reply = await runSessionPrompt({
+    prompt: buildExtractionPrompt(bundle),
+    baseUrl: opts.baseUrl ?? null,
+    // The session exists, so the wait for the model starts here.
+    onSession: () => phase("thinking"),
   })
+  if (!reply.ok) return failPass(reply.error)
 
-  let reply: string
-  try {
-    // Wait for the stream to accept before sending, so no delta is missed.
-    for (let i = 0; i < 100 && !opened; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    await sendMessage(baseUrl, sessionId, buildExtractionPrompt(bundle))
-    phase("thinking")
-    reply = await stream.promise
-  } catch (err) {
-    stream.cancel()
-    return failPass(message(err, "The extraction run failed."))
-  }
-
-  const parsed = parseFencedInsights(reply)
+  const parsed = parseFencedInsights(reply.text)
   if (!parsed.ok) return failPass(parsed.error)
 
   phase("recording")
