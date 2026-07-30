@@ -68,11 +68,13 @@ test("ignores malformed and stale records", async () => {
   expect(await selectHealthyRecord(join(state, "servers"), "token", undefined, deps(new Set(), { count: 0 }))).toBeUndefined()
 })
 
-test("reports missing installed runtime actionably", async () => {
+test("reports automatic runtime installation failure actionably", async () => {
   const state = tempState()
-  const result = await resolveChunkyConnection({ CHUNKY_HOME: state, CHUNKY_RUNTIME_DIR: join(state, "missing"), CHUNKY_BUN_PATH: join(state, "bun") }, deps(new Set(), { count: 0 }))
+  const testDeps = deps(new Set(), { count: 0 })
+  testDeps.installRuntime = async () => { throw new Error("release lookup unavailable") }
+  const result = await resolveChunkyConnection({ CHUNKY_HOME: state, CHUNKY_RUNTIME_DIR: join(state, "missing"), CHUNKY_BUN_PATH: join(state, "bun") }, testDeps)
   expect(result.baseUrl).toBe("")
-  expect(result.connectionError).toContain("runtime was not found")
+  expect(result.connectionError).toContain("Failed to install the Chunky server automatically: release lookup unavailable")
 })
 
 test("starts an isolated runtime and waits until its authenticated server is ready", async () => {

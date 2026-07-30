@@ -11,6 +11,7 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
+import { hasRuntime, installRuntime, resolveBun, runtimeRoot } from "./runtimeInstaller"
 
 const SERVER_IDENTITY_PATH = "/_chunky/server-identity"
 const SERVER_LEASES_PATH = "/_chunky/server-leases"
@@ -45,6 +46,7 @@ export type ConnectionDependencies = {
   sleep(ms: number): Promise<void>
   spawn(command: string[], options: { cwd: string; env: Record<string, string | undefined> }): { pid?: number }
   allocatePort?(): Promise<number>
+  installRuntime?(env: NodeJS.ProcessEnv): Promise<void>
 }
 
 const defaults: ConnectionDependencies = {
@@ -52,6 +54,7 @@ const defaults: ConnectionDependencies = {
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   spawn: (command, options) => Bun.spawn(command, { ...options, stdout: "ignore", stderr: "ignore" }),
+  installRuntime,
 }
 
 function canonicalWorkspace(path: string): string {
@@ -192,17 +195,12 @@ function buildId(runtime: string): string {
 }
 
 function runtime(env: NodeJS.ProcessEnv): { root: string; bun: string; version: string } | undefined {
-  const root = env.CHUNKY_RUNTIME_DIR || join(homedir(), ".chunky", "app")
-  // Finder does not inherit a shell PATH. Prefer an explicit override, then
-  // the standard Bun install, then Electrobun's own Bun executable.
-  const bundledBun = process.execPath
-  const bun = env.CHUNKY_BUN_PATH
-    || (existsSync(join(homedir(), ".bun", "bin", "bun")) ? join(homedir(), ".bun", "bin", "bun") : bundledBun)
-  if (!existsSync(join(root, "packages", "server", "src", "index.ts")) || !existsSync(join(root, "package.json"))) return undefined
+  const root = runtimeRoot(env)
+  if (!hasRuntime(root)) return undefined
   try {
     const version = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown }).version
     if (typeof version !== "string" || !version) return undefined
-    return { root, bun: existsSync(bun) ? bun : "bun", version }
+    return { root, bun: resolveBun(env), version }
   } catch { return undefined }
 }
 
@@ -241,8 +239,16 @@ async function startServer(
   env: NodeJS.ProcessEnv,
   deps: ConnectionDependencies,
 ): Promise<RecordFile> {
-  const installed = runtime(env)
-  if (!installed) throw new Error("Chunky CLI runtime was not found. Install it with the Chunky CLI, then reopen Chunky.app.")
+  let installed = runtime(env)
+  if (!installed) {
+    try {
+      await (deps.installRuntime || installRuntime)(env)
+    } catch (error) {
+      throw new Error(`Failed to install the Chunky server automatically: ${error instanceof Error ? error.message : "unknown error"}`)
+    }
+    installed = runtime(env)
+    if (!installed) throw new Error("Failed to install the Chunky server automatically: the installed runtime could not be resolved.")
+  }
   const targetWorkspace = canonicalWorkspace(workspace)
   const id = buildId(installed.root)
   const serverDir = join(state, "servers")
