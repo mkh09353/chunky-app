@@ -9,6 +9,7 @@ import {
   validateSeatName,
 } from "~/lib/configApi"
 import type { ModelRow, SeatConfig, SidekickConfig } from "~/lib/configApi"
+import { confirm } from "~/lib/confirm"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -203,7 +204,13 @@ function SeatCard({
       onDeleteLocal?.()
       return
     }
-    if (!window.confirm(`Delete the "${title}" seat? This can't be undone.`)) return
+    const ok = await confirm({
+      title: `Delete the "${title}" seat?`,
+      body: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    })
+    if (!ok) return
     setDeleting(true)
     setError(null)
     try {

@@ -7,6 +7,7 @@ import {
   setSkillEnabled,
 } from "~/lib/configApi"
 import type { SkillCatalogEntry, SkillRepoStatus } from "~/lib/configApi"
+import { confirm } from "~/lib/confirm"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -176,7 +177,13 @@ function RepoManager({ repos, onReload }: { repos: SkillRepoStatus[]; onReload: 
   }
 
   const remove = async (repo: SkillRepoStatus) => {
-    if (!window.confirm(`Remove skill repo "${repo.url}"?\n\nThis deletes the local clone.`)) return
+    const ok = await confirm({
+      title: `Remove skill repo "${repo.url}"?`,
+      body: "This deletes the local clone.",
+      confirmLabel: "Remove",
+      destructive: true,
+    })
+    if (!ok) return
     setBusy(repo.id)
     setError(null)
     try {

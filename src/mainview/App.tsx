@@ -16,6 +16,8 @@ import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
 import { FactoryPane } from "./components/FactoryPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
+import { ConfirmHost } from "./components/ConfirmDialog"
+import { confirm } from "./lib/confirm"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
@@ -979,9 +981,12 @@ export function App() {
     async (id: string) => {
       if (!config) return
       const repo = repos.find((r) => r.id === id)
-      const ok = window.confirm(
-        `Remove ${repo?.name ?? "this repo"} from the list?\n\nThis only unregisters the folder in Chunky — files and threads on disk stay put. You can add it back any time.`,
-      )
+      const ok = await confirm({
+        title: `Remove ${repo?.name ?? "this repo"} from the list?`,
+        body: "This only unregisters the folder in Chunky — files and threads on disk stay put. You can add it back any time.",
+        confirmLabel: "Remove",
+        destructive: true,
+      })
       if (!ok) return
       try {
         const wasOpen = id === activeRepoIdRef.current
@@ -1763,6 +1768,8 @@ export function App() {
           </section>
         </div>
 
+        {/* One host for every in-app confirmation (lib/confirm.ts). */}
+        <ConfirmHost />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onRun={runAction} actions={paletteActions} />
         <SettingsCenter
           open={settingsOpen}

@@ -9,6 +9,7 @@ import {
   saveMode,
 } from "~/lib/configApi"
 import type { ModeAdvisor, ModeInfo, ModeSpec, ModesResponse } from "~/lib/configApi"
+import { confirm } from "~/lib/confirm"
 import { Button } from "../ui/button"
 import {
   Badge,
@@ -90,7 +91,13 @@ export function ModesSection({ onApplied }: { onApplied?: () => void } = {}) {
   }
 
   const remove = async (mode: string) => {
-    if (!window.confirm(`Delete the "${mode}" mode? This can't be undone.`)) return
+    const ok = await confirm({
+      title: `Delete the "${mode}" mode?`,
+      body: "This can't be undone.",
+      confirmLabel: "Delete",
+      destructive: true,
+    })
+    if (!ok) return
     setBusy(mode)
     setError(null)
     try {
