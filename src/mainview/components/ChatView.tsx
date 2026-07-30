@@ -257,7 +257,9 @@ export function ChatView({
 
     if (!justEnded) {
       // Streaming (or replaying): follow the bottom unless the reader left it.
-      if (stuckToBottom.current) el.scrollTop = el.scrollHeight
+      // Instant, not smooth — the viewport's scroll-smooth would restart an
+      // animation on every delta and never catch up with a fast stream.
+      if (stuckToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
       return
     }
 
@@ -281,7 +283,9 @@ export function ChatView({
       stuckToBottom.current = false
     })
     return () => cancelAnimationFrame(frame)
-  }, [running, messageCount, streamingId, loading])
+    // `rows` is a dep so this fires on every streamed delta, not just on
+    // turn boundaries; the follow above is what tracks mid-message growth.
+  }, [running, messageCount, streamingId, loading, rows])
 
   // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
   // in the same commit can never cancel each other out.
