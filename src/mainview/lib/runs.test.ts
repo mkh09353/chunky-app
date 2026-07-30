@@ -2,16 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { AgentEvent } from "@chunky/protocol"
 import { initialState, reduce, MAIN } from "./transcript"
 import type { TranscriptState } from "./transcript"
-import {
-  hasLiveAgents,
-  hasRuns,
-  idleThreads,
-  parkedRunsByItem,
-  runAnchors,
-  runTail,
-  runSummary,
-  seatName,
-} from "./runs"
+import { hasRuns, isSeat, parkedRunsByItem, runAnchors, runTail, runSummary } from "./runs"
 import { buildTranscriptRows, itemsToMessages } from "./mapTranscript"
 
 function play(events: AgentEvent[]): TranscriptState {
@@ -83,7 +74,7 @@ describe("run records", () => {
     expect(state.runs[0]!.status).toBe("done")
   })
 
-  test("only sidekick seats idle in the rail; one-shot delegates just settle", () => {
+  test("seats and one-shot delegates both park beside their own pill", () => {
     const state = play([
       { type: "tool.start", id: "a", name: "sidekick", input: {} },
       { type: "thread.spawn", threadId: "root:sidekick:frontend", parentThreadId: null, title: "Sidekick (frontend)" },
@@ -92,10 +83,10 @@ describe("run records", () => {
       { type: "thread.spawn", threadId: "child-1", parentThreadId: null, title: "docs sweep" },
       { type: "thread.status", threadId: "child-1", status: "idle" },
     ])
-    // Both runs park in the gutter …
     expect(parkedRunsByItem(state).size).toBe(2)
-    // … but only the persistent seat lingers as an idle agent.
-    expect(idleThreads(state).map((t) => t.id)).toEqual(["root:sidekick:frontend"])
+    // The seat is still labelled as one (cards say "Sidekick", not "subagent").
+    expect(isSeat(state.threads["root:sidekick:frontend"]!)).toBe(true)
+    expect(isSeat(state.threads["child-1"]!)).toBe(false)
   })
 
   test("demo/offline state has no runs and no anchors", () => {
@@ -104,8 +95,8 @@ describe("run records", () => {
   })
 })
 
-describe("gutter + rail switches", () => {
-  test("a session that never delegates has no gutter and no rail", () => {
+describe("gutter switch", () => {
+  test("a session that never delegates has no gutter", () => {
     const plain = play([
       { type: "message.user", text: "hello" },
       { type: "message.start", role: "assistant" },
@@ -114,42 +105,26 @@ describe("gutter + rail switches", () => {
       { type: "tool.end", id: "t1", ok: true, output: "ok" },
     ])
     expect(hasRuns(plain)).toBe(false)
-    expect(hasLiveAgents(plain)).toBe(false)
     expect(runAnchors(plain).size).toBe(0)
   })
 
   test("demo/offline (no transcript at all) is treated the same", () => {
     expect(hasRuns(undefined)).toBe(false)
-    expect(hasLiveAgents(undefined)).toBe(false)
     expect(hasRuns(initialState)).toBe(false)
   })
 
-  test("one delegation switches the gutter on, and the rail with it", () => {
-    const state = play(DELEGATING_TURN)
-    expect(hasRuns(state)).toBe(true)
-    expect(hasLiveAgents(state)).toBe(true)
+  test("one delegation switches the gutter on", () => {
+    expect(hasRuns(play(DELEGATING_TURN))).toBe(true)
   })
 
-  test("once every run has settled the gutter stays, but the rail goes away", () => {
-    // A one-shot subagent: its card parks in the gutter, and nothing is left
-    // to show in the rail (no seat to sit idle).
+  test("once every run has settled the gutter stays", () => {
     const state = play([
       { type: "tool.start", id: "t1", name: "spawn_thread", input: { title: "docs" } },
       { type: "thread.spawn", threadId: "child-1", parentThreadId: null, title: "docs sweep" },
       { type: "thread.status", threadId: "child-1", status: "idle" },
     ])
     expect(hasRuns(state)).toBe(true)
-    expect(hasLiveAgents(state)).toBe(false)
     expect(parkedRunsByItem(state).size).toBe(1)
-  })
-
-  test("a settled seat keeps the rail alive as an idle agent", () => {
-    const state = play([
-      { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
-      { type: "thread.spawn", threadId: "root:sidekick:frontend", parentThreadId: null, title: "Sidekick (frontend)" },
-      { type: "thread.status", threadId: "root:sidekick:frontend", status: "idle" },
-    ])
-    expect(hasLiveAgents(state)).toBe(true)
   })
 })
 
@@ -178,10 +153,6 @@ describe("card content", () => {
     expect(runSummary(state.threads["sk:frontend"]!.items)).toBe("Column pinned left.")
   })
 
-  test("seat names come off the thread title", () => {
-    expect(seatName("Sidekick (frontend)")).toBe("frontend")
-    expect(seatName("docs sweep")).toBe("docs sweep")
-  })
 })
 
 describe("transcript rows", () => {
@@ -204,7 +175,9 @@ describe("transcript rows", () => {
     expect(rows.filter((r) => r.parkedRunIds.length > 0)).toHaveLength(1)
   })
 
-  test("a running run marks its pill for the wire, and parks nothing", () => {
+  // The pill's runId is what ChatView turns into a LIVE card in that same row;
+  // parkedRunIds only fills in once the run settles.
+  test("a running run marks its pill, and parks nothing yet", () => {
     const state = play(DELEGATING_TURN)
     const messages = itemsToMessages(state.threads[MAIN]!.items)
     const rows = buildTranscriptRows(messages, runAnchors(state))

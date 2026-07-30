@@ -1,5 +1,5 @@
-// View model for delegated agent runs: what the live rail tails, what parks in
-// the transcript gutter, and how a run is tied to the pill that spawned it.
+// View model for delegated agent runs: what a card shows, and how a run is tied
+// to the pill that spawned it (live beside it, then parked in the same place).
 //
 // Everything here is derived from the SSE-fed TranscriptState (lib/transcript)
 // — no renderer fetches, and it degrades to empty arrays in demo/offline mode
@@ -24,68 +24,22 @@ export function runAccent(runId: string): string {
   return RUN_ACCENTS[Math.abs(hash) % RUN_ACCENTS.length]!
 }
 
-/** Child threads of the main transcript = the delegates we surface. */
-function delegates(state: TranscriptState): ThreadNode[] {
-  return state.order
-    .map((id) => state.threads[id])
-    .filter((t): t is ThreadNode => !!t && t.id !== MAIN && t.parentId === MAIN)
-}
-
 /** Has this session delegated at all?
  *
- * The gutter is the whole reason the chat column is narrowed and pinned left, so
- * a session that never delegates must not pay for it: no gutter cell, no rail,
- * no wires — just a full-width conversation. */
+ * The gutter is the whole reason the chat column is pinned left, so a session
+ * that never delegates must not pay for it: no gutter cell, no cap — just a
+ * full-width conversation. */
 export function hasRuns(state: TranscriptState | undefined): boolean {
   return !!state && state.runs.length > 0
-}
-
-/** Agents to show in the live rail right now. Empty → no rail at all. */
-export function hasLiveAgents(state: TranscriptState | undefined): boolean {
-  if (!state) return false
-  return runningThreads(state).length > 0 || idleThreads(state).length > 0
 }
 
 /** A persistent sidekick SEAT, as opposed to a one-shot delegate.
  *
  * The server gives seats a stable thread id (`${rootId}:sidekick[:seat]`) and
- * re-uses it for every brief, so a seat is an agent that outlives its runs.
- * Subagents and workflow legs are one-shot: when they finish they are simply
- * done, and their card belongs in the transcript, not in the live rail. */
+ * re-uses it for every brief, so a seat is an agent that outlives its runs;
+ * subagents and workflow legs are one-shot. Cards label the two differently. */
 export function isSeat(thread: ThreadNode): boolean {
   return thread.id.includes(":sidekick") || /^sidekick\b/i.test(thread.title)
-}
-
-/** Agents with work in flight — the rail's tailing cards (seats and one-shots). */
-export function runningThreads(state: TranscriptState): ThreadNode[] {
-  return delegates(state).filter((t) => t.status === "running")
-}
-
-/** Seats that have run at least once and are between briefs. One-shot delegates
- *  are deliberately excluded: a finished subagent is parked in the gutter, not
- *  idling in the rail. */
-export function idleThreads(state: TranscriptState): ThreadNode[] {
-  return delegates(state).filter(
-    (t) => t.status !== "running" && isSeat(t) && state.runs.some((r) => r.threadId === t.id),
-  )
-}
-
-/** The open run for a thread (what a running card is showing). */
-export function activeRun(state: TranscriptState, threadId: string): RunRecord | undefined {
-  for (let i = state.runs.length - 1; i >= 0; i--) {
-    const run = state.runs[i]!
-    if (run.threadId === threadId && run.status === "running") return run
-  }
-  return undefined
-}
-
-/** Most recent settled run for a thread — what an idle seat links back to. */
-export function lastSettledRun(state: TranscriptState, threadId: string): RunRecord | undefined {
-  for (let i = state.runs.length - 1; i >= 0; i--) {
-    const run = state.runs[i]!
-    if (run.threadId === threadId && run.status === "done") return run
-  }
-  return undefined
 }
 
 function runsByItem(
@@ -108,14 +62,14 @@ export function parkedRunsByItem(state: TranscriptState): Map<number, RunRecord[
   return runsByItem(state, "done")
 }
 
-/** Running runs keyed by the tool pill that spawned them (wire origin). */
+/** Running runs keyed by the tool pill that spawned them. */
 export function liveRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
   return runsByItem(state, "running")
 }
 
 /** What a single tool pill in the main transcript owns. */
 export interface RunAnchor {
-  /** A run still in flight from this pill — the wire target in the rail. */
+  /** A run still in flight from this pill — its card tails in this row. */
   liveRunId?: string
   /** Settled runs that park in this row's gutter. */
   parkedRunIds: string[]
@@ -217,6 +171,7 @@ export function runLines(items: Item[], from = 0, to?: number): TailLine[] {
 }
 
 /** Last `max` lines — the tail a running card shows. */
+
 export function runTail(items: Item[], from = 0, max = 5): TailLine[] {
   const lines = runLines(items, from)
   return lines.slice(Math.max(0, lines.length - max))
@@ -248,10 +203,4 @@ export function formatElapsed(ms: number): string {
   const s = total % 60
   if (m < 60) return `${m}m ${String(s).padStart(2, "0")}s`
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
-}
-
-/** "Sidekick (frontend)" → "frontend"; falls back to the whole title. */
-export function seatName(title: string): string {
-  const m = /\(([^)]+)\)\s*$/.exec(title)
-  return m?.[1] ?? title
 }

@@ -10,7 +10,6 @@ import {
   Loader2,
   RefreshCw,
   Search,
-  Sparkles,
   Terminal,
   ThumbsDown,
   ThumbsUp,
@@ -26,6 +25,7 @@ import type {
   MessageBlock,
   ToolBlockData,
 } from "~/lib/mock"
+import chunkyLogo from "~/assets/chunky-logo.png"
 import { cn } from "~/lib/cn"
 import { renderMarkdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
@@ -415,10 +415,23 @@ export function MessageView({
             : "border-primary/30 bg-primary/15 text-primary",
         )}
       >
-        {isUser ? <User className="size-4" /> : <Sparkles className="size-4" />}
+        {isUser ? (
+          <User className="size-4" />
+        ) : (
+          // The brand mark itself, not a generic glyph. 128px source rendered at
+          // 26 — crisp on retina, and its transparent artwork sits on the same
+          // tinted chip in both themes.
+          <img
+            src={chunkyLogo}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            className="size-[26px] select-none object-contain"
+          />
+        )}
       </div>
 
-      <div className={cn("flex min-w-0 max-w-[min(62rem,100%)] flex-col gap-1.5", isUser && "items-end")}>
+      <div className={cn("flex min-w-0 max-w-[min(72rem,100%)] flex-col gap-1.5", isUser && "items-end")}>
         <div className="flex items-center gap-2 px-0.5">
           <span className="font-semibold text-[13px]">{isUser ? "You" : "Chunky"}</span>
           {message.model && (

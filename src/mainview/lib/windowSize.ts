@@ -1,6 +1,6 @@
-// "Is this window effectively full-screen?" — the gate for the agent-rail
-// layout. The rail + gutter only earn their space on a maximized/fullscreen
-// window; in any smaller window the chat renders plain and full width.
+// "Is this window effectively full-screen?" — the gate for the agent-gutter
+// layout. The gutter only earns its space on a maximized/fullscreen window; in
+// any smaller window the chat renders full width and agent cards fall inline.
 //
 // Two runtimes to satisfy, and they report window size differently:
 //

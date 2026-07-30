@@ -90,7 +90,7 @@ export interface TranscriptState {
   usage: UsageDelta | null
   /** How many times older context was summarized (context.compacted). */
   compacted: number
-  /** Delegated runs in spawn order — drives the live rail and gutter cards. */
+  /** Delegated runs in spawn order — drives the transcript's agent cards. */
   runs: RunRecord[]
 }
 

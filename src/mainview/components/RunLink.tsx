@@ -1,6 +1,6 @@
 // Cross-tree link between a run's tool pill (deep inside a transcript message)
-// and its card (in the rail or the gutter). Hovering either end highlights both,
-// and an idle seat can jump the transcript back to its last parked run.
+// and its card in the transcript gutter. Hovering either end highlights both,
+// and a card can jump the transcript back to its parked run.
 //
 // A context rather than prop-drilling: the pill lives inside Message → block →
 // ToolCard, several levels below anything that knows about runs.

@@ -22,12 +22,10 @@ import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
 import { AgentCard } from "./AgentCard"
-import { AgentRail, AgentRailBar } from "./AgentRail"
 import { RunLinkProvider } from "./RunLink"
-import { RunWires } from "./RunWires"
 import { cn } from "~/lib/cn"
 import { buildTranscriptRows, type TranscriptRow } from "~/lib/mapTranscript"
-import { hasLiveAgents, hasRuns, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
+import { hasRuns, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
 import { useRunClock } from "~/lib/useRunClock"
 import { useFullSizeWindow } from "~/lib/windowSize"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
@@ -148,10 +146,6 @@ export function ChatTopBar({
   )
 }
 
-/** Bottom inset of the transcript, and the rail's sticky offset: keeping these
- *  equal makes the rail rest exactly where it pins. */
-const RAIL_INSET = 26
-
 /** Within this many px of the end still counts as "reading the bottom", so the
  *  transcript keeps following the stream. Past it the reader is scrolled away
  *  and we leave the viewport alone. */
@@ -173,11 +167,11 @@ function lastAnswerId(rows: TranscriptRow[]): string | undefined {
 }
 
 /** Transcript body — left-pinned text column, with a right gutter that carries
- *  settled agent runs and a bottom-anchored rail for the live ones.
+ *  agent runs: live ones tail beside the pill that spawned them and simply
+ *  settle in place when they finish.
  *
- *  Both columns live in ONE scrollport so the gutter cards scroll with the
- *  conversation; only the live rail is sticky (a zero-height layer, so it costs
- *  no flow space and cannot leave a dead region bottom-right). */
+ *  Both columns live in ONE scrollport, so every card scrolls with the
+ *  conversation it belongs to. */
 export function ChatView({
   thread,
   streamingId,
@@ -271,7 +265,7 @@ export function ChatView({
 
     // The turn is done: park the START of the answer at the top of the
     // scrollport rather than leaving the reader at its tail. One frame later,
-    // so the rail leaving / cards parking have settled the layout first.
+    // so the cards settling have finished moving the layout first.
     const answerId = lastAnswerId(rowsRef.current)
     if (!answerId) return
     const frame = requestAnimationFrame(() => {
@@ -292,60 +286,13 @@ export function ChatView({
   // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
   // in the same commit can never cancel each other out.
   const collapseSignal = turnEnd * 2 + (foldAll ? 1 : 0)
-  // The rail + gutter only earn their space on a maximized/fullscreen window,
-  // AND only once this session has actually delegated. Any smaller window gets
-  // the plain full-width chat, whatever the run state.
+  // The gutter only earns its space on a maximized/fullscreen window, AND only
+  // once this session has actually delegated. Any smaller window gets the plain
+  // full-width chat, with agent cards falling inline under their pill.
   const fullSizeWindow = useFullSizeWindow()
-  const liveAgents = hasLiveAgents(transcript)
   const gutterOn = fullSizeWindow && hasRuns(transcript)
-  const railOn = fullSizeWindow && liveAgents
-  // Space reserved under the last row so the last parked card can scroll clear
-  // of the floating rail. Reserve only what is actually needed: if the thread
-  // already runs well past its last parked card, nothing is added — no
-  // gratuitous empty region at the end of the conversation.
-  const [railHeight, setRailHeight] = useState(0)
-  const [railClearance, setRailClearance] = useState(0)
-  const spacerRef = useRef<HTMLDivElement>(null)
-  const revision = transcript
-    ? `${transcript.runs.length}:${transcript.runs.filter((r) => r.status === "running").length}:${rows.length}`
-    : ""
 
-  useEffect(() => {
-    const inner = innerRef.current
-    if (!inner) return
-
-    const measure = () => {
-      // The rail only floats over the gutter on wide panels; as an in-flow
-      // strip it already occupies space and can't cover anything.
-      if (railHeight <= 0) return setRailClearance(0)
-      const cards = inner.querySelectorAll<HTMLElement>("[data-chat-gutter] [data-run-parked]")
-      const last = cards[cards.length - 1]
-      if (!last) return setRailClearance(0)
-
-      const innerTop = inner.getBoundingClientRect().top
-      // Measure the content as if the spacer weren't there, so the result is a
-      // fixed point rather than a feedback loop.
-      const spacer = spacerRef.current?.getBoundingClientRect().height ?? 0
-      const contentEnd = inner.getBoundingClientRect().height - spacer
-      const cardBottom = last.getBoundingClientRect().bottom - innerTop
-      // At full scroll the rail's bottom rests RAIL_INSET above the content end
-      // (the container's bottom padding), so the card has to clear
-      // railHeight + RAIL_INSET + a small gap.
-      const needed = Math.max(
-        0,
-        Math.round(cardBottom + RAIL_INSET + railHeight + 14 - contentEnd),
-      )
-      setRailClearance((prev) => (Math.abs(prev - needed) > 1 ? needed : prev))
-    }
-
-    measure()
-    if (typeof ResizeObserver === "undefined") return
-    const ro = new ResizeObserver(measure)
-    ro.observe(inner)
-    return () => ro.disconnect()
-  }, [railHeight, rows.length, revision])
-
-  /** Scroll a settled run's gutter card into view (idle card → last run). */
+  /** Scroll a settled run's card into view (pill → its parked card). */
   const scrollToParked = useCallback((runId: string) => {
     const card = innerRef.current?.querySelector<HTMLElement>(
       `[data-run-parked="${CSS.escape(runId)}"]`,
@@ -356,13 +303,7 @@ export function ChatView({
   }, [])
 
   const body = (
-    /* pb matches the rail's sticky offset, so the panel rests exactly where it
-       pins instead of hopping as you reach the end of the thread. */
     <div ref={innerRef} className="relative flex flex-col gap-4 pt-5 pr-7 pb-[26px] pl-[22px]">
-      {gutterOn && (
-        <RunWires scrollRef={scrollRef} containerRef={innerRef} revision={revision} />
-      )}
-
       <Row gutterOn={gutterOn}>
         <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
           <Sparkles className="size-3 text-primary" />
@@ -376,17 +317,24 @@ export function ChatView({
         <p className="py-12 text-[13px] text-muted-foreground">Send a message to begin.</p>
       ) : (
         rows.map((row) => {
+          // A pill's run while it is still in flight: it tails right here, in
+          // the row that spawned it, and turns into its own parked card when it
+          // settles. (Before, live runs only existed in the floating rail.)
+          const live = row.blocks
+            .map((block) => (block.runId ? runIndex.get(block.runId) : undefined))
+            .filter((run): run is RunRecord => !!run && run.status === "running")
           const parked = row.parkedRunIds
             .map((id) => runIndex.get(id))
             .filter((run): run is RunRecord => !!run)
+          const cards = [...live, ...parked]
           return (
             <Row key={row.id} msgId={row.message.id} gutterOn={gutterOn} gutter={
-              parked.length > 0 && transcript ? (
+              cards.length > 0 && transcript ? (
                 <div className="flex flex-col gap-2">
-                  {parked.map((run) => (
+                  {cards.map((run) => (
                     <AgentCard
                       key={run.id}
-                      variant="parked"
+                      variant={run.status === "running" ? "running" : "parked"}
                       transcript={transcript}
                       threadId={run.threadId}
                       run={run}
@@ -419,31 +367,6 @@ export function ChatView({
         </Row>
       )}
 
-      {/* Live rail: zero-height sticky layer parked at the END of the column
-          (order-2), so it anchors bottom-right beside the newest turn. Below the
-          gutter breakpoint it keeps its height and becomes a bottom strip. */}
-      {/* Clearance so the last parked cards can scroll clear of the floating
-          rail rather than ending up underneath it. Sits between the rows
-          (order-0) and the rail layer (order-2), so the rail's resting position
-          is unchanged. */}
-      <div
-        ref={spacerRef}
-        aria-hidden
-        className="order-1 shrink-0"
-        style={{ height: railClearance }}
-      />
-
-      {transcript && railOn && (
-        <div className="sticky bottom-[26px] z-20 order-2 h-auto @[1074px]:h-0 @max-[699px]:hidden">
-          <AgentRail
-            transcript={transcript}
-            {...(modelName ? { modelName } : {})}
-            elapsedOf={elapsedOf}
-            collapseSignal={collapseSignal}
-            onFloatingHeight={setRailHeight}
-          />
-        </div>
-      )}
     </div>
   )
 
@@ -455,11 +378,6 @@ export function ChatView({
         <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
           {body}
         </ScrollArea>
-        {/* Live activity must stay visible even where the rail doesn't render:
-            in a small window, and (when maximized) on a narrow chat panel. */}
-        {transcript && liveAgents && (
-          <AgentRailBar transcript={transcript} always={!fullSizeWindow} />
-        )}
       </RunLinkProvider>
     </div>
   )
@@ -472,12 +390,14 @@ export function ChatView({
  *  at the wrong moment (and differently once the sidebar collapses).
  *  Below GUTTER_AT the row stacks and cards fall inline under their pill.
  *
- *  Note the row never wraps: the text column SHRINKS (flex-[0_1_58rem]) so the
- *  gutter always stays beside it instead of dropping to the next line.
+ *  Note the row never wraps: the text column has a 58rem BASIS and grows into
+ *  whatever the gutter leaves, so the gutter always stays beside it instead of
+ *  dropping to the next line.
  *
- *  `gutterOn` is the session-level switch: with no runs anywhere there is no
- *  gutter cell and no cap-for-the-gutter, so the conversation simply uses the
- *  width it always had. */
+ *  `gutterOn` is the session-level switch: with no runs anywhere (or in a
+ *  smaller window) there is no gutter cell, so the conversation uses the full
+ *  width and any cards fall inline under the pill that spawned them — they must
+ *  never become invisible just because the gutter is off. */
 function Row({
   children,
   gutter,
@@ -494,8 +414,9 @@ function Row({
   if (!gutterOn) {
     return (
       <div data-chat-row="" data-msg-id={msgId}>
-        <div data-chat-col="" className="min-w-0 max-w-[76rem]">
+        <div data-chat-col="" className="min-w-0 max-w-[88rem]">
           {children}
+          {gutter && <div className="mt-2 max-w-[42rem] ps-[46px]">{gutter}</div>}
         </div>
       </div>
     )
@@ -506,7 +427,7 @@ function Row({
       data-msg-id={msgId}
       className="flex flex-col gap-2 @[1074px]:flex-row @[1074px]:items-start @[1074px]:gap-x-6 @[1074px]:gap-y-0"
     >
-      <div data-chat-col="" className="min-w-0 @[1074px]:max-w-[58rem] @[1074px]:flex-[0_1_58rem]">
+      <div data-chat-col="" className="min-w-0 @[1074px]:max-w-[76rem] @[1074px]:flex-[1_1_58rem]">
         {children}
       </div>
       <div
@@ -518,8 +439,8 @@ function Row({
       <div
         data-chat-gutter=""
         /* The cell keeps its width even when empty: every row's text column must
-           be the same width, and the wire origin must stay left of the rail.
-           Only when stacked does an empty gutter collapse away. */
+           be the same width whether or not that row owns a card. Only when
+           stacked does an empty gutter collapse away. */
         className="ps-[46px] @max-[1073px]:empty:hidden @[1074px]:w-[380px] @[1074px]:shrink-0 @[1074px]:ps-0"
       >
         {gutter}

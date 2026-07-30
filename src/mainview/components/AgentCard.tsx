@@ -1,7 +1,8 @@
 // One delegated agent, in three dresses:
-//   running — live tail of the last few output lines (rail)
-//   idle    — condensed seat row, expandable (rail)
+//   running — live tail of the last few output lines (transcript gutter)
 //   parked  — condensed settled run, expandable (transcript gutter)
+//   idle    — condensed seat row, expandable; kept for a seat-list surface,
+//             nothing renders it since the live agents rail was removed
 //
 // All three expand to the SAME full detail the old inline thread panels showed:
 // the delegate's messages and any nested sub-threads.
@@ -95,7 +96,7 @@ export interface AgentCardProps {
   modelName?: string
   /** Live elapsed for a running run / final duration for a settled one. */
   elapsedMs?: number
-  /** Any change to this number collapses the card (fold-all / rail button). */
+  /** Any change to this number collapses the card (fold-all / end of turn). */
   collapseSignal?: number
 }
 
