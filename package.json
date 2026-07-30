@@ -1,6 +1,6 @@
 {
   "name": "chunky-app",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "description": "Chunky — a beautiful coding-agent chat desktop app (Electrobun + Base UI + Tailwind v4). Talks to the local Chunky server over HTTP+SSE.",
