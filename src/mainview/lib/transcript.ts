@@ -318,6 +318,12 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
       // Reattachment/replay is an orchestration concern; keep the reducer pure.
       return state
 
+    case "app.open_url":
+      // A live-only request for the browser pane, intercepted before it gets
+      // here (see App's attachSession). Explicitly inert so it can never turn
+      // into a rendered transcript item, whatever `default` does later.
+      return state
+
     case "background.changed":
       return { ...state, background: { tasks: ev.tasks, monitors: ev.monitors } }
 

@@ -36,3 +36,36 @@ export function takePendingBrowserUrl(): string | null {
   pending = null
   return url
 }
+
+/**
+ * Read the URL out of a server `app.open_url` frame, or null when this is not
+ * one.
+ *
+ * Typed against `unknown` on purpose: the check has to survive a protocol
+ * package that does not carry the variant yet (and a server that sends a
+ * malformed one), so the shape is verified structurally instead of trusting the
+ * union. Whether the URL is *allowed* is not decided here — `openInAppBrowser`
+ * owns that rule.
+ */
+export function appOpenUrlRequest(ev: unknown): string | null {
+  if (!ev || typeof ev !== "object") return null
+  const { type, url } = ev as { type?: unknown; url?: unknown }
+  if (type !== "app.open_url" || typeof url !== "string") return null
+  const value = url.trim()
+  return value ? value : null
+}
+
+/**
+ * Handle an `app.open_url` event: the agent asking for this app's browser pane.
+ *
+ * Returns true when the event was CLAIMED, which the caller must treat as "do
+ * not pass this to the transcript reducer" — including for a claimed frame whose
+ * URL `openInAppBrowser` then rejects (non-http(s) or junk). It is a live-only
+ * control frame either way, never a transcript item.
+ */
+export function consumeAppOpenUrl(ev: unknown): boolean {
+  const url = appOpenUrlRequest(ev)
+  if (url === null) return false
+  openInAppBrowser(url)
+  return true
+}

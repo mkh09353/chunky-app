@@ -4,6 +4,9 @@ import {
   ROUTES,
   readSSE,
   type AgentEvent,
+  type AppBrowserAnnounce,
+  type AppBrowserEndpoint,
+  type AppBrowserResponse,
   type CreateSessionRequest,
   type CreateSessionResponse,
   type ListSessionsResponse,
@@ -284,6 +287,28 @@ export async function searchFiles(
   if (!res.ok) throw new Error(`file search failed (${res.status})`)
   const body = (await res.json()) as { items?: FileSearchItem[] }
   return body.items ?? []
+}
+
+/**
+ * Announce this app's browser pane as a remotely drivable CDP target.
+ *
+ * The server holds this in memory only (it dies with the server), so callers
+ * must re-announce on every reconnect. Payload comes from the Bun process — see
+ * src/bun/appBrowser.ts and src/mainview/lib/appBrowser.ts.
+ */
+export async function announceAppBrowser(
+  baseUrl: string,
+  body: AppBrowserAnnounce,
+): Promise<AppBrowserEndpoint | null> {
+  if (!baseUrl) throw new Error("Chunky server is unavailable")
+  const res = await fetch(baseUrl + ROUTES.appBrowser, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  const data = (await res.json().catch(() => ({}))) as AppBrowserResponse & { error?: string }
+  if (!res.ok) throw new Error(data.error || `announce app browser failed (${res.status})`)
+  return data.browser ?? null
 }
 
 export async function interruptSession(baseUrl: string, sessionId: string): Promise<void> {

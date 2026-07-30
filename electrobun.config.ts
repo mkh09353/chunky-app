@@ -32,6 +32,24 @@ const FFF_BIN_PACKAGES = [
   "fff-bin-win32-arm64",
 ] as const
 
+/**
+ * Bundle Chromium (CEF) instead of using the system WebView.
+ *
+ * Off by default, and deliberately: CEF is the only way to get a Chrome DevTools
+ * Protocol listener for the in-app browser pane (Electrobun starts CEF with
+ * `remote_debugging_port` = the first free port in 9222-9232, loopback only,
+ * which is what the app announces to the Chunky server), but the CEF payload is
+ * a ~131MB download that lands as a ~400MB framework inside the bundle - versus
+ * a ~16MB self-extracting app today - and every release would then have to sign
+ * and notarize that framework plus its helper processes.
+ *
+ * Build a CEF variant with `CHUNKY_BUNDLE_CEF=1 bun run build` (or `... bun run
+ * dev`). Nothing else has to change: the main window stays on the system WebView
+ * (`renderer: "native"` in src/bun/index.ts) and only the browser pane asks for
+ * `renderer="cef"`, which it does automatically once build.json advertises it.
+ */
+const bundleCEF = process.env.CHUNKY_BUNDLE_CEF === "1"
+
 const fffBinCopy: Record<string, string> = {}
 for (const name of FFF_BIN_PACKAGES) {
   const src = join("node_modules", "@ff-labs", name)
@@ -69,7 +87,7 @@ export default {
     },
     watchIgnore: ["dist/**"],
     mac: {
-      bundleCEF: false,
+      bundleCEF,
       // Electrobun runs `iconutil -c icns` on this folder and writes
       // Contents/Resources/AppIcon.icns, which the generated Info.plist already
       // references via CFBundleIconFile. Without it Electrobun silently ships a
@@ -82,8 +100,8 @@ export default {
       codesign: signAndNotarize,
       notarize: signAndNotarize,
     },
-    linux: { bundleCEF: false },
-    win: { bundleCEF: false },
+    linux: { bundleCEF },
+    win: { bundleCEF },
   },
   // Electrobun signs Mach-O files in Contents/MacOS and .node files under
   // Resources/app/bun, but not dylibs copied into Resources/app/node_modules.

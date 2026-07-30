@@ -15,7 +15,8 @@ import { Sidebar } from "./components/Sidebar"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
-import { subscribeBrowserNavigation } from "./lib/browserNav"
+import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
+import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import {
@@ -534,6 +535,10 @@ export function App() {
         modeAppliedRef.current(ev.name, ev.spec)
         return
       }
+      // The agent asking for our browser pane. Also live-only: claimed here and
+      // never reduced, so it cannot become a rendered transcript item. Only
+      // http(s) actually opens the pane — openInAppBrowser owns that rule.
+      if (consumeAppOpenUrl(ev)) return
       setTranscript((s) => reduce(s, ev))
       if (ev.type === "goal.update") setGoalState(ev.goal)
       // Surface title updates from session list by refreshing occasionally on status idle.
@@ -657,6 +662,19 @@ export function App() {
       if (settleTimer.current != null) clearTimeout(settleTimer.current)
     }
   }, [openRepoThreads])
+
+  /**
+   * Tell the server how to drive our browser pane. The endpoint lives in the
+   * server's memory and dies with it, so every (re)connect has to re-announce;
+   * losing the connection clears the memo so the next connect actually posts.
+   * Demo/offline and the browser-only dev build never announce (no live server,
+   * and no native pane to drive).
+   */
+  useEffect(() => {
+    if (!config) return
+    if (appMode === "live" && connectionState === "connected") void announceAppBrowserTarget(config.baseUrl)
+    else resetAppBrowserAnnounce()
+  }, [config, appMode, connectionState])
 
   // Poll model selection lightly so external changes show up.
   useEffect(() => {
@@ -1715,7 +1733,12 @@ export function App() {
                 />
               </div>
             </div>
-            {browserOpen ? <BrowserPane onClose={() => setBrowserOpen(false)} /> : null}
+            {browserOpen ? (
+              <BrowserPane
+                onClose={() => setBrowserOpen(false)}
+                baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
+              />
+            ) : null}
             <ExternalLinkMenu />
           </section>
         </div>

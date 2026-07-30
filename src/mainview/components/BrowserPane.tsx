@@ -1,6 +1,7 @@
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent } from "react"
+import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
 import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browserNav"
 import { cn } from "~/lib/cn"
 import { Button } from "./ui/button"
@@ -252,7 +253,12 @@ function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): ()
   }
 }
 
-export function BrowserPane({ onClose }: { onClose: () => void }) {
+/**
+ * @param baseUrl Live Chunky server to announce this pane to as a remotely
+ *   drivable CDP target, or null when there is no connected server (offline,
+ *   demo, browser-only dev) — in which case nothing is announced.
+ */
+export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl?: string | null }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const webviewRef = useRef<ElectrobunWebviewElement | null>(null)
   const [available] = useState(desktopWebviewAvailable)
@@ -265,6 +271,9 @@ export function BrowserPane({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(available)
   const [canGoBack, setCanGoBack] = useState(false)
   const [canGoForward, setCanGoForward] = useState(false)
+  // A CDP target for this pane only exists once its page is up, so the server
+  // cannot be told anything useful before that.
+  const [paneLive, setPaneLive] = useState(false)
 
   const syncHistory = useCallback((webview: ElectrobunWebviewElement) => {
     void Promise.all([webview.canGoBack(), webview.canGoForward()])
@@ -290,74 +299,96 @@ export function BrowserPane({ onClose }: { onClose: () => void }) {
   // 3. Owning create + destroy in one effect keeps StrictMode's double-invoke
   //    symmetric (create → destroy → create) instead of leaving React-owned
   //    DOM wired to a torn-down native view.
+  // 4. The renderer kind (CEF vs system WebView) is a bun-process answer, so
+  //    creation waits on one cached round trip; `cancelled` keeps an unmount
+  //    inside that window from creating any native view at all.
   useEffect(() => {
     if (!available) return
     const host = hostRef.current
     if (!host) return
 
-    const element = document.createElement("electrobun-webview") as ElectrobunWebviewElement
-    if (typeof element.on !== "function") return
+    const mount = (rendererKind: "cef" | "native"): (() => void) | null => {
+      const element = document.createElement("electrobun-webview") as ElectrobunWebviewElement
+      if (typeof element.on !== "function") return null
 
-    // Native-view creation is deferred to a rAF; knowing whether it actually
-    // started lets teardown skip the parking dance in the common case.
-    let initStarted = false
-    const startInit = element.initWebview.bind(element)
-    element.initWebview = async () => {
-      initStarted = true
-      await startInit()
-    }
-
-    element.setAttribute("renderer", "native")
-    // Sandboxed: the embedded page gets the event bridge but no host RPC.
-    element.setAttribute("sandbox", "")
-    element.setAttribute("src", initialUrlRef.current)
-    // Electrobun injects an unlayered `electrobun-webview { width:800px;
-    // height:300px }` default style, which outranks Tailwind's layered
-    // utilities. Inline styles are the only reliable way to size the element —
-    // and the element's rect is exactly where the native webview is composited.
-    element.style.cssText = "display:block;position:absolute;inset:0;width:100%;height:100%;background:transparent;"
-
-    const onNavigate = (event: CustomEvent) => {
-      const next = urlFromDetail(event.detail) ?? element.src
-      if (next) {
-        setUrl(next)
-        setDraft(next)
-        persistUrl(next)
+      // Native-view creation is deferred to a rAF; knowing whether it actually
+      // started lets teardown skip the parking dance in the common case.
+      let initStarted = false
+      const startInit = element.initWebview.bind(element)
+      element.initWebview = async () => {
+        initStarted = true
+        await startInit()
       }
-      setLoading(false)
-      syncHistory(element)
-    }
-    const onDomReady = () => {
-      setLoading(false)
-      syncHistory(element)
-    }
-    // Links that ask for a new window stay in the pane; there is no tab UI.
-    const onNewWindow = (event: CustomEvent) => {
-      const next = urlFromDetail(event.detail)
-      if (!next) return
-      setLoading(true)
-      element.loadURL(next)
+
+      // CEF when this build bundled it (the only renderer with a Chrome
+      // DevTools Protocol listener, so the only one an agent can drive),
+      // otherwise the system WebView.
+      element.setAttribute("renderer", rendererKind)
+      // Sandboxed: the embedded page gets the event bridge but no host RPC.
+      element.setAttribute("sandbox", "")
+      element.setAttribute("src", initialUrlRef.current)
+      // Electrobun injects an unlayered `electrobun-webview { width:800px;
+      // height:300px }` default style, which outranks Tailwind's layered
+      // utilities. Inline styles are the only reliable way to size the element —
+      // and the element's rect is exactly where the native webview is composited.
+      element.style.cssText = "display:block;position:absolute;inset:0;width:100%;height:100%;background:transparent;"
+
+      const onNavigate = (event: CustomEvent) => {
+        const next = urlFromDetail(event.detail) ?? element.src
+        if (next) {
+          setUrl(next)
+          setDraft(next)
+          persistUrl(next)
+        }
+        setLoading(false)
+        setPaneLive(true)
+        syncHistory(element)
+      }
+      const onDomReady = () => {
+        setLoading(false)
+        setPaneLive(true)
+        syncHistory(element)
+      }
+      // Links that ask for a new window stay in the pane; there is no tab UI.
+      const onNewWindow = (event: CustomEvent) => {
+        const next = urlFromDetail(event.detail)
+        if (!next) return
+        setLoading(true)
+        element.loadURL(next)
+      }
+
+      element.on("did-navigate", onNavigate)
+      element.on("did-navigate-in-page", onNavigate)
+      element.on("did-commit-navigation", onNavigate)
+      element.on("dom-ready", onDomReady)
+      element.on("new-window-open", onNewWindow)
+
+      host.appendChild(element)
+      webviewRef.current = element
+      const stopOverlayWatch = watchOverlays(host, element)
+
+      return () => {
+        element.off("did-navigate", onNavigate)
+        element.off("did-navigate-in-page", onNavigate)
+        element.off("did-commit-navigation", onNavigate)
+        element.off("dom-ready", onDomReady)
+        element.off("new-window-open", onNewWindow)
+        stopOverlayWatch()
+        if (webviewRef.current === element) webviewRef.current = null
+        destroyWebview(element, () => initStarted)
+      }
     }
 
-    element.on("did-navigate", onNavigate)
-    element.on("did-navigate-in-page", onNavigate)
-    element.on("did-commit-navigation", onNavigate)
-    element.on("dom-ready", onDomReady)
-    element.on("new-window-open", onNewWindow)
-
-    host.appendChild(element)
-    webviewRef.current = element
-    const stopOverlayWatch = watchOverlays(host, element)
+    let cancelled = false
+    let teardown: (() => void) | null = null
+    void preferredWebviewRenderer().then((rendererKind) => {
+      if (cancelled) return
+      teardown = mount(rendererKind)
+    })
 
     return () => {
-      element.off("did-navigate", onNavigate)
-      element.off("did-navigate-in-page", onNavigate)
-      element.off("did-commit-navigation", onNavigate)
-      element.off("dom-ready", onDomReady)
-      element.off("new-window-open", onNewWindow)
-      stopOverlayWatch()
-      if (webviewRef.current === element) webviewRef.current = null
-      destroyWebview(element, () => initStarted)
+      cancelled = true
+      teardown?.()
     }
   }, [available, syncHistory])
 
@@ -369,6 +400,18 @@ export function BrowserPane({ onClose }: { onClose: () => void }) {
     setLoading(true)
     webviewRef.current?.loadURL(nextUrl)
   }, [])
+
+  /**
+   * Tell the server how to drive this pane. Reactive rather than once-on-open:
+   * the pane may well be opened before a server is reachable (offline, or during
+   * a reconnect), and the CDP endpoint can only be *discovered* while a page of
+   * ours is up. The announcer dedupes by payload, so navigating around costs at
+   * most one cheap round trip to the bun process and no repeat POST.
+   */
+  useEffect(() => {
+    if (!baseUrl || !paneLive) return
+    void announceAppBrowserTarget(baseUrl, url)
+  }, [baseUrl, paneLive, url])
 
   // Navigation requests that arrive while the pane is already open.
   useEffect(

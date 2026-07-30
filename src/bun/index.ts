@@ -1,6 +1,7 @@
-import { BrowserWindow, ApplicationMenu, createRPC, Updater, Utils } from "electrobun/bun"
+import { BrowserWindow, ApplicationMenu, BuildConfig, createRPC, Updater, Utils } from "electrobun/bun"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { createAppBrowserResolver } from "./appBrowser"
 import {
   candidateRoots,
   destroyFinders,
@@ -160,6 +161,12 @@ function clampQuery(raw: unknown): string {
   return raw.trim().slice(0, 200)
 }
 
+/** CDP endpoint of the browser pane. BuildConfig is injected so appBrowser.ts
+ *  (and its tests) never has to load the electrobun FFI runtime. */
+const resolveAppBrowserTarget = createAppBrowserResolver({
+  availableRenderers: async () => (await BuildConfig.get()).availableRenderers ?? ["native"],
+})
+
 let rpc!: ReturnType<typeof createRPC>
 const terminals = createTerminalManager((name, payload) => {
   const send = rpc.send as unknown as Record<string, (value: unknown) => void>
@@ -177,6 +184,21 @@ rpc = createRPC({
         ...config,
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
       }
+    },
+
+    /**
+     * What the browser pane is, as a remotely drivable target: which renderer
+     * this build can give it and — for CEF — the loopback CDP port Electrobun
+     * put it on. The webview announces this to the Chunky server; see
+     * src/bun/appBrowser.ts for why the port has to be discovered.
+     * Input: { paneUrl?: string } — the pane's current page, used to prove the
+     *   CDP listener we found is ours and not some other Chromium.
+     * Output: AppBrowserAnnounce { cdpPort, renderer, debuggable }
+     */
+    appBrowserTarget: async (params: unknown) => {
+      const paneUrl =
+        params && typeof params === "object" ? (params as { paneUrl?: unknown }).paneUrl : params
+      return resolveAppBrowserTarget(typeof paneUrl === "string" ? paneUrl : undefined)
     },
 
     /** OS directory picker. Returns absolute path or "" on cancel. */
