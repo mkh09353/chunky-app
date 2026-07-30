@@ -62,7 +62,8 @@ function canonicalWorkspace(path: string): string {
   try { return realpathSync.native(absolute) } catch { return absolute }
 }
 
-function stateDir(env: NodeJS.ProcessEnv): string {
+/** Desktop-owned persistent state. Do not use the replaceable runtime directory. */
+export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.CHUNKY_HOME || join(homedir(), ".chunky", "state")
 }
 

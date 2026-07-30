@@ -12,6 +12,7 @@ import {
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
+import { createZooManager } from "./zoo"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -172,6 +173,9 @@ const terminals = createTerminalManager((name, payload) => {
   const send = rpc.send as unknown as Record<string, (value: unknown) => void>
   send[name]?.(payload)
 })
+// SQLite is opened lazily inside the manager, so merely launching Chunky does
+// not create product-factory state or touch the disk.
+const zoo = createZooManager()
 
 rpc = createRPC({
   maxRequestTime: 180_000,
@@ -294,6 +298,16 @@ rpc = createRPC({
      * Output: { roots: string[] }
      */
     cloneRoots: async () => ({ roots: candidateRoots(extraRoots) }),
+
+    zooStatus: async (params: unknown) => zoo.status(params),
+    zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),
+    zooStartBackfill: async (params: unknown) => zoo.startBackfill(params),
+    zooListArtifacts: async (params: unknown) => zoo.listArtifacts(params),
+    zooGetArtifact: async (params: unknown) => zoo.getArtifact(params),
+    zooExportForExtraction: async (params: unknown) => zoo.exportForExtraction(params),
+    zooRecordInsights: async (params: unknown) => zoo.recordInsights(params),
+    zooFailPass: async (params: unknown) => zoo.failPass(params),
+    zooListInsights: async (params: unknown) => zoo.listInsights(params),
 
     terminalOpen: async (params: unknown) => terminals.open(params),
     terminalWrite: async (params: unknown) => terminals.write(params),

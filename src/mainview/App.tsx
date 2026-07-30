@@ -14,6 +14,7 @@ import { GitToolbar } from "./components/GitPanel"
 import { Sidebar } from "./components/Sidebar"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
+import { FactoryPane } from "./components/FactoryPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
@@ -261,6 +262,8 @@ export function App() {
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
+  // The factory shares the content-panel side region with the browser pane.
+  const [factoryOpen, setFactoryOpen] = useState(false)
   // The link context menu's "Open in Chunky browser" mounts the pane; the pane
   // itself picks the URL up from the same store.
   useEffect(() => subscribeBrowserNavigation(() => setBrowserOpen(true)), [])
@@ -1501,16 +1504,18 @@ export function App() {
     { id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" },
     { id: "theme", label: "Toggle theme", group: "Appearance" },
     { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
+    { id: "factory", label: factoryOpen ? "Close Factory" : "Open Factory", group: "Workspace" },
     { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
     { id: "onboarding", label: "Run Onboarding", group: "Integration" },
-  ], [repos, sessions, uiModels, browserOpen])
+  ], [repos, sessions, uiModels, browserOpen, factoryOpen])
 
   const runAction = useCallback(
     (a: PaletteAction) => {
       if (a.id === "new") void handleNewThread()
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
-      else if (a.id === "browser") setBrowserOpen((open) => !open)
+      else if (a.id === "browser") setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open })
+      else if (a.id === "factory") setFactoryOpen((open) => { if (!open) setBrowserOpen(false); return !open })
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
       else if (a.id.startsWith("repo:")) void handleSelectRepo(a.id.slice(5))
@@ -1736,6 +1741,11 @@ export function App() {
             {browserOpen ? (
               <BrowserPane
                 onClose={() => setBrowserOpen(false)}
+                baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
+              />
+            ) : factoryOpen ? (
+              <FactoryPane
+                onClose={() => setFactoryOpen(false)}
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
               />
             ) : null}
