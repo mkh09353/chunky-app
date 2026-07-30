@@ -272,7 +272,7 @@ export function Composer({
     <div className="mx-auto w-full max-w-5xl px-4 pb-4">
       {/* Todos + queued messages render above the composer via TodosPanel /
           QueueChips (see App.tsx) so both surfaces stay in one place. */}
-      {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}
+      {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context. Press ⏎ again to send, esc to cancel.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}
       <div className="rounded-[22px] border border-border bg-card/80 p-2 shadow-panel backdrop-blur-xl transition-colors focus-within:border-ring/60">
         {images.length > 0 && <div className="flex flex-wrap gap-1 px-2 pt-1">{images.map((image, i) => <span key={`${image.name}-${i}`} className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px]"><File className="size-3" />{image.name}<button type="button" onClick={() => setImages((old) => old.filter((_, index) => index !== i))}><X className="size-3" /></button></span>)}</div>}
         <Textarea
@@ -297,6 +297,12 @@ export function Composer({
             updateMentions(next, e.target.selectionStart)
           }}
           onKeyDown={(e) => {
+            // The cold-context guard owns Enter while visible: the user just hit
+            // Enter to send, so a second Enter confirms without reaching for the mouse.
+            if (cacheGuard) {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onCacheConfirm?.(); return }
+              if (e.key === "Escape") { e.preventDefault(); onCacheCancel?.(); return }
+            }
             if (slashOpen) {
               if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setSlashIndex((old) => Math.max(0, Math.min(slashMatches.length - 1, old + (e.key === "ArrowDown" ? 1 : -1)))) }
               else if (e.key === "Enter" && !e.shiftKey && slashMatches[slashIndex]) { e.preventDefault(); runCommand(slashMatches[slashIndex]!) }
