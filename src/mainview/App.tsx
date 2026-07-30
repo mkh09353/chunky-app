@@ -17,6 +17,7 @@ import { BrowserPane } from "./components/BrowserPane"
 import { FactoryPane } from "./components/FactoryPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
+import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
 import { Button } from "./components/ui/button"
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -675,8 +676,15 @@ export function App() {
    */
   useEffect(() => {
     if (!config) return
-    if (appMode === "live" && connectionState === "connected") void announceAppBrowserTarget(config.baseUrl)
-    else resetAppBrowserAnnounce()
+    if (appMode === "live" && connectionState === "connected") {
+      void announceAppBrowserTarget(config.baseUrl)
+      // Same lifetime, same rules: the zoo board's local service has to be
+      // re-announced on every connect for the zoo_* tools to exist.
+      void announceAppZooTarget(config.baseUrl)
+    } else {
+      resetAppBrowserAnnounce()
+      resetAppZooAnnounce()
+    }
   }, [config, appMode, connectionState])
 
   // Poll model selection lightly so external changes show up.

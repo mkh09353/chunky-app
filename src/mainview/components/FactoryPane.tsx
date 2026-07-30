@@ -9,6 +9,7 @@ import {
   FolderOpen,
   LoaderCircle,
   MessageSquare,
+  MessagesSquare,
   Quote,
   RefreshCw,
   Sparkles,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { FormEvent, ReactNode } from "react"
+import { createSession, sendMessage } from "~/lib/api"
 import { cn } from "~/lib/cn"
 import { relativeTime } from "~/lib/format"
 import { openExternal } from "~/lib/openExternal"
@@ -56,6 +58,11 @@ import { Button } from "./ui/button"
 import { Input } from "./ui/input"
 
 const POLL_MS = 2000
+
+/** Opening turn for "Talk to the Factory" — the agent reads the board itself
+ *  through the zoo_* tools rather than being handed a snapshot. */
+const FACTORY_OPENER =
+  "You have zoo_* tools for my product-factory board. Pull up zoo_board and give me a quick read: what needs attention, what's stalled, and any suggestions."
 
 const PHASE_LABEL: Record<ExtractionPhase, string> = {
   exporting: "Bundling evidence",
@@ -221,6 +228,8 @@ export function FactoryPane({
 
   const [busyId, setBusyId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [talking, setTalking] = useState(false)
+  const [talkError, setTalkError] = useState<string | null>(null)
   const [feedbackFor, setFeedbackFor] = useState<string | null>(null)
   const [feedbackText, setFeedbackText] = useState("")
 
@@ -412,6 +421,23 @@ export function FactoryPane({
 
   const toggle = (id: string) => setExpanded((prev) => ({ ...prev, [id]: prev[id] !== true }))
 
+  /** Hand the board to a chat session: the agent reads it with the zoo_* tools
+   *  the app announced, and the user lands in that conversation. */
+  const talkToFactory = async () => {
+    if (!baseUrl || !onOpenSession || talking) return
+    setTalking(true)
+    setTalkError(null)
+    try {
+      const { sessionId } = await createSession(baseUrl, repoId ?? null)
+      await sendMessage(baseUrl, sessionId, FACTORY_OPENER)
+      onOpenSession(sessionId)
+    } catch (err) {
+      setTalkError(err instanceof Error ? err.message : "Could not start a Factory session.")
+    } finally {
+      setTalking(false)
+    }
+  }
+
   const insightById = useMemo(() => {
     const map = new Map<string, ZooInsight>()
     for (const insight of insights) map.set(insight.id, insight)
@@ -562,6 +588,25 @@ export function FactoryPane({
           {label}
         </button>
       ))}
+      {tab === "queue" && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="ml-auto"
+          disabled={talking || !baseUrl || !onOpenSession}
+          title={
+            !baseUrl
+              ? "Needs a connected Chunky server"
+              : !onOpenSession
+                ? "Unavailable here"
+                : undefined
+          }
+          onClick={() => void talkToFactory()}
+        >
+          {talking ? <LoaderCircle className="animate-spin" /> : <MessagesSquare />}
+          Talk to the Factory
+        </Button>
+      )}
     </div>
   )
 
@@ -903,6 +948,7 @@ export function FactoryPane({
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto p-3">
         {statusError && <Notice text={statusError} />}
         {actionError && <Notice text={actionError} />}
+        {talkError && <Notice text={talkError} />}
         {tab === "queue" ? queueView : signalsView}
       </div>
     </aside>

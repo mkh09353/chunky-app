@@ -7,6 +7,8 @@ import {
   type AppBrowserAnnounce,
   type AppBrowserEndpoint,
   type AppBrowserResponse,
+  type AppZooAnnounce,
+  type AppZooResponse,
   type CreateSessionRequest,
   type CreateSessionResponse,
   type ListSessionsResponse,
@@ -309,6 +311,29 @@ export async function announceAppBrowser(
   const data = (await res.json().catch(() => ({}))) as AppBrowserResponse & { error?: string }
   if (!res.ok) throw new Error(data.error || `announce app browser failed (${res.status})`)
   return data.browser ?? null
+}
+
+/**
+ * Announce the app's local zoo (product-factory) service so the server can
+ * expose `zoo_*` tools against this app's board.
+ *
+ * Same lifetime rules as announceAppBrowser: memory-only server-side, so every
+ * reconnect re-announces. The token is passed straight through to the request
+ * body — never store or log it (see lib/appZoo.ts).
+ */
+export async function announceAppZoo(
+  baseUrl: string,
+  body: AppZooAnnounce,
+): Promise<boolean> {
+  if (!baseUrl) throw new Error("Chunky server is unavailable")
+  const res = await fetch(baseUrl + ROUTES.appZoo, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+  const data = (await res.json().catch(() => ({}))) as AppZooResponse & { error?: string }
+  if (!res.ok) throw new Error(data.error || `announce app zoo failed (${res.status})`)
+  return data.connected === true
 }
 
 export async function interruptSession(baseUrl: string, sessionId: string): Promise<void> {

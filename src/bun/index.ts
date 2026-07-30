@@ -13,6 +13,7 @@ import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
 import { createZooManager } from "./zoo"
+import { createZooService } from "./zooService"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -176,6 +177,9 @@ const terminals = createTerminalManager((name, payload) => {
 // SQLite is opened lazily inside the manager, so merely launching Chunky does
 // not create product-factory state or touch the disk.
 const zoo = createZooManager()
+// The token-guarded loopback service remains dormant until the renderer needs
+// to announce it to the local Chunky server.
+const zooService = createZooService({ manager: zoo })
 
 rpc = createRPC({
   maxRequestTime: 180_000,
@@ -204,6 +208,9 @@ rpc = createRPC({
         params && typeof params === "object" ? (params as { paneUrl?: unknown }).paneUrl : params
       return resolveAppBrowserTarget(typeof paneUrl === "string" ? paneUrl : undefined)
     },
+    /** Target for the local product-factory service. The renderer immediately
+     * announces this ephemeral credential to the authenticated Chunky server. */
+    appZooTarget: async () => ({ ok: true, ...await zooService.target() }),
 
     /** OS directory picker. Returns absolute path or "" on cancel. */
     openFolderDialog: async () => {
