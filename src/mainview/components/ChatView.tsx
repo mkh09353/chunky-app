@@ -35,6 +35,7 @@ import type { RunRecord, TranscriptState } from "~/lib/transcript"
 export function ChatTopBar({
   repos,
   activeRepoId,
+  unreadRepoIds,
   onSelectRepo,
   onAddRepo,
   onRemoveRepo,
@@ -54,6 +55,7 @@ export function ChatTopBar({
   /** Optional; when omitted, repo tabs are hidden (demo / offline). */
   repos?: Repo[]
   activeRepoId?: string | null
+  unreadRepoIds?: Set<string>
   onSelectRepo?: (id: string) => void
   onAddRepo?: (path: string) => Promise<void>
   onRemoveRepo?: (id: string) => void | Promise<void>
@@ -81,6 +83,7 @@ export function ChatTopBar({
         <RepoTabs
           repos={repos}
           activeId={activeRepoId ?? null}
+          unreadRepoIds={unreadRepoIds}
           onSelect={onSelectRepo}
           onAdd={onAddRepo}
           onRemove={onRemoveRepo}

@@ -109,6 +109,7 @@ import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
 import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
 import { initialState, isStreaming, reduce, type TranscriptState } from "./lib/transcript"
+import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
 type AppMode = "live" | "demo"
@@ -121,6 +122,16 @@ const CLONE_LOG_LINES = 8
 const SELF_APPLY_WINDOW_MS = 10_000
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
 const LAST_SESSION_KEY = "chunky.lastSessionByRepo"
+const MIN_COMPLETION_NOTIFY_MS = 3_000
+
+/** Best effort only: browsers may reject playback before a user gesture. */
+function playCompletionHorn(): void {
+  try {
+    void new Audio(hornUrl).play().catch(() => {})
+  } catch {
+    // Audio is unavailable in a few embedded/browser contexts.
+  }
+}
 
 function readLastSessions(): Record<string, string> {
   try {
@@ -222,6 +233,12 @@ export function App() {
   // show "Done" with an unread dot until selected.
   const [unreadDone, setUnreadDone] = useState<Set<string>>(new Set())
   const wasRunning = useRef<Map<string, boolean>>(new Map())
+  const runningSince = useRef<Map<string, number>>(new Map())
+  // Sessions outside the selected repo are not in `sessions`, so their
+  // transition bookkeeping is deliberately separate from the sidebar's list.
+  const backgroundWasRunning = useRef<Map<string, boolean>>(new Map())
+  const backgroundRunningSince = useRef<Map<string, number>>(new Map())
+  const [unreadRepoIds, setUnreadRepoIds] = useState<Set<string>>(new Set())
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
   const [modelSel, setModelSel] = useState<ModelSelection | null>(null)
@@ -412,6 +429,19 @@ export function App() {
     activeRepo,
     unreadDone,
   ])
+
+  const repoTabUnreadIds = useMemo(() => {
+    const out = new Set(unreadRepoIds)
+    // The selected repo's list is already local state. Its tab is unread only
+    // for another session, never merely because the selected thread completed.
+    if (
+      activeRepoId &&
+      sessions.some((s) => unreadDone.has(s.sessionId) && s.sessionId !== sessionId)
+    ) {
+      out.add(activeRepoId)
+    }
+    return out
+  }, [activeRepoId, sessions, unreadDone, unreadRepoIds, sessionId])
 
   const activeThread: Thread = useMemo(() => {
     if (!live) {
@@ -716,30 +746,88 @@ export function App() {
     return () => clearInterval(t)
   }, [config, appMode])
 
-  // Poll the session list so OTHER threads' Working/Done state stays fresh in
-  // the sidebar (only the attached session streams status events).
+  // Poll the selected repo for the sidebar, and the others for completion
+  // badges. Only the attached session has an SSE stream of its own.
   useEffect(() => {
     if (!config || appMode !== "live" || connectionState !== "connected") return
-    const t = setInterval(() => {
+    const refreshAllRepos = () => {
       void refreshSessions(config.baseUrl).catch(() => {})
-    }, 5_000)
-    return () => clearInterval(t)
-  }, [config, appMode, connectionState, refreshSessions])
+      const otherRepos = repos.filter((repo) => repo.id !== activeRepoIdRef.current)
+      void Promise.all(
+        otherRepos.map(async (repo) => {
+          try {
+            const list = await listSessions(config.baseUrl, repo.id)
+            if (appMode !== "live" || connectionState !== "connected") return null
 
-  // Track running -> not-running transitions of NON-active sessions to flag
-  // them unread; viewing a thread clears its flag.
+            const now = Date.now()
+            let completed = false
+            const next = new Map(backgroundWasRunning.current)
+            for (const session of list) {
+              const key = `${repo.id}:${session.sessionId}`
+              const wasRunning = backgroundWasRunning.current.get(key)
+              if (session.running) {
+                if (!wasRunning) backgroundRunningSince.current.set(key, now)
+              } else if (wasRunning) {
+                const since = backgroundRunningSince.current.get(key)
+                backgroundRunningSince.current.delete(key)
+                if (since != null && now - since >= MIN_COMPLETION_NOTIFY_MS) completed = true
+              }
+              next.set(key, !!session.running)
+            }
+            backgroundWasRunning.current = next
+            return completed ? repo.id : null
+          } catch {
+            // A stale/unavailable repo must not block the remaining polls.
+            return null
+          }
+        }),
+      ).then((completedRepoIds) => {
+        const ids = completedRepoIds.filter((id): id is string => id != null)
+        if (ids.length === 0) return
+        setUnreadRepoIds((prev) => {
+          const next = new Set(prev)
+          for (const id of ids) next.add(id)
+          return next
+        })
+        // A batch may contain several completed sessions/repos, but gets one horn.
+        playCompletionHorn()
+      })
+    }
+    refreshAllRepos()
+    const t = setInterval(refreshAllRepos, 5_000)
+    return () => clearInterval(t)
+  }, [config, appMode, connectionState, refreshSessions, repos])
+
+  // A transition is meaningful only after this connected renderer observed the
+  // running state. That avoids replay/initial-load notifications and dots.
   useEffect(() => {
+    if (appMode !== "live" || connectionState !== "connected") {
+      wasRunning.current.clear()
+      runningSince.current.clear()
+      backgroundWasRunning.current.clear()
+      backgroundRunningSince.current.clear()
+      return
+    }
     const next = new Map<string, boolean>()
     const newlyDone: string[] = []
+    let completed = false
+    const now = Date.now()
     for (const s of sessions) {
       const isRunning =
         s.sessionId === sessionId ? transcript.status === "running" : !!s.running
-      next.set(s.sessionId, isRunning)
-      if (wasRunning.current.get(s.sessionId) && !isRunning && s.sessionId !== sessionId) {
-        newlyDone.push(s.sessionId)
+      const previous = wasRunning.current.get(s.sessionId)
+      if (isRunning && !previous) runningSince.current.set(s.sessionId, now)
+      if (previous && !isRunning) {
+        const since = runningSince.current.get(s.sessionId)
+        runningSince.current.delete(s.sessionId)
+        const qualifies = since != null && now - since >= MIN_COMPLETION_NOTIFY_MS
+        if (qualifies) completed = true
+        if (qualifies && s.sessionId !== sessionId) newlyDone.push(s.sessionId)
       }
+      next.set(s.sessionId, isRunning)
     }
     wasRunning.current = next
+    if (completed) playCompletionHorn()
     setUnreadDone((prev) => {
       let changed = false
       const out = new Set(prev)
@@ -747,7 +835,7 @@ export function App() {
       if (sessionId && out.has(sessionId)) { out.delete(sessionId); changed = true }
       return changed ? out : prev
     })
-  }, [sessions, sessionId, transcript.status])
+  }, [sessions, sessionId, transcript.status, appMode, connectionState])
 
   // Only ask a reachable live server once per app lifetime. Demo/offline mode
   // never touches onboarding endpoints.
@@ -884,6 +972,19 @@ export function App() {
   const handleSelectRepo = useCallback(
     async (id: string) => {
       if (!config || id === activeRepoIdRef.current) return
+      setUnreadRepoIds((prev) => {
+        if (!prev.has(id)) return prev
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+      const prefix = `${id}:`
+      for (const key of backgroundWasRunning.current.keys()) {
+        if (key.startsWith(prefix)) backgroundWasRunning.current.delete(key)
+      }
+      for (const key of backgroundRunningSince.current.keys()) {
+        if (key.startsWith(prefix)) backgroundRunningSince.current.delete(key)
+      }
       setActiveRepoId(id)
       activeRepoIdRef.current = id
       try {
@@ -1760,6 +1861,7 @@ export function App() {
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
+            unreadRepoIds={repoTabUnreadIds}
             onSelectRepo={(id) => void handleSelectRepo(id)}
             onAddRepo={handleAddRepo}
             onRemoveRepo={(id) => void handleRemoveRepo(id)}

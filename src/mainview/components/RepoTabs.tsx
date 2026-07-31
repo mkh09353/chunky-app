@@ -45,6 +45,7 @@ export interface CloneStatus {
 export function RepoTabs({
   repos,
   activeId,
+  unreadRepoIds,
   onSelect,
   onAdd,
   onRemove,
@@ -58,6 +59,7 @@ export function RepoTabs({
 }: {
   repos: Repo[]
   activeId: string | null
+  unreadRepoIds?: Set<string>
   onSelect: (id: string) => void
   onAdd: (path: string) => Promise<void>
   onRemove: (id: string) => void | Promise<void>
@@ -376,6 +378,9 @@ export function RepoTabs({
               >
                 <Folder className="size-3.5 shrink-0 opacity-80" />
                 <span className="truncate">{r.name}</span>
+                {unreadRepoIds?.has(r.id) && (
+                  <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="unread completion" />
+                )}
               </button>
               {repos.length > 1 && (
                 <DropdownMenu>
