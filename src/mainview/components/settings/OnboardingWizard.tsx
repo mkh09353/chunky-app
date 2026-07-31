@@ -11,6 +11,7 @@ import type { OnboardingProvider, OnboardingResponse, SuggestedMode } from "~/li
 import { cn } from "~/lib/cn"
 import { Button } from "../ui/button"
 import { InlineError, Loading, Spinner, useAsync } from "./common"
+import { ProviderMark } from "./ProviderMark"
 import { useProviderLogin } from "./useProviderLogin"
 
 /** True when the server reports the user has not completed onboarding yet.
@@ -401,12 +402,7 @@ function ProviderCard({
 
   return (
     <GlowCard className="h-[224px] select-none items-center justify-center gap-3 px-4 text-center">
-      <span
-        aria-hidden
-        className="flex size-10 items-center justify-center rounded-xl bg-foreground/8 font-medium text-[16px] text-foreground"
-      >
-        {provider.label.trim().charAt(0).toUpperCase() || "?"}
-      </span>
+      <ProviderMark id={provider.id} label={provider.label} className="size-11" />
       <h2 className="max-w-full truncate font-normal text-[14px] text-foreground leading-5">
         {provider.label}
       </h2>

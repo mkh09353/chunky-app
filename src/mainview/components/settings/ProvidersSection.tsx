@@ -3,6 +3,7 @@ import { useCallback, useState } from "react"
 import { addCustomProvider, listProviders, selectProvider } from "~/lib/configApi"
 import type { CustomProviderInput, ProviderInfo } from "~/lib/configApi"
 import { Button } from "../ui/button"
+import { ProviderMark } from "./ProviderMark"
 import { useProviderLogin } from "./useProviderLogin"
 import {
   Badge,
@@ -73,7 +74,8 @@ export function ProvidersSection() {
           {providers.data.map((p) => (
             <Card key={p.id}>
               <div className="flex items-center justify-between gap-3">
-                <div className="flex min-w-0 flex-col gap-1">
+                <ProviderMark id={p.id} label={p.label} className="size-7 shrink-0" />
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium text-[13.5px]">{p.label}</span>
                     {p.active && (
