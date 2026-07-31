@@ -1583,7 +1583,11 @@ export function App() {
     [handleSelectRepo, handleSelectThread, handleNewThread],
   )
 
+  // One guard for both the header button and the push-to-talk hotkey.
+  const voiceEnabled = live && connectionState !== "booting" && connectionState !== "offline"
+
   const voice = useVoiceAgent({
+    enabled: voiceEnabled,
     baseUrl: live && config ? config.baseUrl : null,
     getRepos: useCallback(async () => {
       if (!config) return []
@@ -1751,7 +1755,7 @@ export function App() {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
-            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!live || connectionState === "booting" || connectionState === "offline"} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} />{themeToggle}</>}
+            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} />{themeToggle}</>}
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
@@ -1854,7 +1858,10 @@ export function App() {
             userLine={voice.userLine}
             assistantLine={voice.assistantLine}
             tools={voice.tools}
-            onToggleMute={() => voice.setMuted(!voice.muted)}
+            mode={voice.mode}
+            holding={voice.holding}
+            onToggleMode={voice.toggleMode}
+            onHold={voice.setHolding}
             onEnd={voice.stop}
           />
         )}

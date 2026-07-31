@@ -1,10 +1,14 @@
 import { Check, Loader2, Mic, MicOff, PhoneOff, X } from "lucide-react"
+import type { PttMode } from "~/lib/pushToTalk"
 import type { VoiceState } from "~/lib/voice"
 import type { VoiceLine, VoiceToolChip } from "~/hooks/useVoiceAgent"
 import { cn } from "~/lib/cn"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
-/** Status colouring per engine state; `muted` only relabels listening. */
+/**
+ * Status colouring per engine state. While listening, what matters is whether
+ * the microphone is actually transmitting, so muted/holding drive the label.
+ */
 function statusOf(state: VoiceState, muted: boolean): { label: string; dot: string; text: string; pulse: boolean } {
   if (state === "connecting") return { label: "Connecting", dot: "bg-warning", text: "text-warning", pulse: true }
   if (state === "speaking") return { label: "Speaking", dot: "bg-info", text: "text-info", pulse: true }
@@ -12,7 +16,7 @@ function statusOf(state: VoiceState, muted: boolean): { label: string; dot: stri
   if (state === "error") return { label: "Voice error", dot: "bg-destructive", text: "text-destructive", pulse: false }
   if (state === "idle") return { label: "Ending", dot: "bg-muted-foreground", text: "text-muted-foreground", pulse: false }
   return muted
-    ? { label: "Muted", dot: "bg-muted-foreground", text: "text-muted-foreground", pulse: false }
+    ? { label: "Mic off", dot: "bg-muted-foreground", text: "text-muted-foreground", pulse: false }
     : { label: "Listening", dot: "bg-primary", text: "text-primary", pulse: true }
 }
 
@@ -67,24 +71,34 @@ function ToolChip({ chip }: { chip: VoiceToolChip }) {
 export function VoiceHud({
   state,
   muted,
+  mode,
+  holding,
   error,
   userLine,
   assistantLine,
   tools,
-  onToggleMute,
+  onToggleMode,
+  onHold,
   onEnd,
 }: {
   state: VoiceState
   muted: boolean
+  mode: PttMode
+  holding: boolean
   error: string | null
   userLine: VoiceLine | null
   assistantLine: VoiceLine | null
   tools: VoiceToolChip[]
-  onToggleMute: () => void
+  onToggleMode: () => void
+  onHold: (holding: boolean) => void
   onEnd: () => void
 }) {
   const status = statusOf(error ? "error" : state, muted)
   const hasTranscript = !!userLine?.text.trim() || !!assistantLine?.text.trim()
+  const openMic = mode === "open"
+  // In push-to-talk the mic control is the pad you hold; in open mic it mutes
+  // by dropping back to push-to-talk.
+  const micLabel = openMic ? "Mute microphone (back to push to talk)" : "Hold to talk"
 
   return (
     <div className="pointer-events-none fixed right-5 bottom-28 z-40 flex justify-end" data-slot="voice-hud">
@@ -103,19 +117,25 @@ export function VoiceHud({
                 render={
                   <button
                     type="button"
-                    aria-label={muted ? "Unmute microphone" : "Mute microphone"}
-                    aria-pressed={muted}
-                    onClick={onToggleMute}
+                    aria-label={micLabel}
+                    aria-pressed={!muted}
+                    data-slot="voice-ptt-pad"
+                    // Pointer hold mirrors the hotkey; the hook also listens for
+                    // a pointerup anywhere so releasing off the pad still stops.
+                    onPointerDown={openMic ? undefined : () => onHold(true)}
+                    onPointerUp={openMic ? undefined : () => onHold(false)}
+                    onPointerCancel={openMic ? undefined : () => onHold(false)}
+                    onClick={openMic ? onToggleMode : undefined}
                     className={cn(
-                      "inline-flex size-7 cursor-pointer items-center justify-center rounded-md outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50",
-                      muted ? "text-destructive" : "text-muted-foreground hover:text-foreground",
+                      "inline-flex size-7 cursor-pointer touch-none select-none items-center justify-center rounded-md outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50",
+                      muted ? "text-muted-foreground hover:text-foreground" : "bg-primary/15 text-primary",
                     )}
                   />
                 }
               >
                 {muted ? <MicOff className="size-3.5" /> : <Mic className="size-3.5" />}
               </TooltipTrigger>
-              <TooltipPopup>{muted ? "Unmute" : "Mute"}</TooltipPopup>
+              <TooltipPopup>{micLabel}</TooltipPopup>
             </Tooltip>
             <Tooltip>
               <TooltipTrigger
@@ -135,6 +155,42 @@ export function VoiceHud({
           </span>
         </div>
 
+        {!error && state !== "connecting" && (
+          <div className="mt-2 flex items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label={openMic ? "Switch to push to talk" : "Switch to open mic"}
+                    onClick={onToggleMode}
+                    className={cn(
+                      "inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-2 py-0.5 font-medium text-[10.5px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50",
+                      openMic
+                        ? "border-primary/40 bg-primary/10 text-primary"
+                        : "border-border bg-muted/50 text-muted-foreground hover:text-foreground",
+                    )}
+                  />
+                }
+              >
+                <span
+                  className={cn(
+                    "size-1.5 rounded-full border transition-colors",
+                    // Solid while transmitting, hollow while muted.
+                    muted ? "border-current bg-transparent" : "border-current bg-current",
+                  )}
+                />
+                {openMic ? "Open mic" : holding ? "Talking" : "Hold ` to talk"}
+              </TooltipTrigger>
+              <TooltipPopup>
+                {openMic
+                  ? "Open mic: tap ` to go back to push to talk"
+                  : "Hold ` or the mic button to talk. Double-tap ` for open mic."}
+              </TooltipPopup>
+            </Tooltip>
+          </div>
+        )}
+
         {error ? (
           <p className="mt-2 text-[11.5px] text-destructive leading-snug">{error}</p>
         ) : hasTranscript ? (
@@ -144,7 +200,11 @@ export function VoiceHud({
           </div>
         ) : (
           <p className="mt-2 text-[11.5px] text-muted-foreground leading-snug">
-            {state === "connecting" ? "Opening the voice channel…" : muted ? "Microphone is off." : "Say what you want done."}
+            {state === "connecting"
+              ? "Opening the voice channel…"
+              : muted
+                ? "Hold the backquote key to talk."
+                : "Say what you want done."}
           </p>
         )}
 

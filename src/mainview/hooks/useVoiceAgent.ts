@@ -1,5 +1,7 @@
 import type { SessionSummary } from "@chunky/protocol"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useReducer, useRef, useState } from "react"
+import { initialPttState, isTransmitting, pttReducer, type PttMode } from "~/lib/pushToTalk"
+import { usePushToTalkHotkey } from "./usePushToTalkHotkey"
 import { VoiceAgent, voiceHasApiKey, voiceSetApiKey, type VoiceEvents, type VoiceState, type VoiceToolContext } from "~/lib/voice"
 
 /** One rolling transcript line. `final` drives interim vs settled styling. */
@@ -20,6 +22,11 @@ export interface VoiceToolChip {
 
 /** App-side capabilities the voice tools need; kept live through a ref. */
 export interface UseVoiceAgentOptions {
+  /**
+   * False while demo/offline/booting: the hotkey must refuse to start a session
+   * the header button would not, since voice tools need a reachable server.
+   */
+  enabled: boolean
   /** Null while demo/offline — starting voice is disabled without a server. */
   baseUrl: string | null
   getRepos: () => Promise<{ id: string; name: string; path: string }[]>
@@ -32,7 +39,12 @@ export interface VoiceAgentController {
   state: VoiceState
   /** A session was requested and has not been stopped yet. */
   active: boolean
+  /** Derived: true whenever the microphone is not uploading audio. */
   muted: boolean
+  /** "ptt" = muted until held; "open" = continuously live. */
+  mode: PttMode
+  /** The hotkey or the HUD pad is held down right now. */
+  holding: boolean
   error: string | null
   userLine: VoiceLine | null
   assistantLine: VoiceLine | null
@@ -43,7 +55,10 @@ export interface VoiceAgentController {
   start: () => void
   stop: () => void
   toggle: () => void
-  setMuted: (muted: boolean) => void
+  /** Flip between push-to-talk and open mic (the HUD pill / mute button). */
+  toggleMode: () => void
+  /** Hold the microphone open from a pointer press on the HUD pad. */
+  setHolding: (holding: boolean) => void
   setApiKeyPromptOpen: (open: boolean) => void
   submitApiKey: (key: string) => Promise<{ ok: boolean; error?: string }>
   dismissError: () => void
@@ -76,7 +91,7 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
 
   const [state, setState] = useState<VoiceState>("idle")
   const [active, setActive] = useState(false)
-  const [muted, setMutedState] = useState(false)
+  const [ptt, dispatchPtt] = useReducer(pttReducer, initialPttState)
   const [error, setError] = useState<string | null>(null)
   const [userLine, setUserLine] = useState<VoiceLine | null>(null)
   const [assistantLine, setAssistantLine] = useState<VoiceLine | null>(null)
@@ -109,7 +124,8 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
   const teardown = useCallback(() => {
     activeRef.current = false
     setActive(false)
-    setMutedState(false)
+    // The next session starts in push-to-talk, muted.
+    dispatchPtt({ type: "reset" })
     setUserLine(null)
     setAssistantLine(null)
     setTools([])
@@ -169,12 +185,15 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
   }, [scheduleChipRemoval, teardown])
 
   const start = useCallback(() => {
-    if (activeRef.current) return
+    if (activeRef.current || !optionsRef.current.enabled) return
     activeRef.current = true
     setActive(true)
     setError(null)
     setState("connecting")
     const agent = ensureAgent()
+    // Never open the microphone on connect: push-to-talk is the resting state,
+    // and the engine's own default is unmuted.
+    agent.setMuted(true)
     void (async () => {
       // Ask first so a missing key opens the prompt instead of failing loudly.
       if (!(await voiceHasApiKey())) {
@@ -213,10 +232,26 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
     else start()
   }, [error, start, stop])
 
-  const setMuted = useCallback((next: boolean) => {
-    setMutedState(next)
-    agentRef.current?.setMuted(next)
-  }, [])
+  const toggleMode = useCallback(() => dispatchPtt({ type: "toggleMode" }), [])
+  const setHolding = useCallback(
+    (holding: boolean) => dispatchPtt({ type: holding ? "pointerdown" : "pointerup" }),
+    [],
+  )
+
+  const transmitting = active && isTransmitting(ptt)
+
+  // One place decides what the engine is told, from the derived state.
+  useEffect(() => {
+    agentRef.current?.setMuted(!transmitting)
+  }, [transmitting])
+
+  // Global push-to-talk hotkey. Registered even with no session so the key can
+  // start one; the guards keep it out of the way of ordinary typing.
+  usePushToTalkHotkey({
+    isActive: useCallback(() => activeRef.current, []),
+    onStart: start,
+    dispatch: dispatchPtt,
+  })
 
   const submitApiKey = useCallback(
     async (key: string): Promise<{ ok: boolean; error?: string }> => {
@@ -245,7 +280,9 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
   return {
     state,
     active,
-    muted,
+    muted: !transmitting,
+    mode: ptt.mode,
+    holding: ptt.holding,
     error,
     userLine,
     assistantLine,
@@ -255,7 +292,8 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
     start,
     stop,
     toggle,
-    setMuted,
+    toggleMode,
+    setHolding,
     setApiKeyPromptOpen,
     submitApiKey,
     dismissError,

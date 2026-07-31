@@ -43,7 +43,11 @@ export function VoiceButton({
   }, [apiKeyPromptOpen])
 
   const failed = !!error || state === "error"
-  const label = failed ? "Voice error — click to reset" : active ? "Stop voice control" : "Start voice control"
+  const label = failed
+    ? "Voice error — click to reset"
+    : active
+      ? "Stop voice control"
+      : "Start voice control (or hold ` to talk)"
 
   const submit = async () => {
     const trimmed = key.trim()
