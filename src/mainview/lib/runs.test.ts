@@ -75,12 +75,19 @@ describe("run records", () => {
     expect(state.runs[1]!.itemStart).toBe(state.runs[0]!.itemEnd!)
   })
 
-  test("a settled session sweeps runs whose idle frame never arrived", () => {
+  test("root idle does NOT close a delegate still running (detached child)", () => {
     const state = play([
       ...DELEGATING_TURN,
       { type: "session.status", sessionId: "s1", status: "idle" },
     ])
-    expect(state.runs[0]!.status).toBe("done")
+    // The delegate never reported idle, so its run stays live until it does.
+    expect(state.runs[0]!.status).toBe("running")
+    const settled = play([
+      ...DELEGATING_TURN,
+      { type: "session.status", sessionId: "s1", status: "idle" },
+      { type: "thread.status", threadId: "sk:frontend", status: "idle" },
+    ])
+    expect(settled.runs[0]!.status).toBe("done")
   })
 
   test("seats and one-shot delegates both park beside their own pill", () => {
