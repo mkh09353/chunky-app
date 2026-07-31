@@ -14,6 +14,7 @@ import * as git from "./git"
 import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
+import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -193,6 +194,15 @@ rpc = createRPC({
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
       }
     },
+
+    // Voice credentials stay in Bun. The renderer receives only a short-lived
+    // xAI realtime client secret, never the configured provider API key.
+    voiceGetToken: async () => mintVoiceToken(),
+    voiceSetApiKey: async (params: unknown) => {
+      const key = params && typeof params === "object" ? (params as { apiKey?: unknown }).apiKey : params
+      return setVoiceApiKey(key)
+    },
+    voiceHasApiKey: async () => ({ ok: true, hasApiKey: hasVoiceApiKey() }),
 
     /**
      * What the browser pane is, as a remotely drivable target: which renderer

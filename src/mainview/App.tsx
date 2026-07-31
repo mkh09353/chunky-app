@@ -2,6 +2,9 @@ import { AlertCircle, EyeOff, Moon, Sun, WifiOff } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
+import { VoiceButton } from "./components/VoiceButton"
+import { VoiceHud } from "./components/VoiceHud"
+import { useVoiceAgent } from "./hooks/useVoiceAgent"
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
 import { Composer, type ModeOption } from "./components/Composer"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
@@ -1570,21 +1573,48 @@ export function App() {
     { id: "onboarding", label: "Run Onboarding", group: "Integration" },
   ], [repos, sessions, uiModels, browserOpen, factoryOpen])
 
+  /** Stable app-action dispatch shared by the palette and the voice agent. */
+  const dispatchAppAction = useCallback(
+    (action: { type: "select-repo"; repoId: string } | { type: "select-session"; sessionId: string } | { type: "new-session" }) => {
+      if (action.type === "select-repo") void handleSelectRepo(action.repoId)
+      else if (action.type === "select-session") handleSelectThread(action.sessionId)
+      else void handleNewThread()
+    },
+    [handleSelectRepo, handleSelectThread, handleNewThread],
+  )
+
+  const voice = useVoiceAgent({
+    baseUrl: live && config ? config.baseUrl : null,
+    getRepos: useCallback(async () => {
+      if (!config) return []
+      const data = await listRepos(config.baseUrl)
+      return (data.repos ?? []).map((repo) => ({ id: repo.id, name: repo.name, path: repo.path }))
+    }, [config]),
+    getSessions: useCallback(
+      async (repoId?: string | null) => (config ? listSessions(config.baseUrl, repoId ?? activeRepoIdRef.current) : []),
+      [config],
+    ),
+    dispatchAppAction,
+    refresh: useCallback(() => {
+      if (config) void refreshSessions(config.baseUrl, activeRepoIdRef.current).catch(() => {})
+    }, [config, refreshSessions]),
+  })
+
   const runAction = useCallback(
     (a: PaletteAction) => {
-      if (a.id === "new") void handleNewThread()
+      if (a.id === "new") dispatchAppAction({ type: "new-session" })
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
       else if (a.id === "browser") setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open })
       else if (a.id === "factory") setFactoryOpen((open) => { if (!open) setBrowserOpen(false); return !open })
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
-      else if (a.id.startsWith("repo:")) void handleSelectRepo(a.id.slice(5))
-      else if (a.id.startsWith("session:")) handleSelectThread(a.id.slice(8))
+      else if (a.id.startsWith("repo:")) dispatchAppAction({ type: "select-repo", repoId: a.id.slice(5) })
+      else if (a.id.startsWith("session:")) dispatchAppAction({ type: "select-session", sessionId: a.id.slice(8) })
       else if (a.id.startsWith("model:")) { const model = uiModels.find((item) => item.id === a.id.slice(6)); if (model) void handleModelChange(model) }
       else if (a.id.startsWith("action:")) { const kind = a.id.slice(7); const map: Record<string, NonNullable<typeof dialog>> = { "Rename session": "rename", "Fork session": "fork", "Rewind to turn": "rewind", "Goal mode": "goal", "Ship it": "ship", "Usage & scoreboard": "stats" }; void openDialog(map[kind]!) }
     },
-    [handleNewThread, toggle, handleSelectRepo, handleSelectThread, uiModels, handleModelChange, openDialog, live],
+    [dispatchAppAction, toggle, uiModels, handleModelChange, openDialog, live],
   )
 
   // Global shortcuts.
@@ -1721,7 +1751,7 @@ export function App() {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
-            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}{themeToggle}</>}
+            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!live || connectionState === "booting" || connectionState === "offline"} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} />{themeToggle}</>}
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
@@ -1815,6 +1845,19 @@ export function App() {
             <ExternalLinkMenu />
           </section>
         </div>
+
+        {voice.visible && (
+          <VoiceHud
+            state={voice.state}
+            muted={voice.muted}
+            error={voice.error}
+            userLine={voice.userLine}
+            assistantLine={voice.assistantLine}
+            tools={voice.tools}
+            onToggleMute={() => voice.setMuted(!voice.muted)}
+            onEnd={voice.stop}
+          />
+        )}
 
         {/* One host for every in-app confirmation (lib/confirm.ts). */}
         <ConfirmHost />
