@@ -1,15 +1,9 @@
 import { Check, ExternalLink, Plus, X } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
-import {
-  addCustomProvider,
-  getProviderAuthStatus,
-  listProviders,
-  selectProvider,
-  startProviderLogin,
-} from "~/lib/configApi"
-import type { CustomProviderInput, LoginInitiation, ProviderInfo } from "~/lib/configApi"
-import { openExternal } from "~/lib/openExternal"
+import { useCallback, useState } from "react"
+import { addCustomProvider, listProviders, selectProvider } from "~/lib/configApi"
+import type { CustomProviderInput, ProviderInfo } from "~/lib/configApi"
 import { Button } from "../ui/button"
+import { useProviderLogin } from "./useProviderLogin"
 import {
   Badge,
   Card,
@@ -24,82 +18,19 @@ import {
   useAsync,
 } from "./common"
 
-interface LoginState {
-  provider: string
-  initiation: LoginInitiation | null
-  polling: boolean
-  error: string | null
-}
-
 export function ProvidersSection() {
   const providers = useAsync<ProviderInfo[]>(() => listProviders(), [])
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [login, setLogin] = useState<LoginState | null>(null)
   const [showCustom, setShowCustom] = useState(false)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
-
-  const stopPoll = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
-  }, [])
-
-  useEffect(() => () => stopPoll(), [stopPoll])
-
-  const beginPoll = useCallback(
-    (provider: string) => {
-      stopPoll()
-      let attempts = 0
-      pollRef.current = setInterval(async () => {
-        attempts += 1
-        try {
-          const status = await getProviderAuthStatus(provider)
-          if (status.ready) {
-            stopPoll()
-            setLogin(null)
-            providers.reload()
-          } else if (status.error) {
-            stopPoll()
-            setLogin((s) => (s && s.provider === provider ? { ...s, polling: false, error: status.error ?? "Login failed" } : s))
-          }
-        } catch {
-          /* keep polling; transient */
-        }
-        if (attempts > 90) {
-          stopPoll()
-          setLogin((s) =>
-            s && s.provider === provider ? { ...s, polling: false, error: "Login timed out. Try again." } : s,
-          )
-        }
-      }, 2000)
-    },
-    [providers, stopPoll],
-  )
+  const { login, startLogin, clearLogin } = useProviderLogin(providers.reload)
 
   const handleLogin = useCallback(
     async (provider: string) => {
       setActionError(null)
-      setLogin({ provider, initiation: null, polling: true, error: null })
-      try {
-        const initiation = await startProviderLogin(provider)
-        setLogin({ provider, initiation, polling: initiation.kind !== "ready", error: null })
-        if (initiation.kind === "ready") {
-          setLogin(null)
-          providers.reload()
-          return
-        }
-        if (initiation.kind === "url" && initiation.url) {
-          // Native app: hands off to the OS browser; browser dev: new tab.
-          openExternal(initiation.url)
-        }
-        beginPoll(provider)
-      } catch (err) {
-        setLogin({ provider, initiation: null, polling: false, error: (err as Error).message })
-      }
+      await startLogin(provider)
     },
-    [beginPoll, providers],
+    [startLogin],
   )
 
   const handleSelect = useCallback(
@@ -190,7 +121,7 @@ export function ProvidersSection() {
                       <button
                         type="button"
                         className="cursor-pointer text-muted-foreground hover:text-foreground"
-                        onClick={() => setLogin(null)}
+                        onClick={clearLogin}
                       >
                         <X className="size-3.5" />
                       </button>

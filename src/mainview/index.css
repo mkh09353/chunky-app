@@ -227,6 +227,69 @@
       radial-gradient(40% 40% at 85% 20%, color-mix(in oklch, var(--info) 10%, transparent), transparent 60%);
   }
 
+  /* ── Fullscreen onboarding surface ─────────────────────────────────────────
+     Vertical gradient + a 24px dot lattice on top of it. Both stops are derived
+     from theme tokens so light/dark stay in sync with the rest of the app. */
+  .chunky-onboarding-bg {
+    --onboarding-dot: color-mix(in oklch, var(--foreground) 9%, transparent);
+    --onboarding-top: color-mix(in oklch, var(--primary) 15%, var(--background));
+    --onboarding-bottom: color-mix(in oklch, var(--info) 12%, var(--background));
+    background-color: var(--background);
+    background-image:
+      radial-gradient(circle, var(--onboarding-dot) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--onboarding-top), var(--onboarding-bottom));
+    background-size:
+      24px 24px,
+      auto;
+  }
+  .dark .chunky-onboarding-bg {
+    --onboarding-dot: oklch(1 0 0 / 6%);
+    --onboarding-top: color-mix(in oklch, var(--primary) 13%, var(--background));
+    --onboarding-bottom: color-mix(in oklch, var(--info) 6%, var(--background));
+  }
+
+  /* Floor under the docked CTA stack: fades page content into the gradient's
+     bottom stop (inherits --onboarding-bottom from .chunky-onboarding-bg). */
+  .chunky-onboarding-scrim {
+    background-image: linear-gradient(
+      to top,
+      var(--onboarding-bottom, var(--background)) 40%,
+      transparent
+    );
+  }
+
+  /* Borderless "glow" card: a soft surface sitting in a large feathered halo.
+     The halo is a separate element (.chunky-glow-halo) placed behind the
+     surface, so no stacking-context tricks are needed. */
+  .chunky-glow-halo {
+    background: radial-gradient(
+      closest-side,
+      color-mix(in oklch, oklch(1 0 0) 50%, transparent),
+      transparent 100%
+    );
+    filter: blur(10px);
+  }
+  .dark .chunky-glow-halo {
+    background: radial-gradient(
+      closest-side,
+      color-mix(in oklch, var(--primary) 18%, transparent),
+      transparent 100%
+    );
+  }
+
+  .chunky-glow-surface {
+    background-color: color-mix(in oklch, oklch(1 0 0) 88%, transparent);
+    box-shadow:
+      0 1px 2px -1px hsl(var(--shadow-color) / 0.12),
+      0 24px 48px -32px hsl(var(--shadow-color) / 0.4);
+  }
+  .dark .chunky-glow-surface {
+    background-color: color-mix(in oklch, var(--card) 82%, transparent);
+    box-shadow:
+      inset 0 1px 0 0 oklch(1 0 0 / 0.05),
+      0 24px 48px -30px oklch(0 0 0 / 0.6);
+  }
+
   /* L-shaped window chrome: continuous sidebar + top strip surface. */
   .shell-chrome {
     background-color: var(--sidebar);

@@ -5,7 +5,11 @@ import { CommandPalette } from "./components/CommandPalette"
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
 import { Composer, type ModeOption } from "./components/Composer"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
-import { needsOnboarding, OnboardingWizard } from "./components/settings/OnboardingWizard"
+import {
+  devOnboardingRequested,
+  needsOnboarding,
+  OnboardingWizard,
+} from "./components/settings/OnboardingWizard"
 import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
 import { TodosPanel } from "./components/TodosPanel"
@@ -267,7 +271,9 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined)
-  const [onboardingOpen, setOnboardingOpen] = useState(false)
+  // Dev-only: `?onboarding=1` opens the flow immediately against fixture data
+  // (see devOnboardingRequested); always false in production builds.
+  const [onboardingOpen, setOnboardingOpen] = useState(devOnboardingRequested)
   const [browserOpen, setBrowserOpen] = useState(false)
   // The factory shares the content-panel side region with the browser pane.
   const [factoryOpen, setFactoryOpen] = useState(false)
@@ -1841,6 +1847,7 @@ export function App() {
           open={onboardingOpen}
           onOpenChange={setOnboardingOpen}
           onComplete={() => { void refreshModels() }}
+          onOpenProviderSettings={() => openSettingsAt("providers")}
         />
         {live && sessionId && (
           <SidekickPicker
