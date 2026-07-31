@@ -302,10 +302,17 @@ export function threadStatusFromSession(
   s: SessionSummary,
   liveStatus: "idle" | "running" | undefined,
   attached: boolean,
+  unread = false,
 ): ThreadStatus {
-  if (liveStatus === "running" || (attached && liveStatus === undefined && s.attached)) {
+  // The server's list-level `running` flag covers sessions we are NOT attached
+  // to; the live transcript status wins for the one we are.
+  if (liveStatus === "running" || (liveStatus === undefined && s.running)) {
     return { kind: "working", label: "" }
   }
+  void attached
+
+  // A run finished while this thread wasn't being viewed: show Done until read.
+  if (unread) return { kind: "done", unread: true }
   // Active (not settled) if recently touched or currently attached.
   const age = Date.now() - s.lastActivity
   if (age < 30 * 60_000 || s.attached) {
@@ -321,9 +328,10 @@ export function sessionToThread(
     liveStatus?: "idle" | "running"
     modelName?: string
     isActive?: boolean
+    unread?: boolean
   } = {},
 ): Thread {
-  const status = threadStatusFromSession(s, opts.isActive ? opts.liveStatus : undefined, !!s.attached)
+  const status = threadStatusFromSession(s, opts.isActive ? opts.liveStatus : undefined, !!s.attached, opts.unread)
   return {
     id: s.sessionId,
     projectId: `ws:${s.workspace}`,

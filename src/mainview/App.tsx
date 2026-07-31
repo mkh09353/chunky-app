@@ -210,6 +210,10 @@ export function App() {
   const [appMode, setAppMode] = useState<AppMode>("live")
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
+  // Sessions whose run finished while they weren't being viewed: their rows
+  // show "Done" with an unread dot until selected.
+  const [unreadDone, setUnreadDone] = useState<Set<string>>(new Set())
+  const wasRunning = useRef<Map<string, boolean>>(new Map())
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
   const [modelSel, setModelSel] = useState<ModelSelection | null>(null)
@@ -380,6 +384,7 @@ export function App() {
         liveStatus: s.sessionId === sessionId ? transcript.status : undefined,
         isActive: s.sessionId === sessionId,
         modelName: modelSelectionToUi(rowSel, modelRows).name,
+        unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
       })
       // Prefer repo identity over raw workspace path for project linkage.
       if (activeRepo) t.projectId = `repo:${activeRepo.id}`
@@ -395,6 +400,7 @@ export function App() {
     modelSel,
     modelRows,
     activeRepo,
+    unreadDone,
   ])
 
   const activeThread: Thread = useMemo(() => {
@@ -496,7 +502,7 @@ export function App() {
   )
 
   // ---- Live: attach SSE (abort on switch, reconnect with full replay reset) ----
-  const attachSession = useCallback(async (baseUrl: string, id: string) => {
+  const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean }) => {
     streamAbort.current?.abort()
     const ac = new AbortController()
     streamAbort.current = ac
@@ -512,7 +518,9 @@ export function App() {
       writeLastSession(repoForSession, id)
     }
     setTranscript(initialState)
-    setTranscriptLoading(true)
+    // A just-created session has no history to replay — don't flash the
+    // "Replaying session history…" state while its stream connects.
+    setTranscriptLoading(!opts?.fresh)
     setSendError(null)
     setConnError(null)
 
@@ -698,6 +706,39 @@ export function App() {
     return () => clearInterval(t)
   }, [config, appMode])
 
+  // Poll the session list so OTHER threads' Working/Done state stays fresh in
+  // the sidebar (only the attached session streams status events).
+  useEffect(() => {
+    if (!config || appMode !== "live" || connectionState !== "connected") return
+    const t = setInterval(() => {
+      void refreshSessions(config.baseUrl).catch(() => {})
+    }, 5_000)
+    return () => clearInterval(t)
+  }, [config, appMode, connectionState, refreshSessions])
+
+  // Track running -> not-running transitions of NON-active sessions to flag
+  // them unread; viewing a thread clears its flag.
+  useEffect(() => {
+    const next = new Map<string, boolean>()
+    const newlyDone: string[] = []
+    for (const s of sessions) {
+      const isRunning =
+        s.sessionId === sessionId ? transcript.status === "running" : !!s.running
+      next.set(s.sessionId, isRunning)
+      if (wasRunning.current.get(s.sessionId) && !isRunning && s.sessionId !== sessionId) {
+        newlyDone.push(s.sessionId)
+      }
+    }
+    wasRunning.current = next
+    setUnreadDone((prev) => {
+      let changed = false
+      const out = new Set(prev)
+      for (const id of newlyDone) if (!out.has(id)) { out.add(id); changed = true }
+      if (sessionId && out.has(sessionId)) { out.delete(sessionId); changed = true }
+      return changed ? out : prev
+    })
+  }, [sessions, sessionId, transcript.status])
+
   // Only ask a reachable live server once per app lifetime. Demo/offline mode
   // never touches onboarding endpoints.
   useEffect(() => {
@@ -822,8 +863,9 @@ export function App() {
     try {
       const created = await createSession(config.baseUrl, repoId)
       if (repoId != null && repoId !== activeRepoIdRef.current) return
-      await refreshSessions(config.baseUrl, repoId)
-      void attachSession(config.baseUrl, created.sessionId)
+      // Attach right away; the sidebar list can catch up in the background.
+      void attachSession(config.baseUrl, created.sessionId, { fresh: true })
+      void refreshSessions(config.baseUrl, repoId).catch(() => {})
     } catch (err) {
       setConnError((err as Error).message)
     }

@@ -21,6 +21,7 @@ function StatusPill({ status }: { status: ThreadStatus }) {
   if (status.kind === "done") {
     return (
       <span className="flex items-center gap-1 font-medium text-[10.5px] text-success">
+        {status.unread && <span className="size-1.5 rounded-full bg-primary" aria-label="unread" />}
         <Check className="size-3" />
         Done
       </span>

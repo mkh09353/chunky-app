@@ -311,7 +311,7 @@ export function ChatView({
       <Row gutterOn={gutterOn}>
         <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
           <Sparkles className="size-3 text-primary" />
-          {loading ? "Loading transcript…" : "Chunky started this thread"}
+          {loading ? "Loading transcript…" : "Start of thread"}
         </div>
       </Row>
 

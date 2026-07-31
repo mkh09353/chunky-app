@@ -80,7 +80,7 @@ export interface Message {
 }
 
 export type ThreadStatus =
-  | { kind: "done" }
+  | { kind: "done"; unread?: boolean }
   | { kind: "working"; label: string }
   | { kind: "idle"; ago: string }
 
