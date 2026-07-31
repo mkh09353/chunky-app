@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 import { useEffect, useState } from "react"
 import { cn } from "~/lib/cn"
+import { DRAG_REGION } from "~/lib/dragRegion"
 import { Dialog, DialogPopup } from "../ui/dialog"
 import { ScrollArea } from "../ui/scroll-area"
 import { AdvisorSection, ReviewerSection } from "./AgentConfigSection"
@@ -116,7 +117,14 @@ export function SettingsCenter({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="flex h-[82vh] max-h-[720px] w-[calc(100vw-2rem)] max-w-4xl flex-col overflow-hidden p-0">
-        <header className="flex shrink-0 items-center gap-2.5 border-border/70 border-b px-5 py-3.5">
+        {/* The modal backdrop covers the window's own drag strips, so the
+            settings header doubles as the drag handle while this is open. */}
+        <header
+          className={cn(
+            DRAG_REGION,
+            "flex shrink-0 items-center gap-2.5 border-border/70 border-b px-5 py-3.5",
+          )}
+        >
           <div className="flex size-7 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
             <Settings2 className="size-4 text-primary" />
           </div>

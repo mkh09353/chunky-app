@@ -18,6 +18,7 @@ import {
 } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import {
   gitBranches,
   gitCommit,
@@ -131,7 +132,7 @@ export function GitToolbar({ cwd }: { cwd?: string }) {
             <Button
               variant="outline"
               size="sm"
-              className="no-drag max-w-[13rem] gap-1.5"
+              className={cn(NO_DRAG_REGION, "max-w-[13rem] gap-1.5")}
               onClick={() => setOpen(true)}
               aria-label="Open git panel"
             />

@@ -9,6 +9,7 @@ import {
 } from "react"
 import type { Repo } from "~/lib/api"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import {
   nativeDirSearchAvailable,
   searchDirectories,
@@ -350,11 +351,17 @@ export function RepoTabs({
   }
 
   return (
-    <div ref={rootRef} className="no-drag relative flex min-w-0 flex-1 items-center gap-1.5">
+    // The row itself stays draggable (it sits in the window's titlebar strip);
+    // only the controls inside it opt out, so any slack around the tabs can
+    // still be used to move the window.
+    <div ref={rootRef} className="relative flex min-w-0 items-center gap-1.5">
       <div
         role="tablist"
         aria-label="Repositories"
-        className="flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className={cn(
+          NO_DRAG_REGION,
+          "flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        )}
       >
         {repos.map((r) => {
           const active = r.id === activeId
@@ -418,7 +425,9 @@ export function RepoTabs({
         })}
       </div>
 
-      <div className="relative shrink-0">
+      {/* Add button + its popover (folder search input, path field): every
+          control here needs clicks, so the whole subtree opts out of dragging. */}
+      <div className={cn(NO_DRAG_REGION, "relative shrink-0")}>
         <Button
           type="button"
           variant="ghost"

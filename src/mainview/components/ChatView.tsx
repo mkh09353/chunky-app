@@ -25,6 +25,7 @@ import { AgentCard } from "./AgentCard"
 import { LiveRunsProvider, type LiveRunsValue } from "./LiveRun"
 import { RunLinkProvider } from "./RunLink"
 import { cn } from "~/lib/cn"
+import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { buildTranscriptRows, type TranscriptRow } from "~/lib/mapTranscript"
 import { hasRuns, liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
 import { useRunClock } from "~/lib/useRunClock"
@@ -78,7 +79,12 @@ export function ChatTopBar({
     !!repos && !!onSelectRepo && !!onAddRepo && !!onRemoveRepo && repos.length >= 0
 
   return (
-    <header className="app-drag flex h-[52px] shrink-0 items-center gap-3 px-3 text-sidebar-foreground sm:px-4">
+    <header
+      className={cn(
+        DRAG_REGION,
+        "flex h-[52px] shrink-0 items-center gap-3 px-3 text-sidebar-foreground sm:px-4",
+      )}
+    >
       {showRepos ? (
         <RepoTabs
           repos={repos}
@@ -95,11 +101,15 @@ export function ChatTopBar({
           onViewCloneThread={onViewCloneThread}
           defaultCloneParent={defaultCloneParent}
         />
-      ) : (
-        <div className="min-w-0 flex-1" />
-      )}
+      ) : null}
 
-      <div className="no-drag flex shrink-0 items-center gap-1.5">
+      {/* The window's guaranteed drag handle. Repo tabs and the action cluster
+          both opt out of dragging, so this spacer is what stays grabbable at
+          every window width — it grows into the free space and never shrinks
+          below a usable strip, and it never hosts controls. */}
+      <div aria-hidden className="h-full min-w-12 flex-1" />
+
+      <div className={cn(NO_DRAG_REGION, "flex shrink-0 items-center gap-1.5")}>
         {headerRight}
         {onToggleTerminal && (
           <Tooltip>
@@ -108,7 +118,7 @@ export function ChatTopBar({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className={cn("no-drag", terminalOpen && "bg-accent text-foreground")}
+                  className={cn(NO_DRAG_REGION, terminalOpen && "bg-accent text-foreground")}
                   onClick={onToggleTerminal}
                   aria-label="Toggle terminal drawer"
                 />

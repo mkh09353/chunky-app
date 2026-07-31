@@ -314,10 +314,15 @@
       0 0 0 1px color-mix(in oklch, var(--foreground) 8%, transparent);
   }
 
-  .app-drag {
+  /* Drag regions. WKWebView ignores -webkit-app-region entirely — Electrobun's
+     preload shim emulates it from the class names below — but Chromium-based
+     renderers honour the property, so declare both. See lib/dragRegion.ts. */
+  .app-drag,
+  .electrobun-webkit-app-region-drag {
     -webkit-app-region: drag;
   }
-  .no-drag {
+  .no-drag,
+  .electrobun-webkit-app-region-no-drag {
     -webkit-app-region: no-drag;
   }
 

@@ -9,6 +9,7 @@ import {
 } from "~/lib/configApi"
 import type { OnboardingProvider, OnboardingResponse, SuggestedMode } from "~/lib/configApi"
 import { cn } from "~/lib/cn"
+import { DRAG_REGION } from "~/lib/dragRegion"
 import { Button } from "../ui/button"
 import { InlineError, Loading, Spinner, useAsync } from "./common"
 import { ProviderMark } from "./ProviderMark"
@@ -172,6 +173,13 @@ export function OnboardingWizard({
       }}
       className="chunky-onboarding-bg fixed inset-0 z-100 overflow-y-auto text-foreground"
     >
+      {/* This surface covers the whole window, including the app's normal drag
+          strips, so it carries its own: a fixed band across the top (clear of
+          every control, which starts at pt-28) that keeps the window movable. */}
+      <div
+        aria-hidden
+        className={cn(DRAG_REGION, "fixed inset-x-0 top-0 z-30 h-14")}
+      />
       <OnboardingChrome step={step} />
 
       <div className="flex min-h-full w-full flex-col items-center px-6 pt-28 pb-52">

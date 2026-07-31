@@ -13,6 +13,7 @@ import { useMemo, useState } from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { cn } from "~/lib/cn"
+import { DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
@@ -192,8 +193,14 @@ export function Sidebar({
       {/* Starfield nebula behind the header */}
       <div className="sidebar-starfield pointer-events-none absolute inset-x-0 top-0 h-40" />
 
-      {/* Brand / drag region */}
-      <div className="app-drag relative z-10 flex h-[52px] items-center gap-2.5 pr-3 pl-[78px]">
+      {/* Brand strip over the macOS traffic lights — the left half of the
+          window's drag region, present in every window size and state. */}
+      <div
+        className={cn(
+          DRAG_REGION,
+          "relative z-10 flex h-[52px] items-center gap-2.5 pr-3 pl-[78px]",
+        )}
+      >
         <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-primary/20 bg-primary/10 shadow-xs shadow-primary/20">
           <img
             src="/chunky-mark.svg"
@@ -217,13 +224,13 @@ export function Sidebar({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            className="no-drag h-9 w-full rounded-lg border border-border bg-background/50 pr-12 pl-8 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-ring/30 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+            className="h-9 w-full rounded-lg border border-border bg-background/50 pr-12 pl-8 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-ring/30 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
           />
           <button
             type="button"
             onClick={onOpenPalette}
             aria-label="Open command palette"
-            className="no-drag -translate-y-1/2 absolute top-1/2 right-2 cursor-pointer outline-none"
+            className="-translate-y-1/2 absolute top-1/2 right-2 cursor-pointer outline-none"
           >
             <Kbd className="bg-transparent transition-colors hover:border-ring/40 hover:text-foreground">⌘K</Kbd>
           </button>
@@ -234,7 +241,7 @@ export function Sidebar({
               <button
                 type="button"
                 onClick={onNewThread}
-                className="no-drag flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-border bg-background/50 text-muted-foreground outline-none transition-colors hover:border-ring/40 hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+                className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-border bg-background/50 text-muted-foreground outline-none transition-colors hover:border-ring/40 hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
               />
             }
           >
