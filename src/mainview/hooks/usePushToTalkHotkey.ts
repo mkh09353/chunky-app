@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react"
-import { isPttKey, isTypingTarget, PTT_CODE, type PttEvent } from "~/lib/pushToTalk"
+import { DEFAULT_PTT_CODE, isPttKey, isTypingTarget, type PttEvent } from "~/lib/pushToTalk"
 
 export interface PushToTalkHotkeyOptions {
   /** Read at event time: whether a voice session is already running. */
@@ -8,6 +8,8 @@ export interface PushToTalkHotkeyOptions {
   onStart: () => void
   /** Feed the push-to-talk state machine. */
   dispatch: (event: PttEvent) => void
+  /** Configured KeyboardEvent.code; changes take effect immediately. */
+  code?: string
 }
 
 /**
@@ -17,9 +19,16 @@ export interface PushToTalkHotkeyOptions {
  * modal guard, auto-repeat, and the press that only starts a session — can be
  * driven directly in a browser harness.
  */
-export function usePushToTalkHotkey({ isActive, onStart, dispatch }: PushToTalkHotkeyOptions): void {
-  const ref = useRef({ isActive, onStart, dispatch })
-  ref.current = { isActive, onStart, dispatch }
+export function usePushToTalkHotkey({
+  isActive,
+  onStart,
+  dispatch,
+  code = DEFAULT_PTT_CODE,
+}: PushToTalkHotkeyOptions): void {
+  // Read through a ref so rebinding the key never re-subscribes the listeners
+  // (a re-subscribe mid-press would lose the pending keyup).
+  const ref = useRef({ isActive, onStart, dispatch, code })
+  ref.current = { isActive, onStart, dispatch, code }
 
   useEffect(() => {
     // The press that starts a session must not also open the microphone, so
@@ -27,7 +36,7 @@ export function usePushToTalkHotkey({ isActive, onStart, dispatch }: PushToTalkH
     let suppressKeyup = false
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!isPttKey(event)) return
+      if (!isPttKey(event, ref.current.code)) return
       if (isTypingTarget(event.target)) return
       // A modal owns the keyboard while it is open (palette, settings, confirm).
       if (document.querySelector('[role="dialog"],[role="alertdialog"]')) return
@@ -41,7 +50,7 @@ export function usePushToTalkHotkey({ isActive, onStart, dispatch }: PushToTalkH
     }
 
     const onKeyUp = (event: KeyboardEvent) => {
-      if (event.code !== PTT_CODE) return
+      if (event.code !== ref.current.code) return
       if (suppressKeyup) {
         suppressKeyup = false
         return

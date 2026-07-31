@@ -73,6 +73,7 @@ export function VoiceHud({
   muted,
   mode,
   holding,
+  hotkeyLabel,
   error,
   userLine,
   assistantLine,
@@ -85,6 +86,8 @@ export function VoiceHud({
   muted: boolean
   mode: PttMode
   holding: boolean
+  /** Display form of the configured hotkey, e.g. "`" or "F8". */
+  hotkeyLabel: string
   error: string | null
   userLine: VoiceLine | null
   assistantLine: VoiceLine | null
@@ -180,12 +183,12 @@ export function VoiceHud({
                     muted ? "border-current bg-transparent" : "border-current bg-current",
                   )}
                 />
-                {openMic ? "Open mic" : holding ? "Talking" : "Hold ` to talk"}
+                {openMic ? "Open mic" : holding ? "Talking" : `Hold ${hotkeyLabel} to talk`}
               </TooltipTrigger>
               <TooltipPopup>
                 {openMic
-                  ? "Open mic: tap ` to go back to push to talk"
-                  : "Hold ` or the mic button to talk. Double-tap ` for open mic."}
+                  ? `Open mic: tap ${hotkeyLabel} to go back to push to talk`
+                  : `Hold ${hotkeyLabel} or the mic button to talk. Double-tap ${hotkeyLabel} for open mic.`}
               </TooltipPopup>
             </Tooltip>
           </div>
@@ -203,7 +206,7 @@ export function VoiceHud({
             {state === "connecting"
               ? "Opening the voice channel…"
               : muted
-                ? "Hold the backquote key to talk."
+                ? `Hold ${hotkeyLabel} to talk.`
                 : "Say what you want done."}
           </p>
         )}

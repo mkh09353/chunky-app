@@ -4,6 +4,7 @@ import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
 import { VoiceButton } from "./components/VoiceButton"
 import { VoiceHud } from "./components/VoiceHud"
+import { codeToLabel } from "./lib/pushToTalk"
 import { useVoiceAgent } from "./hooks/useVoiceAgent"
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
 import { Composer, type ModeOption } from "./components/Composer"
@@ -1860,6 +1861,7 @@ export function App() {
             tools={voice.tools}
             mode={voice.mode}
             holding={voice.holding}
+            hotkeyLabel={codeToLabel(voice.hotkeyCode)}
             onToggleMode={voice.toggleMode}
             onHold={voice.setHolding}
             onEnd={voice.stop}

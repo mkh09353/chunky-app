@@ -1,6 +1,7 @@
 import type { SessionSummary } from "@chunky/protocol"
 import { useCallback, useEffect, useReducer, useRef, useState } from "react"
 import { initialPttState, isTransmitting, pttReducer, type PttMode } from "~/lib/pushToTalk"
+import { usePttHotkeyCode } from "./usePttHotkeyCode"
 import { usePushToTalkHotkey } from "./usePushToTalkHotkey"
 import { VoiceAgent, voiceHasApiKey, voiceSetApiKey, type VoiceEvents, type VoiceState, type VoiceToolContext } from "~/lib/voice"
 
@@ -43,6 +44,8 @@ export interface VoiceAgentController {
   muted: boolean
   /** "ptt" = muted until held; "open" = continuously live. */
   mode: PttMode
+  /** The configured hotkey's KeyboardEvent.code (Settings -> Voice). */
+  hotkeyCode: string
   /** The hotkey or the HUD pad is held down right now. */
   holding: boolean
   error: string | null
@@ -247,10 +250,12 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
 
   // Global push-to-talk hotkey. Registered even with no session so the key can
   // start one; the guards keep it out of the way of ordinary typing.
+  const hotkeyCode = usePttHotkeyCode()
   usePushToTalkHotkey({
     isActive: useCallback(() => activeRef.current, []),
     onStart: start,
     dispatch: dispatchPtt,
+    code: hotkeyCode,
   })
 
   const submitApiKey = useCallback(
@@ -282,6 +287,7 @@ export function useVoiceAgent(options: UseVoiceAgentOptions): VoiceAgentControll
     active,
     muted: !transmitting,
     mode: ptt.mode,
+    hotkeyCode,
     holding: ptt.holding,
     error,
     userLine,
