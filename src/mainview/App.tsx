@@ -109,6 +109,7 @@ import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
 import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
 import { initialState, isStreaming, isTreeIdle, reduce, type TranscriptState } from "./lib/transcript"
+import { SessionCache } from "./lib/sessionCache"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
@@ -326,13 +327,22 @@ export function App() {
   const selfAppliedMode = useRef<{ name: string; at: number } | null>(null)
   const settleTimer = useRef<number | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const transcriptRef = useRef<TranscriptState>(initialState)
+  const goalRef = useRef<GoalSnapshot | null>(null)
   const activeRepoIdRef = useRef<string | null>(null)
   const repoListGen = useRef(0)
   const attachGen = useRef(0)
+  // Session lists are populated by both the selected-repo refresh and the
+  // existing all-repo poll. Transcript projections are bounded because a
+  // lengthy history can be much larger than a sidebar row.
+  const repoSessionCache = useRef(new Map<string | null, SessionSummary[]>())
+  const sessionCache = useRef(new SessionCache(20))
   const onboardingChecked = useRef(false)
   const lastSessionByRepo = useRef<Record<string, string>>(readLastSessions())
 
   sessionIdRef.current = sessionId
+  transcriptRef.current = transcript
+  goalRef.current = goal
   activeRepoIdRef.current = activeRepoId
 
   const live = appMode === "live"
@@ -533,6 +543,8 @@ export function App() {
       const gen = ++repoListGen.current
       const list = await listSessions(baseUrl, repoId)
       if (gen !== repoListGen.current) return list
+      repoSessionCache.current.set(repoId, list)
+      sessionCache.current.reconcileRepo(repoId, new Set(list.map((session) => session.sessionId)))
       // Only apply if still viewing this repo (or boot with matching ref).
       if (repoId != null && repoId !== activeRepoIdRef.current) return list
       setSessions(list)
@@ -541,8 +553,17 @@ export function App() {
     [],
   )
 
-  // ---- Live: attach SSE (abort on switch, reconnect with full replay reset) ----
+  // ---- Live: attach SSE (abort on switch, reconcile cached projection with full replay) ----
   const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean }) => {
+    const previousId = sessionIdRef.current
+    if (previousId) {
+      sessionCache.current.set(previousId, {
+        transcript: transcriptRef.current,
+        goal: goalRef.current,
+        repoId: activeRepoIdRef.current,
+        events: sessionCache.current.get(previousId)?.events ?? [],
+      })
+    }
     streamAbort.current?.abort()
     const ac = new AbortController()
     streamAbort.current = ac
@@ -551,16 +572,34 @@ export function App() {
     setSessionId(id)
     // Pins are server state: read this session's effective executor on attach.
     void hydrateSessionModel(baseUrl, id)
-    void getGoal(baseUrl, id).then(setGoalState).catch(() => setGoalState(null))
+    void getGoal(baseUrl, id).then((nextGoal) => {
+      if (gen !== attachGen.current) return
+      goalRef.current = nextGoal
+      setGoalState(nextGoal)
+      sessionCache.current.update(id, { goal: nextGoal })
+    }).catch(() => {})
     const repoForSession = activeRepoIdRef.current
     if (repoForSession) {
       lastSessionByRepo.current[repoForSession] = id
       writeLastSession(repoForSession, id)
     }
-    setTranscript(initialState)
+    const cached = sessionCache.current.get(id)
+    let replayIndex = 0
+    const rememberEvent = (event: Parameters<typeof reduce>[1], nextTranscript = transcriptRef.current) => {
+      const prior = sessionCache.current.get(id)
+      sessionCache.current.set(id, {
+        transcript: nextTranscript,
+        goal: goalRef.current,
+        repoId: activeRepoIdRef.current,
+        events: [...(prior?.events ?? cached?.events ?? []), event],
+      })
+    }
+    setTranscript(cached?.transcript ?? initialState)
+    setGoalState(cached?.goal ?? null)
+    if (!cached) sessionCache.current.set(id, { transcript: initialState, goal: null, repoId: activeRepoIdRef.current, events: [] })
     // A just-created session has no history to replay — don't flash the
     // "Replaying session history…" state while its stream connects.
-    setTranscriptLoading(!opts?.fresh)
+    setTranscriptLoading(!opts?.fresh && !cached)
     setSendError(null)
     setConnError(null)
 
@@ -579,22 +618,39 @@ export function App() {
     const onEvent = (ev: Parameters<typeof reduce>[1]) => {
       if (gen !== attachGen.current) return
       attempt = 0
+      // The server always sends history from event zero and exposes no replay
+      // boundary/cursor. Silently discard the cached persisted prefix; the
+      // first new event is reduced onto the projection already on screen.
+      if (cached && replayIndex < cached.events.length && JSON.stringify(ev) === JSON.stringify(cached.events[replayIndex])) {
+        replayIndex += 1
+        return
+      }
       if (ev.type === "session.rewound") {
+        sessionCache.current.delete(id)
         void attachSession(baseUrl, id)
         return
       }
       // Live-only broadcast (never persisted, never a transcript item): another
       // window/the TUI applied a mode, so re-read the model + alias state here.
       if (ev.type === "mode.applied") {
+        rememberEvent(ev)
         modeAppliedRef.current(ev.name, ev.spec)
         return
       }
       // The agent asking for our browser pane. Also live-only: claimed here and
       // never reduced, so it cannot become a rendered transcript item. Only
       // http(s) actually opens the pane — openInAppBrowser owns that rule.
-      if (consumeAppOpenUrl(ev)) return
-      setTranscript((s) => reduce(s, ev))
-      if (ev.type === "goal.update") setGoalState(ev.goal)
+      if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
+      setTranscript((s) => {
+        const next = reduce(s, ev)
+        rememberEvent(ev, next)
+        return next
+      })
+      if (ev.type === "goal.update") {
+        goalRef.current = ev.goal
+        setGoalState(ev.goal)
+        sessionCache.current.update(id, { goal: ev.goal })
+      }
       // Surface title updates from session list by refreshing occasionally on status idle.
       if (ev.type === "session.status" && ev.status === "idle") {
         void refreshSessions(baseUrl, activeRepoIdRef.current).catch(() => {})
@@ -622,9 +678,11 @@ export function App() {
         }
       }
       if (ac.signal.aborted || gen !== attachGen.current) return
-      // Full replay on reattach — reset projection to avoid duplicate events.
-      setTranscript(initialState)
-      setTranscriptLoading(true)
+      // The protocol has no since/offset cursor: a new stream always starts at
+      // history event zero. Keep the current cached projection visible and
+      // discard its matching persisted prefix on the next connection.
+      setTranscriptLoading(false)
+      replayIndex = 0
     }
   }, [refreshSessions, hydrateSessionModel])
 
@@ -758,6 +816,8 @@ export function App() {
           try {
             const list = await listSessions(config.baseUrl, repo.id)
             if (appMode !== "live" || connectionState !== "connected") return null
+            repoSessionCache.current.set(repo.id, list)
+            sessionCache.current.reconcileRepo(repo.id, new Set(list.map((session) => session.sessionId)))
 
             const now = Date.now()
             let completed = false
@@ -994,13 +1054,22 @@ export function App() {
       }
       // Drop current stream before loading the other repo's threads.
       streamAbort.current?.abort()
-      setSessions([])
+      const cached = repoSessionCache.current.get(id)
+      setSessions(cached ?? [])
       setSessionId(null)
       setTranscript(initialState)
-      setTranscriptLoading(true)
-      await openRepoThreads(config.baseUrl, id)
+      setTranscriptLoading(!cached)
+      // Pick from cached rows now; fetch/reconcile happens in the background.
+      const remembered = lastSessionByRepo.current[id]
+      const pick = (remembered && cached?.find((s) => s.sessionId === remembered)?.sessionId) || cached?.[0]?.sessionId
+      if (pick) {
+        void attachSession(config.baseUrl, pick)
+        void refreshSessions(config.baseUrl, id).catch(() => {})
+      } else {
+        void openRepoThreads(config.baseUrl, id)
+      }
     },
-    [config, openRepoThreads],
+    [config, openRepoThreads, attachSession, refreshSessions],
   )
 
   const handleAddRepo = useCallback(
@@ -1321,7 +1390,7 @@ export function App() {
     if (!config || !sessionId || !dialog) return
     try {
       if (dialog === "rename") { await renameSession(config.baseUrl, sessionId, dialogText.trim()); await refreshSessions(config.baseUrl); }
-      if (dialog === "fork") { const fork = await forkSession(config.baseUrl, sessionId, { worktree: forkWorktree, directive: dialogText.trim() || undefined }); setNotice(`Forked a new session${fork.worktree ? ` in ${fork.worktree.branch}` : ""}.`); await refreshSessions(config.baseUrl) }
+      if (dialog === "fork") { sessionCache.current.delete(sessionId); const fork = await forkSession(config.baseUrl, sessionId, { worktree: forkWorktree, directive: dialogText.trim() || undefined }); setNotice(`Forked a new session${fork.worktree ? ` in ${fork.worktree.branch}` : ""}.`); await refreshSessions(config.baseUrl) }
       if (dialog === "rewind" && selectedRewind) { await rewindSession(config.baseUrl, sessionId, selectedRewind.turn); setNotice(`Restoring turn ${selectedRewind.turn}…`) }
       if (dialog === "goal") { const maxTurns = Number(goalTurns); setGoalState(await setGoal(config.baseUrl, sessionId, { objective: dialogText.trim(), mode: goalWorkflows ? "workflows" : "direct", ...(Number.isFinite(maxTurns) && maxTurns > 0 ? { maxTurns } : {}) })) }
       if (dialog === "ship") { await shipSession(config.baseUrl, sessionId, dialogText.trim() || undefined); setNotice("Ship it started — Chunky is preparing a handoff session.") }
