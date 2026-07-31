@@ -1,5 +1,18 @@
 import type { AgentEvent, GoalSnapshot } from "@chunky/protocol"
-import type { TranscriptState } from "./transcript"
+import { initialState, reduce, type TranscriptState } from "./transcript"
+
+/** These are deliberately sent live-only by the server and never appear in history. */
+export function isPersistedSessionEvent(event: AgentEvent): boolean {
+  return event.type !== "tool.progress" &&
+    event.type !== "session.rewound" &&
+    event.type !== "background.changed" &&
+    event.type !== "mode.applied" &&
+    event.type !== "app.open_url"
+}
+
+export function rebuildTranscript(events: readonly AgentEvent[]): TranscriptState {
+  return events.reduce(reduce, initialState)
+}
 
 export interface CachedSession {
   transcript: TranscriptState
@@ -32,6 +45,21 @@ export class SessionCache {
   update(sessionId: string, update: Partial<CachedSession>): void {
     const current = this.get(sessionId)
     if (current) this.set(sessionId, { ...current, ...update })
+  }
+
+  /** Updates the projection and appends only server-persisted replay events. */
+  remember(sessionId: string, transcript: TranscriptState, goal: GoalSnapshot | null, repoId: string | null, event: AgentEvent): void {
+    const entry = this.get(sessionId)
+    if (!entry) {
+      this.set(sessionId, { transcript, goal, repoId, events: isPersistedSessionEvent(event) ? [event] : [] })
+      return
+    }
+    entry.transcript = transcript
+    entry.goal = goal
+    entry.repoId = repoId
+    // This cache is ref-held rather than React state. Mutating the retained
+    // prefix avoids copying every prior event on every streaming delta.
+    if (isPersistedSessionEvent(event)) entry.events.push(event)
   }
 
   delete(sessionId: string): void {

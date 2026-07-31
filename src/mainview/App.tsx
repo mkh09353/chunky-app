@@ -109,7 +109,7 @@ import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
 import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
 import { initialState, isStreaming, isTreeIdle, reduce, type TranscriptState } from "./lib/transcript"
-import { SessionCache } from "./lib/sessionCache"
+import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "./lib/sessionCache"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
@@ -585,14 +585,34 @@ export function App() {
     }
     const cached = sessionCache.current.get(id)
     let replayIndex = 0
-    const rememberEvent = (event: Parameters<typeof reduce>[1], nextTranscript = transcriptRef.current) => {
-      const prior = sessionCache.current.get(id)
+    let replayMatched = !cached
+    let shadowEvents: Parameters<typeof reduce>[1][] | null = null
+    let shadowSettleTimer: number | null = null
+    const clearShadowSettle = () => {
+      if (shadowSettleTimer != null) window.clearTimeout(shadowSettleTimer)
+      shadowSettleTimer = null
+    }
+    const finishShadowReplay = () => {
+      clearShadowSettle()
+      if (!shadowEvents || gen !== attachGen.current) return
+      const rebuilt = rebuildTranscript(shadowEvents)
+      const rebuiltEvents = shadowEvents.filter(isPersistedSessionEvent)
+      shadowEvents = null
+      replayMatched = true
+      setTranscript(rebuilt)
       sessionCache.current.set(id, {
-        transcript: nextTranscript,
+        transcript: rebuilt,
         goal: goalRef.current,
         repoId: activeRepoIdRef.current,
-        events: [...(prior?.events ?? cached?.events ?? []), event],
+        events: rebuiltEvents,
       })
+    }
+    const scheduleShadowSettle = () => {
+      clearShadowSettle()
+      shadowSettleTimer = window.setTimeout(finishShadowReplay, REPLAY_SETTLE_MS)
+    }
+    const rememberEvent = (event: Parameters<typeof reduce>[1], nextTranscript = transcriptRef.current) => {
+      sessionCache.current.remember(id, nextTranscript, goalRef.current, activeRepoIdRef.current, event)
     }
     setTranscript(cached?.transcript ?? initialState)
     setGoalState(cached?.goal ?? null)
@@ -623,24 +643,45 @@ export function App() {
       // first new event is reduced onto the projection already on screen.
       if (cached && replayIndex < cached.events.length && JSON.stringify(ev) === JSON.stringify(cached.events[replayIndex])) {
         replayIndex += 1
+        if (replayIndex === cached.events.length) replayMatched = true
         return
       }
-      if (ev.type === "session.rewound") {
-        sessionCache.current.delete(id)
-        void attachSession(baseUrl, id)
+      // Any prefix disagreement means the cache cannot safely be extended. Do
+      // a complete projection rebuild off-screen, retaining the old transcript
+      // until the replay burst settles, then swap once without duplicates.
+      if (cached && !replayMatched && !shadowEvents) shadowEvents = cached.events.slice(0, replayIndex)
+      if (shadowEvents) {
+        shadowEvents.push(ev)
+        scheduleShadowSettle()
+        return
+      }
+      // These arrive only on the live stream, never in Store.history. They
+      // must update the visible/cache projection but must not contaminate a
+      // shadow rebuild of persisted history.
+      if (!isPersistedSessionEvent(ev)) {
+        if (ev.type === "session.rewound") {
+          sessionCache.current.delete(id)
+          void attachSession(baseUrl, id)
+          return
+        }
+        if (ev.type === "mode.applied") {
+          rememberEvent(ev)
+          modeAppliedRef.current(ev.name, ev.spec)
+          return
+        }
+        if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
+        setTranscript((s) => {
+          const next = reduce(s, ev)
+          rememberEvent(ev, next)
+          return next
+        })
         return
       }
       // Live-only broadcast (never persisted, never a transcript item): another
       // window/the TUI applied a mode, so re-read the model + alias state here.
-      if (ev.type === "mode.applied") {
-        rememberEvent(ev)
-        modeAppliedRef.current(ev.name, ev.spec)
-        return
-      }
       // The agent asking for our browser pane. Also live-only: claimed here and
       // never reduced, so it cannot become a rendered transcript item. Only
       // http(s) actually opens the pane — openInAppBrowser owns that rule.
-      if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
       setTranscript((s) => {
         const next = reduce(s, ev)
         rememberEvent(ev, next)
@@ -663,6 +704,7 @@ export function App() {
         setConnectionState(attempt === 0 ? "connecting" : "reconnecting")
         await openEventStream(baseUrl, id, onEvent, ac.signal, onOpen)
         if (ac.signal.aborted || gen !== attachGen.current) return
+        finishShadowReplay()
         setConnectionState("reconnecting")
         attempt += 1
         await sleep(reconnectDelay(attempt - 1), ac.signal)
@@ -683,6 +725,8 @@ export function App() {
       // discard its matching persisted prefix on the next connection.
       setTranscriptLoading(false)
       replayIndex = 0
+      replayMatched = !cached
+      shadowEvents = null
     }
   }, [refreshSessions, hydrateSessionModel])
 
