@@ -108,7 +108,7 @@ import {
 import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
 import type { MessageDelivery } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
-import { initialState, isStreaming, reduce, type TranscriptState } from "./lib/transcript"
+import { initialState, isStreaming, isTreeIdle, reduce, type TranscriptState } from "./lib/transcript"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
@@ -408,7 +408,7 @@ export function App() {
       // Each row labels itself with ITS OWN pinned model when it has one.
       const rowSel = sessionModelSel[s.sessionId] ?? modelSel
       const t = sessionToThread(s, {
-        liveStatus: s.sessionId === sessionId ? transcript.status : undefined,
+        liveBusy: s.sessionId === sessionId ? !isTreeIdle(transcript) : undefined,
         isActive: s.sessionId === sessionId,
         modelName: modelSelectionToUi(rowSel, modelRows).name,
         unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
@@ -765,14 +765,14 @@ export function App() {
             for (const session of list) {
               const key = `${repo.id}:${session.sessionId}`
               const wasRunning = backgroundWasRunning.current.get(key)
-              if (session.running) {
+              if (session.busy ?? session.running) {
                 if (!wasRunning) backgroundRunningSince.current.set(key, now)
               } else if (wasRunning) {
                 const since = backgroundRunningSince.current.get(key)
                 backgroundRunningSince.current.delete(key)
                 if (since != null && now - since >= MIN_COMPLETION_NOTIFY_MS) completed = true
               }
-              next.set(key, !!session.running)
+              next.set(key, !!(session.busy ?? session.running))
             }
             backgroundWasRunning.current = next
             return completed ? repo.id : null
@@ -814,7 +814,7 @@ export function App() {
     const now = Date.now()
     for (const s of sessions) {
       const isRunning =
-        s.sessionId === sessionId ? transcript.status === "running" : !!s.running
+        s.sessionId === sessionId ? !isTreeIdle(transcript) : !!(s.busy ?? s.running)
       const previous = wasRunning.current.get(s.sessionId)
       if (isRunning && !previous) runningSince.current.set(s.sessionId, now)
       if (previous && !isRunning) {

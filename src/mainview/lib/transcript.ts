@@ -292,24 +292,9 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
   switch (ev.type) {
     case "session.status": {
       const main = state.threads[MAIN]!
-      // A settled session cannot have live delegates: sweep any run whose
-      // thread.status idle we never saw (dropped frame, reattach, crash).
-      const runs =
-        ev.status === "idle" && state.runs.some((r) => r.status === "running")
-          ? state.runs.map((r) =>
-              r.status === "running"
-                ? {
-                    ...r,
-                    status: "done" as const,
-                    itemEnd: state.threads[r.threadId]?.items.length ?? r.itemStart,
-                  }
-                : r,
-            )
-          : state.runs
       return {
         ...state,
         status: ev.status,
-        runs,
         threads: { ...state.threads, [MAIN]: { ...main, status: ev.status } },
       }
     }
@@ -492,6 +477,13 @@ export function mainItems(state: TranscriptState): Item[] {
 
 export function hasTranscript(state: TranscriptState): boolean {
   return (state.threads[MAIN]?.items.length ?? 0) > 0 || state.order.length > 1
+}
+
+/** Background tasks/monitors intentionally do not keep a session tree busy. */
+export function isTreeIdle(state: TranscriptState): boolean {
+  return state.status === "idle" && Object.values(state.threads).every(
+    (thread) => thread.id === MAIN || thread.status === "idle",
+  )
 }
 
 /** True when any assistant/reasoning/tool item is still open. */

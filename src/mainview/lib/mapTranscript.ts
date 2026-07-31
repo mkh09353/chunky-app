@@ -301,13 +301,13 @@ export function projectFromWorkspace(workspace: string): Project {
 
 export function threadStatusFromSession(
   s: SessionSummary,
-  liveStatus: "idle" | "running" | undefined,
+  liveBusy: boolean | undefined,
   attached: boolean,
   unread = false,
 ): ThreadStatus {
-  // The server's list-level `running` flag covers sessions we are NOT attached
-  // to; the live transcript status wins for the one we are.
-  if (liveStatus === "running" || (liveStatus === undefined && s.running)) {
+  // The attached transcript knows the whole thread tree. Other sessions use
+  // the server's aggregate `busy` flag, falling back for older servers.
+  if (liveBusy === true || (liveBusy === undefined && (s.busy ?? s.running))) {
     return { kind: "working", label: "" }
   }
   void attached
@@ -326,13 +326,13 @@ export function sessionToThread(
   s: SessionSummary,
   opts: {
     messages?: Message[]
-    liveStatus?: "idle" | "running"
+    liveBusy?: boolean
     modelName?: string
     isActive?: boolean
     unread?: boolean
   } = {},
 ): Thread {
-  const status = threadStatusFromSession(s, opts.isActive ? opts.liveStatus : undefined, !!s.attached, opts.unread)
+  const status = threadStatusFromSession(s, opts.isActive ? opts.liveBusy : undefined, !!s.attached, opts.unread)
   return {
     id: s.sessionId,
     projectId: `ws:${s.workspace}`,
