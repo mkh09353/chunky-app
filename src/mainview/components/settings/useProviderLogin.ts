@@ -3,7 +3,7 @@
 // Used by both the Settings → Providers section and the onboarding wizard so
 // the polling/timeout semantics stay in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react"
-import { getProviderAuthStatus, startProviderLogin } from "~/lib/configApi"
+import { getProviderAuthStatus, startProviderLogin, testProviderAuth } from "~/lib/configApi"
 import type { LoginInitiation } from "~/lib/configApi"
 import { openExternal } from "~/lib/openExternal"
 
@@ -12,6 +12,23 @@ export interface ProviderLoginState {
   initiation: LoginInitiation | null
   polling: boolean
   error: string | null
+  /** This run is a re-authentication of a provider that already has a credential. */
+  reauth: boolean
+  /**
+   * Re-auth only: the server short-circuited with kind "ready" because a
+   * credential is already stored, so no new login actually started. The user
+   * has to disconnect first to get a real login flow.
+   */
+  alreadyReady: boolean
+}
+
+export interface StartLoginOptions {
+  /**
+   * Re-authenticate a provider that already reports ready. Completion is then
+   * judged by a real credential test rather than the `ready` flag, which is
+   * already true and would otherwise "succeed" on the first poll.
+   */
+  reauth?: boolean
 }
 
 /** Poll cadence and cap: 90 × 2s ≈ 3 minutes before we give up. */
@@ -22,7 +39,7 @@ export interface ProviderLoginController {
   /** The single in-flight (or last failed) login, or null when idle. */
   login: ProviderLoginState | null
   /** Begin a login for `provider`; safe to call while another one is pending. */
-  startLogin: (provider: string) => Promise<void>
+  startLogin: (provider: string, options?: StartLoginOptions) => Promise<void>
   /** Dismiss the current login state (e.g. after showing an error). */
   clearLogin: () => void
   /** True while we're waiting on authorization for that provider. */
@@ -51,13 +68,18 @@ export function useProviderLogin(onReady?: () => void): ProviderLoginController 
   useEffect(() => () => stopPoll(), [stopPoll])
 
   const beginPoll = useCallback(
-    (provider: string) => {
+    (provider: string, reauth = false) => {
       stopPoll()
       let attempts = 0
       pollRef.current = setInterval(async () => {
         attempts += 1
         try {
-          const status = await getProviderAuthStatus(provider)
+          // A re-auth starts from ready === true, so that flag cannot mark the
+          // end of the flow: preflight the credential instead, and only fall
+          // back to `ready` when the server has no /test route.
+          const test = reauth ? await testProviderAuth(provider) : null
+          const useStatus = !test || test.unsupported === true
+          const status = useStatus ? await getProviderAuthStatus(provider) : { ready: test.ok, error: undefined }
           if (status.ready) {
             stopPoll()
             setLogin(null)
@@ -87,23 +109,38 @@ export function useProviderLogin(onReady?: () => void): ProviderLoginController 
   )
 
   const startLogin = useCallback(
-    async (provider: string) => {
-      setLogin({ provider, initiation: null, polling: true, error: null })
+    async (provider: string, options?: StartLoginOptions) => {
+      const reauth = options?.reauth === true
+      setLogin({ provider, initiation: null, polling: true, error: null, reauth, alreadyReady: false })
       try {
         const initiation = await startProviderLogin(provider)
-        setLogin({ provider, initiation, polling: initiation.kind !== "ready", error: null })
         if (initiation.kind === "ready") {
+          // Some providers refuse to start a login while a credential exists.
+          // On a plain connect that means "nothing to do"; on a re-auth it means
+          // the stale credential has to be removed first, so say so.
+          if (reauth) {
+            setLogin({ provider, initiation, polling: false, error: null, reauth, alreadyReady: true })
+            return
+          }
           setLogin(null)
           readyRef.current?.()
           return
         }
+        setLogin({ provider, initiation, polling: true, error: null, reauth, alreadyReady: false })
         if (initiation.kind === "url" && initiation.url) {
           // Native app: hands off to the OS browser; browser dev: new tab.
           openExternal(initiation.url)
         }
-        beginPoll(provider)
+        beginPoll(provider, reauth)
       } catch (err) {
-        setLogin({ provider, initiation: null, polling: false, error: (err as Error).message })
+        setLogin({
+          provider,
+          initiation: null,
+          polling: false,
+          error: (err as Error).message,
+          reauth,
+          alreadyReady: false,
+        })
       }
     },
     [beginPoll],

@@ -16,6 +16,8 @@ import type { ModelRow, ModelSelection } from "./api"
 // Re-export the protocol types the settings UI needs, so components import from
 // one place. These are the wire shapes the server already ships.
 export type {
+  AuthLogoutResult,
+  AuthTestResult,
   CacheGuardResponse,
   LoginInitiation,
   ManagedSkill,
@@ -36,6 +38,8 @@ export { prettyModel, providerLabel, splitModelKey }
 
 import { ROUTES } from "@chunky/protocol"
 import type {
+  AuthLogoutResult,
+  AuthTestResult,
   CacheGuardResponse,
   LoginInitiation,
   ManageSkillReposRequest,
@@ -66,12 +70,42 @@ function base(): Promise<string> {
 }
 
 function errText(data: unknown, fallback: string): string {
+  return bodyError(data) ?? fallback
+}
+
+/**
+ * A non-2xx response. Carries the status and parsed body so callers can tell
+ * "this server is too old to have the route" (catch-all 404, non-JSON body)
+ * apart from a genuine JSON error the route itself returned.
+ */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly body: unknown,
+  ) {
+    super(message)
+    this.name = "HttpError"
+  }
+}
+
+/** The JSON `error`/`message` string of a response body, when it has one. */
+function bodyError(data: unknown): string | null {
   if (data && typeof data === "object") {
     const rec = data as Record<string, unknown>
     if (typeof rec.error === "string" && rec.error) return rec.error
     if (typeof rec.message === "string" && rec.message) return rec.message
   }
-  return fallback
+  return null
+}
+
+/**
+ * True when the server simply does not have this route: its catch-all answers
+ * 404 with a plain-text body, whereas the real routes answer 404 with a JSON
+ * `error` (e.g. an unknown provider id).
+ */
+function isMissingRoute(err: unknown): boolean {
+  return err instanceof HttpError && (err.status === 404 || err.status === 501) && bodyError(err.body) === null
 }
 
 /** Core request helper: prefixes base URL, parses JSON, throws typed errors. */
@@ -94,7 +128,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!res.ok) {
-    throw new Error(errText(data, `${method} ${path} failed (${res.status})`))
+    throw new HttpError(errText(data, `${method} ${path} failed (${res.status})`), res.status, data)
   }
   return data as T
 }
@@ -168,6 +202,46 @@ export async function getProviderAuthStatus(provider: string): Promise<AuthStatu
     ready: data.ready === true || data.state === "authorized",
     state: data.state,
     error: data.error,
+  }
+}
+
+/**
+ * A credential preflight result, plus a renderer-only flag for servers that
+ * predate the /test route — "unknown", which must not be shown as a failure.
+ */
+export interface ProviderTestResult extends AuthTestResult {
+  unsupported?: boolean
+}
+
+const UNSUPPORTED_TEST =
+  "This Chunky server does not support testing a provider connection yet. Update the server to use this."
+const UNSUPPORTED_LOGOUT =
+  "This Chunky server does not support disconnecting a provider yet. Update the server to use this."
+
+/**
+ * Really validate the stored credential (the server preflights an OAuth
+ * refresh where it can), so a provider whose `ready` flag lies is caught.
+ *
+ * Never throws: a failed check is a normal outcome the card renders inline.
+ */
+export async function testProviderAuth(provider: string): Promise<ProviderTestResult> {
+  try {
+    const data = await req<Partial<AuthTestResult>>(ROUTES.authTest(provider), jsonInit("POST"))
+    if (data?.ok === true) return { ok: true }
+    return { ok: false, error: data?.error || "The provider reported the credential as not usable." }
+  } catch (err) {
+    if (isMissingRoute(err)) return { ok: false, unsupported: true, error: UNSUPPORTED_TEST }
+    return { ok: false, error: (err as Error).message }
+  }
+}
+
+/** Remove the provider's stored credential. /status then reports not ready. */
+export async function logoutProvider(provider: string): Promise<void> {
+  try {
+    await req<AuthLogoutResult>(ROUTES.authLogout(provider), jsonInit("POST"))
+  } catch (err) {
+    if (isMissingRoute(err)) throw new Error(UNSUPPORTED_LOGOUT)
+    throw err
   }
 }
 
