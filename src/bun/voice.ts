@@ -90,9 +90,12 @@ async function mintClientSecret(credential: string): Promise<VoiceTokenResult> {
       headers: { Authorization: `Bearer ${credential}`, "Content-Type": "application/json" },
       body: JSON.stringify({ expires_after: { seconds: 3600 } }),
     })
-    const body = await response.json().catch(() => ({})) as { value?: unknown; expires_at?: unknown; error?: { message?: unknown } }
+    const body = await response.json().catch(() => ({})) as { value?: unknown; expires_at?: unknown; error?: unknown }
     if (!response.ok) {
-      const detail = typeof body.error?.message === "string" ? body.error.message : `xAI token request failed (${response.status})`
+      // xAI error bodies use a top-level string `error`; older shapes nest {error:{message}}.
+      const raw = body.error
+      const message = typeof raw === "string" ? raw : raw && typeof raw === "object" && typeof (raw as { message?: unknown }).message === "string" ? (raw as { message: string }).message : ""
+      const detail = message ? `xAI: ${message}` : `xAI token request failed (${response.status})`
       return { ok: false, error: detail }
     }
     if (typeof body.value !== "string" || !body.value || typeof body.expires_at !== "number") {
