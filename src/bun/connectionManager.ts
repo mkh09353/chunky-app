@@ -45,6 +45,7 @@ export type ConnectionDependencies = {
   now(): number
   sleep(ms: number): Promise<void>
   spawn(command: string[], options: { cwd: string; env: Record<string, string | undefined> }): { pid?: number }
+  log?(message: string): void
   allocatePort?(): Promise<number>
   installRuntime?(env: NodeJS.ProcessEnv): Promise<void>
 }
@@ -54,6 +55,7 @@ const defaults: ConnectionDependencies = {
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   spawn: (command, options) => Bun.spawn(command, { ...options, stdout: "ignore", stderr: "ignore" }),
+  log: (message) => console.log(message),
   installRuntime,
 }
 
@@ -258,7 +260,12 @@ async function startServer(
   const release = await acquireLock(lock, deps)
   try {
     const existing = await selectHealthyRecord(serverDir, token, targetWorkspace, deps)
-    if (existing && existing.workspace === targetWorkspace && existing.version === installed.version && existing.buildId === id) return existing
+    if (existing && existing.workspace === targetWorkspace) {
+      if (existing.version !== installed.version) {
+        deps.log?.(`[@chunky/app] connecting to existing Chunky v${existing.version} server instead of app runtime v${installed.version}`)
+      }
+      return existing
+    }
     const port = deps.allocatePort ? await deps.allocatePort() : await freePort()
     const nonce = randomUUID()
     const record: RecordFile = {
@@ -360,6 +367,10 @@ export function resolveChunkyConnection(env = process.env, deps: ConnectionDepen
     const token = loadToken(settings)
     const found = await selectHealthyRecord(join(state, "servers"), token, workspace, deps)
     if (found) {
+      const appVersion = runtime(env)?.version
+      if (workspace && found.workspace === workspace && appVersion && found.version !== appVersion) {
+        deps.log?.(`[@chunky/app] connecting to existing Chunky v${found.version} server instead of app runtime v${appVersion}`)
+      }
       if (token) maintainLease(found, token, deps)
       return { baseUrl: `http://localhost:${found.port}`, workspace: found.workspace, serverToken: token }
     }

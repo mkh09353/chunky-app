@@ -68,6 +68,43 @@ test("ignores malformed and stale records", async () => {
   expect(await selectHealthyRecord(join(state, "servers"), "token", undefined, deps(new Set(), { count: 0 }))).toBeUndefined()
 })
 
+test("reuses a healthy preferred workspace server from another runtime version", async () => {
+  const state = tempState()
+  const workspace = "/wanted"
+  const existing = record(48201, workspace, Date.now())
+  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(existing))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const runtime = join(state, "runtime")
+  mkdirSync(join(runtime, "packages", "server", "src"), { recursive: true })
+  writeFileSync(join(runtime, "packages", "server", "src", "index.ts"), "")
+  writeFileSync(join(runtime, "package.json"), JSON.stringify({ version: "2" }))
+  writeFileSync(join(runtime, "chunky.ts"), "")
+  writeFileSync(join(runtime, "bun.lock"), "")
+  const starts = { count: 0 }
+  const messages: string[] = []
+  const authorizations: Array<string | null> = []
+  const testDeps = deps(new Set([existing.port]), starts)
+  testDeps.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input.toString())
+    if (Number(url.port) !== existing.port) throw new Error("offline")
+    if (url.pathname === "/_chunky/server-identity") return new Response(JSON.stringify(existing))
+    if (url.pathname === "/api/info") authorizations.push(new Headers(init?.headers).get("authorization"))
+    return new Response("{}", { status: 200 })
+  }) as typeof fetch
+  testDeps.log = (message) => messages.push(message)
+
+  const result = await resolveChunkyConnection({
+    CHUNKY_HOME: state,
+    CHUNKY_WORKSPACE: workspace,
+    CHUNKY_RUNTIME_DIR: runtime,
+  }, testDeps)
+
+  expect(result).toMatchObject({ baseUrl: `http://localhost:${existing.port}`, workspace, serverToken: "shared-token" })
+  expect(starts.count).toBe(0)
+  expect(authorizations).toEqual(["Bearer shared-token"])
+  expect(messages).toEqual(["[@chunky/app] connecting to existing Chunky v1 server instead of app runtime v2"])
+})
+
 test("reports automatic runtime installation failure actionably", async () => {
   const state = tempState()
   const testDeps = deps(new Set(), { count: 0 })
