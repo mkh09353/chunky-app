@@ -40,6 +40,29 @@ function providerSortKey(vendor: string): string {
   return i >= 0 ? `${i}-${vendor}` : `9-${vendor}`
 }
 
+/** ~7MB of base64, mirroring the TUI's clipboard grab (packages/tui/src/
+ *  clipboardImage.ts). The server enforces no cap of its own, and we have no
+ *  image library to resize with, so oversized images are skipped — loudly. */
+const MAX_IMAGE_BASE64_LENGTH = 7_000_000
+
+/** File extension for a synthesized name, derived from the MIME subtype
+ *  (`image/svg+xml` -> `svg`, `image/jpeg` -> `jpg`). */
+function extensionFor(mediaType: string): string {
+  const subtype = mediaType.split("/")[1]?.split("+")[0]?.toLowerCase()
+  if (!subtype) return "png"
+  return subtype === "jpeg" ? "jpg" : subtype
+}
+
+/** An image attachment staged in the composer. `dataUrl` is kept only for the
+ *  local thumbnail; `base64`/`mediaType` are what ride the send. */
+interface StagedImage {
+  id: string
+  base64: string
+  mediaType: string
+  name: string
+  dataUrl: string
+}
+
 /** A saved mode as the selector lists it: the server's name plus the compact
  *  "what it switches you to" line the caller already knows how to word. */
 export interface ModeOption {
@@ -103,7 +126,11 @@ export function Composer({
   const [switchingId, setSwitchingId] = useState<string | null>(null)
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [images, setImages] = useState<{ base64: string; mediaType: string; name: string }[]>([])
+  const [images, setImages] = useState<StagedImage[]>([])
+  /** Transient "we skipped something" line above the chips (oversized/unreadable
+   *  images). Cleared on a timer so it never becomes permanent chrome. */
+  const [imageNotice, setImageNotice] = useState<string | null>(null)
+  const [dragActive, setDragActive] = useState(false)
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionQuery, setMentionQuery] = useState("")
   const [mentionItems, setMentionItems] = useState<FileSearchItem[]>([])
@@ -113,6 +140,13 @@ export function Composer({
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const switchGen = useRef(0)
+  /** Per-composer-session counters: attachment keys, and the "Pasted image N"
+   *  numbering (which keeps climbing across sends, like a scratch pad). */
+  const imageSeq = useRef(0)
+  const pasteSeq = useRef(0)
+  /** dragenter/dragleave fire for every child too; count depth so moving over
+   *  the textarea or a chip doesn't flicker the highlight off. */
+  const dragDepth = useRef(0)
 
   const busy = switchingId !== null
 
@@ -149,6 +183,7 @@ export function Composer({
     onSend(text, { delivery, images: images.map(({ base64, mediaType }) => ({ base64, mediaType })) })
     setValue("")
     setImages([])
+    setImageNotice(null)
     setSlashDismissed(false)
     if (ref.current) ref.current.style.height = "auto"
   }
@@ -171,6 +206,13 @@ export function Composer({
       ref.current?.setSelectionRange(next.length, next.length)
     })
   }
+
+  // The skipped-image notice is advisory, not a state the user has to dismiss.
+  useEffect(() => {
+    if (!imageNotice) return
+    const timer = window.setTimeout(() => setImageNotice(null), 6000)
+    return () => clearTimeout(timer)
+  }, [imageNotice])
 
   useEffect(() => {
     if (!mentionOpen || !onSearchFiles) return
@@ -207,18 +249,81 @@ export function Composer({
     })
   }
 
-  const addImages = (files: FileList | null) => {
+  /** Single ingest path for the file picker, clipboard paste, and drag-drop.
+   *  Non-images are ignored; oversized ones are skipped with a visible notice
+   *  rather than dropped silently. `synthesizeNames` is for sources whose files
+   *  have no useful name (clipboard items are typically "" or "image.png"). */
+  const addImages = (files: Iterable<File> | FileList | null, opts: { synthesizeNames?: boolean } = {}) => {
     if (!files) return
     for (const file of Array.from(files)) {
       if (!file.type.startsWith("image/")) continue
+      const name =
+        opts.synthesizeNames || !file.name
+          ? `Pasted image ${++pasteSeq.current}.${extensionFor(file.type)}`
+          : file.name
       const reader = new FileReader()
       reader.onload = () => {
-        const result = String(reader.result)
-        const base64 = result.split(",")[1]
-        if (base64) setImages((old) => [...old, { base64, mediaType: file.type, name: file.name }])
+        const dataUrl = String(reader.result)
+        const base64 = dataUrl.split(",")[1]
+        if (!base64) return
+        if (base64.length > MAX_IMAGE_BASE64_LENGTH) {
+          setImageNotice(`${name} is too large to attach (over ~5MB) — skipped.`)
+          return
+        }
+        setImages((old) => [
+          ...old,
+          { id: `img-${++imageSeq.current}`, base64, mediaType: file.type, name, dataUrl },
+        ])
       }
+      reader.onerror = () => setImageNotice(`Couldn't read ${name} — skipped.`)
       reader.readAsDataURL(file)
     }
+  }
+
+  /** Clipboard paste: attach any image flavors and swallow the event, otherwise
+   *  leave the default text paste completely alone. */
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const imageFiles: File[] = []
+    for (const item of Array.from(items)) {
+      if (item.kind !== "file" || !item.type.startsWith("image/")) continue
+      const file = item.getAsFile()
+      if (file) imageFiles.push(file)
+    }
+    if (imageFiles.length === 0) return
+    e.preventDefault()
+    addImages(imageFiles, { synthesizeNames: true })
+  }
+
+  /** True only for an OS file drag — ignore text/selection drags. */
+  const isFileDrag = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files")
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return
+    dragDepth.current += 1
+    setDragActive(true)
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return
+    // Without preventDefault the drop never fires (the webview navigates instead).
+    e.preventDefault()
+    e.dataTransfer.dropEffect = "copy"
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragActive(false)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return
+    e.preventDefault()
+    dragDepth.current = 0
+    setDragActive(false)
+    addImages(e.dataTransfer.files)
   }
 
   const handleOpenChange = (open: boolean) => {
@@ -273,8 +378,45 @@ export function Composer({
       {/* Todos + queued messages render above the composer via TodosPanel /
           QueueChips (see App.tsx) so both surfaces stay in one place. */}
       {cacheGuard && <div className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-800 dark:text-amber-200"><span>This will resend ~{cacheGuard.approxTokens.toLocaleString()} tokens of cold context. Press ⏎ again to send, esc to cancel.</span><button type="button" onClick={onCacheConfirm} className="font-semibold text-primary hover:underline">Send anyway</button><button type="button" onClick={onCacheCancel} className="font-medium hover:underline">Cancel</button></div>}
-      <div className="rounded-[22px] border border-border bg-card/80 p-2 shadow-panel backdrop-blur-xl transition-colors focus-within:border-ring/60">
-        {images.length > 0 && <div className="flex flex-wrap gap-1 px-2 pt-1">{images.map((image, i) => <span key={`${image.name}-${i}`} className="flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px]"><File className="size-3" />{image.name}<button type="button" onClick={() => setImages((old) => old.filter((_, index) => index !== i))}><X className="size-3" /></button></span>)}</div>}
+      <div
+        className={cn(
+          "relative rounded-[22px] border border-border bg-card/80 p-2 shadow-panel backdrop-blur-xl transition-colors focus-within:border-ring/60",
+          dragActive && "border-primary/60 bg-primary/5",
+        )}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {dragActive && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] border-2 border-primary/50 border-dashed bg-card/80 text-[12px] font-medium text-primary">
+            Drop images to attach
+          </div>
+        )}
+        {imageNotice && (
+          <div className="mx-2 mt-1 text-[11px] text-amber-600 dark:text-amber-400">{imageNotice}</div>
+        )}
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2 pt-1.5">
+            {images.map((image, i) => (
+              <span
+                key={image.id}
+                title={image.name}
+                className="group relative size-10 overflow-hidden rounded-md border border-border bg-muted"
+              >
+                <img src={image.dataUrl} alt={image.name} className="size-full object-cover" />
+                <button
+                  type="button"
+                  aria-label={`Remove ${image.name}`}
+                  onClick={() => setImages((old) => old.filter((_, index) => index !== i))}
+                  className="absolute top-0 right-0 flex size-4 items-center justify-center rounded-bl-md bg-background/85 text-muted-foreground opacity-80 transition-opacity hover:text-foreground group-hover:opacity-100"
+                >
+                  <X className="size-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <Textarea
           ref={ref}
           value={value}
@@ -286,6 +428,7 @@ export function Composer({
               : "Ask Chunky to build, explain, or fix something…"
           }
           className="max-h-[220px] min-h-[44px] px-3 py-2.5 text-[14px] leading-relaxed"
+          onPaste={handlePaste}
           onChange={(e) => {
             const next = e.target.value
             setValue(next)
