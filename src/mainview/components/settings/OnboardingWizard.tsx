@@ -27,11 +27,17 @@ export async function needsOnboarding(): Promise<boolean> {
 const STEPS = ["Connect a provider", "Pick a mode", "Finish"] as const
 
 /** Dev-only: `?onboarding=1` opens the flow against fixture data so the layout
- *  can be developed (and screenshotted) without a reachable server. Stripped
- *  from production builds — `import.meta.env.DEV` is false there. */
+ *  can be developed (and screenshotted) without a reachable server;
+ *  `?onboarding=fail` exercises the load-error path. Stripped from production
+ *  builds — `import.meta.env.DEV` is false there. */
+function devOnboardingParam(): string | null {
+  if (!import.meta.env.DEV || typeof window === "undefined") return null
+  const v = new URLSearchParams(window.location.search).get("onboarding")
+  return v === "1" || v === "fail" ? v : null
+}
+
 export function devOnboardingRequested(): boolean {
-  if (!import.meta.env.DEV || typeof window === "undefined") return false
-  return new URLSearchParams(window.location.search).get("onboarding") === "1"
+  return devOnboardingParam() != null
 }
 
 function devOnboardingFixture(): OnboardingResponse {
@@ -95,7 +101,9 @@ export function OnboardingWizard({
         ? Promise.resolve(null)
         : // The literal DEV check lets the bundler drop the fixture entirely.
           import.meta.env.DEV && devOnboardingRequested()
-          ? Promise.resolve(devOnboardingFixture())
+          ? devOnboardingParam() === "fail"
+            ? Promise.reject(new Error("Dev fixture: the server didn't respond."))
+            : Promise.resolve(devOnboardingFixture())
           : getOnboarding(),
     [open],
   )
