@@ -68,6 +68,9 @@ export interface MessageBlock {
   srcIndex?: number
   /** Set when this tool call spawned a delegated run: ties the pill to its card. */
   runId?: string
+  /** Every run still in flight from this tool call — each streams a live tail
+   *  inside the card while it runs. Empty/absent once they all settle. */
+  runIds?: string[]
   /** The run's accent hue, worn by both the pill and its card. */
   accent?: string
 }

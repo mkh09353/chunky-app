@@ -2,7 +2,16 @@ import { describe, expect, test } from "bun:test"
 import type { AgentEvent } from "@chunky/protocol"
 import { initialState, reduce, MAIN } from "./transcript"
 import type { TranscriptState } from "./transcript"
-import { hasRuns, isSeat, parkedRunsByItem, runAnchors, runTail, runSummary } from "./runs"
+import {
+  hasRuns,
+  isSeat,
+  liveRunViews,
+  LIVE_TAIL_MAX,
+  parkedRunsByItem,
+  runAnchors,
+  runTail,
+  runSummary,
+} from "./runs"
 import { buildTranscriptRows, itemsToMessages } from "./mapTranscript"
 
 function play(events: AgentEvent[]): TranscriptState {
@@ -153,6 +162,95 @@ describe("card content", () => {
     expect(runSummary(state.threads["sk:frontend"]!.items)).toBe("Column pinned left.")
   })
 
+})
+
+describe("live delegate streams", () => {
+  test("a running run exposes its own tail, title, model and tool count", () => {
+    const views = liveRunViews(play(DELEGATING_TURN))
+    expect([...views.keys()]).toEqual(["sk:frontend#0"])
+    const view = views.get("sk:frontend#0")!
+    expect(view.threadId).toBe("sk:frontend")
+    expect(view.title).toBe("Sidekick (frontend)")
+    expect(view.model).toBe("grok-4.5")
+    expect(view.toolCount).toBe(1)
+    expect(view.lines.map((l) => l.text)).toEqual([
+      "› edit MapShell.tsx",
+      "  ✓ 3 hunks applied",
+      "Column pinned left.",
+    ])
+  })
+
+  test("a settled run has no live view — the card goes back to normal", () => {
+    const state = play([
+      ...DELEGATING_TURN,
+      { type: "thread.status", threadId: "sk:frontend", status: "idle" },
+    ])
+    expect(liveRunViews(state).size).toBe(0)
+  })
+
+  test("a spawned run with no output yet still gets a (waiting) view", () => {
+    const state = play([
+      { type: "tool.start", id: "t1", name: "spawn_thread", input: { title: "docs" } },
+      { type: "thread.spawn", threadId: "child-1", parentThreadId: MAIN, title: "docs sweep" },
+    ])
+    const view = liveRunViews(state).get("child-1#0")!
+    expect(view.lines).toEqual([])
+    expect(view.title).toBe("docs sweep")
+  })
+
+  test("the tail is bounded however chatty the delegate gets", () => {
+    const chatter: AgentEvent[] = []
+    for (let i = 0; i < 40; i++) {
+      chatter.push({ type: "message.start", role: "assistant", threadId: "sk:frontend" })
+      chatter.push({ type: "message.delta", text: `line ${i}`, threadId: "sk:frontend" })
+      chatter.push({ type: "message.end", threadId: "sk:frontend" })
+    }
+    const view = liveRunViews(play([...DELEGATING_TURN, ...chatter])).get("sk:frontend#0")!
+    expect(view.lines).toHaveLength(LIVE_TAIL_MAX)
+    expect(view.lines.at(-1)!.text).toBe("line 39")
+  })
+
+  test("concurrent delegates each stream their own run", () => {
+    const state = play([
+      { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+      { type: "thread.spawn", threadId: "sk:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+      { type: "tool.start", id: "t2", name: "sidekick", input: { seat: "backend" } },
+      { type: "thread.spawn", threadId: "sk:backend", parentThreadId: MAIN, title: "Sidekick (backend)" },
+      { type: "message.start", role: "assistant", threadId: "sk:frontend" },
+      { type: "message.delta", text: "front half", threadId: "sk:frontend" },
+      { type: "message.start", role: "assistant", threadId: "sk:backend" },
+      { type: "message.delta", text: "back half", threadId: "sk:backend" },
+    ])
+    const views = liveRunViews(state)
+    expect(views.get("sk:frontend#0")!.lines.at(-1)!.text).toBe("front half")
+    expect(views.get("sk:backend#0")!.lines.at(-1)!.text).toBe("back half")
+    // Each pill owns exactly its own run.
+    const anchors = [...runAnchors(state).values()]
+    expect(anchors.map((a) => a.liveRunIds)).toEqual([["sk:frontend#0"], ["sk:backend#0"]])
+  })
+
+  test("two delegates that land on the same pill both keep their stream", () => {
+    // Both tool.starts arrive before either spawn: the anchor pill is the same
+    // for both runs, so the card must carry two live sections, not one.
+    const state = play([
+      { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+      { type: "thread.spawn", threadId: "sk:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+      { type: "thread.spawn", threadId: "sk:backend", parentThreadId: MAIN, title: "Sidekick (backend)" },
+    ])
+    const anchor = [...runAnchors(state).values()][0]!
+    expect(anchor.liveRunIds).toEqual(["sk:frontend#0", "sk:backend#0"])
+    expect(anchor.liveRunId).toBe("sk:frontend#0")
+
+    const messages = itemsToMessages(state.threads[MAIN]!.items)
+    const rows = buildTranscriptRows(messages, runAnchors(state))
+    const pill = rows.flatMap((r) => r.blocks).find((b) => b.runIds)!
+    expect(pill.runIds).toEqual(["sk:frontend#0", "sk:backend#0"])
+  })
+
+  test("a session that never delegates has no live views (no-stream case)", () => {
+    expect(liveRunViews(undefined).size).toBe(0)
+    expect(liveRunViews(initialState).size).toBe(0)
+  })
 })
 
 describe("transcript rows", () => {

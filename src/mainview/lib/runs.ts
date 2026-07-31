@@ -69,8 +69,13 @@ export function liveRunsByItem(state: TranscriptState): Map<number, RunRecord[]>
 
 /** What a single tool pill in the main transcript owns. */
 export interface RunAnchor {
-  /** A run still in flight from this pill — its card tails in this row. */
+  /** The run still in flight from this pill that owns its hue and hover link.
+   *  (First of `liveRunIds`; kept separate because the link is 1:1.) */
   liveRunId?: string
+  /** Every run still in flight from this pill. Normally one, but a turn that
+   *  fires two delegate calls back-to-back can land both on the same pill —
+   *  each still streams its own tail inside the card. */
+  liveRunIds: string[]
   /** Settled runs that park in this row's gutter. */
   parkedRunIds: string[]
   /** Shared hue for the pill's left edge and its cards'. */
@@ -82,9 +87,11 @@ export interface RunAnchor {
 export function runAnchors(state: TranscriptState): Map<number, RunAnchor> {
   const anchors = new Map<number, RunAnchor>()
   const add = (at: number, run: RunRecord) => {
-    const cur = anchors.get(at) ?? { parkedRunIds: [], accent: runAccent(run.id) }
-    if (run.status === "running") cur.liveRunId = run.id
-    else cur.parkedRunIds.push(run.id)
+    const cur = anchors.get(at) ?? { liveRunIds: [], parkedRunIds: [], accent: runAccent(run.id) }
+    if (run.status === "running") {
+      cur.liveRunIds.push(run.id)
+      cur.liveRunId ??= run.id
+    } else cur.parkedRunIds.push(run.id)
     anchors.set(at, cur)
   }
   for (const [at, runs] of liveRunsByItem(state)) for (const run of runs) add(at, run)
@@ -100,6 +107,50 @@ export function runAnchors(state: TranscriptState): Map<number, RunAnchor> {
 /** Runs by id, for turning anchor ids back into records. */
 export function runsById(state: TranscriptState): Map<string, RunRecord> {
   return new Map(state.runs.map((run) => [run.id, run]))
+}
+
+/** How many tail lines a live tool-card section keeps in hand. The card shows
+ *  the last few collapsed and the rest when expanded — never the whole run, so
+ *  a chatty delegate cannot grow the transcript row without bound. */
+export const LIVE_TAIL_MAX = 14
+
+/** A delegated run still in flight, as its spawning tool card renders it.
+ *
+ *  Pure projection of the SSE-fed transcript: no fetches, no timers (elapsed is
+ *  clocked separately in useRunClock), so it replays deterministically. */
+export interface LiveRunView {
+  runId: string
+  threadId: string
+  /** The delegate's own thread title ("Sidekick (frontend)"). */
+  title: string
+  model?: string
+  toolCount: number
+  /** Newest-last tail lines; the card slices what it shows. */
+  lines: TailLine[]
+}
+
+/** Running runs keyed by run id — what a tool card looks its stream up in.
+ *
+ *  A run with no thread items yet still gets a view (empty `lines`), so the
+ *  card can say "waiting for output…" instead of flickering in late. */
+export function liveRunViews(state: TranscriptState | undefined): Map<string, LiveRunView> {
+  const views = new Map<string, LiveRunView>()
+  if (!state) return views
+  for (const run of state.runs) {
+    if (run.status !== "running") continue
+    const node = state.threads[run.threadId]
+    const model = node?.model ?? run.model
+    const lines = runLines(node?.items ?? [], run.itemStart)
+    views.set(run.id, {
+      runId: run.id,
+      threadId: run.threadId,
+      title: node?.title || run.title,
+      ...(model ? { model } : {}),
+      toolCount: run.toolCount,
+      lines: lines.slice(Math.max(0, lines.length - LIVE_TAIL_MAX)),
+    })
+  }
+  return views
 }
 
 export type TailTone = "cmd" | "ok" | "fail" | "text" | "dim"

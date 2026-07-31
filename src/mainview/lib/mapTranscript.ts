@@ -244,6 +244,7 @@ export function buildTranscriptRows(
         blocks.push({
           ...block,
           ...(anchor.liveRunId ? { runId: anchor.liveRunId } : {}),
+          ...(anchor.liveRunIds.length ? { runIds: anchor.liveRunIds } : {}),
           accent: anchor.accent,
         })
         parkedRunIds = anchor.parkedRunIds

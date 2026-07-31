@@ -29,6 +29,7 @@ import chunkyLogo from "~/assets/chunky-logo.png"
 import { cn } from "~/lib/cn"
 import { renderMarkdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
+import { LiveRunSection, useLiveRuns } from "./LiveRun"
 import { isRunLit, runLinkProps, useRunLink } from "./RunLink"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
@@ -204,11 +205,15 @@ function ToolStatus({ tool }: { tool: ToolBlockData }) {
 function ToolCard({
   tool,
   runId,
+  runIds,
   accent,
 }: {
   tool: ToolBlockData
   /** Present when this call spawned a delegate: wires the pill to its card. */
   runId?: string
+  /** Runs spawned by this call that are still in flight: each streams a live
+   *  tail inside the card until it settles. */
+  runIds?: string[]
   accent?: string
 }) {
   const [open, setOpen] = useState(false)
@@ -216,6 +221,13 @@ function ToolCard({
   const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
   const link = useRunLink()
   const lit = isRunLit(runId, link)
+  // Live delegate streams for this pill. Empty whenever the runs have settled
+  // (or no agent-stream events ever arrived), which is exactly what makes the
+  // completed card identical to the one this file rendered before.
+  const { views, elapsedOf } = useLiveRuns()
+  const live = (runIds ?? (runId ? [runId] : []))
+    .map((id) => views.get(id))
+    .filter((view): view is NonNullable<typeof view> => !!view)
   return (
     <div
       {...(runId ? { "data-run-pill": runId } : {})}
@@ -224,15 +236,16 @@ function ToolCard({
       className={cn(
         "my-2 overflow-hidden rounded-lg border border-border bg-card/50 shadow-xs transition-colors",
         accent && "border-l-2",
+        live.length > 0 && "border-primary/30",
         lit && "bg-accent/40 ring-1 ring-ring/40",
       )}
     >
       <button
         type="button"
-        onClick={() => hasBody && setOpen((o) => !o)}
+        onClick={() => (hasBody || live.length > 0) && setOpen((o) => !o)}
         className={cn(
           "flex w-full items-center gap-2 px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-          hasBody && "cursor-pointer hover:bg-accent/40",
+          (hasBody || live.length > 0) && "cursor-pointer hover:bg-accent/40",
         )}
       >
         <Icon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -250,13 +263,21 @@ function ToolCard({
             </span>
           )}
           <ToolStatus tool={tool} />
-          {hasBody && (
+          {(hasBody || live.length > 0) && (
             <ChevronRight
               className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")}
             />
           )}
         </span>
       </button>
+      {live.map((view) => (
+        <LiveRunSection
+          key={view.runId}
+          view={view}
+          {...(elapsedOf(view.runId) != null ? { elapsedMs: elapsedOf(view.runId)! } : {})}
+          expanded={open}
+        />
+      ))}
       {open && hasBody && (
         <div className="flex flex-col gap-2 border-border border-t bg-muted/20 p-2.5">
           {tool.diff && <DiffView diff={tool.diff} />}
@@ -336,6 +357,7 @@ function AssistantBlock({
       <ToolCard
         tool={block.tool}
         {...(block.runId ? { runId: block.runId } : {})}
+        {...(block.runIds ? { runIds: block.runIds } : {})}
         {...(block.accent ? { accent: block.accent } : {})}
       />
     )

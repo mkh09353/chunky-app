@@ -22,10 +22,11 @@ import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
 import { AgentCard } from "./AgentCard"
+import { LiveRunsProvider, type LiveRunsValue } from "./LiveRun"
 import { RunLinkProvider } from "./RunLink"
 import { cn } from "~/lib/cn"
 import { buildTranscriptRows, type TranscriptRow } from "~/lib/mapTranscript"
-import { hasRuns, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
+import { hasRuns, liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
 import { useRunClock } from "~/lib/useRunClock"
 import { useFullSizeWindow } from "~/lib/windowSize"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
@@ -221,6 +222,14 @@ export function ChatView({
     [thread.messages, anchors],
   )
   const elapsedOf = useRunClock(transcript?.runs)
+  // Live delegate streams, keyed by run id, handed to the tool cards that
+  // spawned them (Message → ToolCard → LiveRunSection). Settled runs are not in
+  // here, which is what makes a finished card go back to its plain self.
+  const liveViews = useMemo(() => liveRunViews(transcript), [transcript])
+  const liveRuns = useMemo<LiveRunsValue>(
+    () => ({ views: liveViews, elapsedOf: (runId) => elapsedOf(runIndex.get(runId)) }),
+    [liveViews, elapsedOf, runIndex],
+  )
 
   // A turn ends when the session goes running → idle: `session.status` from the
   // SSE reducer (transcript.status), or — in demo/offline mode, where there is
@@ -321,16 +330,12 @@ export function ChatView({
         <p className="py-12 text-[13px] text-muted-foreground">Send a message to begin.</p>
       ) : (
         rows.map((row) => {
-          // A pill's run while it is still in flight: it tails right here, in
-          // the row that spawned it, and turns into its own parked card when it
-          // settles. (Before, live runs only existed in the floating rail.)
-          const live = row.blocks
-            .map((block) => (block.runId ? runIndex.get(block.runId) : undefined))
-            .filter((run): run is RunRecord => !!run && run.status === "running")
-          const parked = row.parkedRunIds
+          // Only SETTLED runs park in the gutter. A run still in flight streams
+          // inside the tool card that spawned it (LiveRunSection), so it is not
+          // duplicated out here.
+          const cards = row.parkedRunIds
             .map((id) => runIndex.get(id))
             .filter((run): run is RunRecord => !!run)
-          const cards = [...live, ...parked]
           return (
             <Row key={row.id} msgId={row.message.id} gutterOn={gutterOn} gutter={
               cards.length > 0 && transcript ? (
@@ -338,7 +343,7 @@ export function ChatView({
                   {cards.map((run) => (
                     <AgentCard
                       key={run.id}
-                      variant={run.status === "running" ? "running" : "parked"}
+                      variant="parked"
                       transcript={transcript}
                       threadId={run.threadId}
                       run={run}
@@ -379,9 +384,11 @@ export function ChatView({
     // sidebar's width (and its collapsing) can never skew them.
     <div className="@container flex min-h-0 min-w-0 flex-1 flex-col">
       <RunLinkProvider onJump={scrollToParked}>
-        <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
-          {body}
-        </ScrollArea>
+        <LiveRunsProvider value={liveRuns}>
+          <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
+            {body}
+          </ScrollArea>
+        </LiveRunsProvider>
       </RunLinkProvider>
     </div>
   )

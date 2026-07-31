@@ -1,5 +1,8 @@
 // One delegated agent, in three dresses:
-//   running — live tail of the last few output lines (transcript gutter)
+//   running — live tail of the last few output lines. The transcript gutter no
+//             longer uses this: a run in flight streams inside the TOOL CARD
+//             that spawned it (components/LiveRun). It is still what a NESTED
+//             child thread renders as while its parent's card is expanded.
 //   parked  — condensed settled run, expandable (transcript gutter)
 //   idle    — condensed seat row, expandable; kept for a seat-list surface,
 //             nothing renders it since the live agents rail was removed
@@ -11,42 +14,10 @@ import { useEffect, useState } from "react"
 import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
-import { formatElapsed, isSeat, runAccent, runSummary, runTail, type TailTone } from "~/lib/runs"
+import { formatElapsed, isSeat, runAccent, runSummary, runTail } from "~/lib/runs"
+import { TailLines } from "./LiveRun"
 import { MessageView } from "./Message"
 import { isRunLit, runLinkProps, useRunLink } from "./RunLink"
-
-const TONE: Record<TailTone, string> = {
-  cmd: "text-foreground/80",
-  ok: "text-success",
-  fail: "text-destructive",
-  text: "text-muted-foreground",
-  dim: "text-muted-foreground/60",
-}
-
-/** Newest line sits at the bottom; the oldest fades out under the mask. */
-function Tail({ lines }: { lines: { text: string; tone: TailTone }[] }) {
-  return (
-    <div
-      className="flex h-[92px] flex-col justify-end overflow-hidden px-2.5 pb-2 font-mono text-[10.5px] leading-[1.62]"
-      style={{
-        WebkitMaskImage:
-          "linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.28) 14%, #000 46%, #000 100%)",
-        maskImage:
-          "linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.28) 14%, #000 46%, #000 100%)",
-      }}
-    >
-      {lines.length === 0 ? (
-        <div className="truncate text-muted-foreground/60">waiting for output…</div>
-      ) : (
-        lines.map((line, i) => (
-          <div key={i} className={cn("truncate whitespace-pre", TONE[line.tone])}>
-            {line.text}
-          </div>
-        ))
-      )}
-    </div>
-  )
-}
 
 /** The delegate's own transcript — what the old inline panel rendered. */
 function ThreadDetail({
@@ -182,7 +153,7 @@ export function AgentCard({
 
       {isRunning ? (
         <>
-          <Tail lines={runTail(items, from, 5)} />
+          <TailLines lines={runTail(items, from, 5)} rows={5} className="px-2.5 pb-2" />
           <div className="flex items-center gap-1.5 border-border/70 border-t px-2.5 py-1 font-mono text-[10px] text-muted-foreground/70">
             {elapsedMs != null && <span>{formatElapsed(elapsedMs)}</span>}
             {elapsedMs != null && <span>·</span>}
