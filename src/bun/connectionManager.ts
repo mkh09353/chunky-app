@@ -16,7 +16,14 @@ import {
   readDesktopState,
   stateDir as desktopStateDir,
 } from "./desktopState"
-import { hasRuntime, installRuntime, resolveBun, runtimeRoot } from "./runtimeInstaller"
+import {
+  hasRuntime,
+  installRuntime,
+  resolveBun,
+  runtimeRoot,
+  upgradeRuntime,
+  type RuntimeUpgrade,
+} from "./runtimeInstaller"
 
 const SERVER_IDENTITY_PATH = "/_chunky/server-identity"
 const SERVER_LEASES_PATH = "/_chunky/server-leases"
@@ -35,7 +42,24 @@ type RecordFile = {
   startedAt: number
 }
 
-type Identity = Pick<RecordFile, "id" | "workspace" | "version" | "buildId" | "nonce" | "port">
+type Identity = Pick<RecordFile, "id" | "workspace" | "version" | "buildId" | "nonce" | "port"> & {
+  /** Set by servers that are draining after being superseded (additive: older
+   *  servers simply omit it). Such a server must not be handed new clients. */
+  retiring?: boolean
+}
+
+/** The runtime this app would start a server from. */
+type RuntimeIdentity = { version: string; buildId: string }
+
+/** A discovery record plus the file it came from, so it can be retired. */
+type RecordEntry = { path: string; record: RecordFile }
+
+interface SelectOptions {
+  /** Prefer servers built from this runtime over older ones. */
+  prefer?: RuntimeIdentity
+  /** Delete records whose server is gone (dead pid and unreachable port). */
+  prune?: boolean
+}
 
 export type RuntimeConnection = {
   baseUrl: string
@@ -53,6 +77,9 @@ export type ConnectionDependencies = {
   log?(message: string): void
   allocatePort?(): Promise<number>
   installRuntime?(env: NodeJS.ProcessEnv): Promise<void>
+  upgradeRuntime?(env: NodeJS.ProcessEnv): Promise<RuntimeUpgrade>
+  /** Whether a recorded process still exists (guards record pruning). */
+  pidAlive?(pid: number): boolean
 }
 
 const defaults: ConnectionDependencies = {
@@ -62,6 +89,16 @@ const defaults: ConnectionDependencies = {
   spawn: (command, options) => Bun.spawn(command, { ...options, stdout: "ignore", stderr: "ignore" }),
   log: (message) => console.log(message),
   installRuntime,
+  pidAlive: (pid) => {
+    if (!Number.isInteger(pid) || pid <= 0) return false
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error) {
+      // EPERM means the process exists but belongs to somebody else.
+      return (error as NodeJS.ErrnoException).code === "EPERM"
+    }
+  },
 }
 
 function canonicalWorkspace(path: string): string {
@@ -124,53 +161,114 @@ function validRecord(value: unknown): value is RecordFile {
     && typeof x.startedAt === "number"
 }
 
-function records(dir: string): RecordFile[] {
+function recordEntries(dir: string): RecordEntry[] {
   try {
     return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
       if (!entry.isFile() || !entry.name.endsWith(".json")) return []
+      const path = join(dir, entry.name)
       try {
-        const value: unknown = JSON.parse(readFileSync(join(dir, entry.name), "utf8"))
-        return validRecord(value) ? [value] : []
+        const value: unknown = JSON.parse(readFileSync(path, "utf8"))
+        return validRecord(value) ? [{ path, record: value }] : []
       } catch { return [] }
     })
   } catch { return [] }
 }
 
-async function healthy(record: RecordFile, token: string | undefined, deps: ConnectionDependencies): Promise<boolean> {
+/** The live identity of a recorded server, or null when it isn't answering as
+ *  the server this record describes. */
+async function probe(
+  record: RecordFile,
+  token: string | undefined,
+  deps: ConnectionDependencies,
+): Promise<Identity | null> {
   const baseUrl = `http://127.0.0.1:${record.port}`
   try {
     const identityResponse = await deps.fetch(baseUrl + SERVER_IDENTITY_PATH, { signal: AbortSignal.timeout(1_000) })
-    if (!identityResponse.ok) return false
+    if (!identityResponse.ok) return null
     const identity = await identityResponse.json() as Partial<Identity>
     if (identity.id !== record.id || identity.workspace !== record.workspace || identity.version !== record.version
-      || identity.buildId !== record.buildId || identity.nonce !== record.nonce || identity.port !== record.port) return false
+      || identity.buildId !== record.buildId || identity.nonce !== record.nonce || identity.port !== record.port) return null
     const info = await deps.fetch(baseUrl + INFO_PATH, {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       signal: AbortSignal.timeout(1_000),
     })
-    return info.ok
+    return info.ok ? (identity as Identity) : null
+  } catch { return null }
+}
+
+async function healthy(record: RecordFile, token: string | undefined, deps: ConnectionDependencies): Promise<boolean> {
+  return !!(await probe(record, token, deps))
+}
+
+/** Was this server built from the runtime we would start today? */
+function matchesRuntime(record: RecordFile, runtime: RuntimeIdentity): boolean {
+  return record.version === runtime.version && record.buildId === runtime.buildId
+}
+
+/**
+ * Retire a server this app did not start, the only safe way: take its discovery
+ * record away. Its ownership poller notices and drains (finishing in-flight
+ * runs first). We never signal its pid — that process is not ours to kill.
+ * Re-reads the file so a record another launcher has already replaced is left
+ * alone.
+ */
+function supersedeRecord(entry: RecordEntry): boolean {
+  try {
+    const current: unknown = JSON.parse(readFileSync(entry.path, "utf8"))
+    if (!validRecord(current) || current.id !== entry.record.id) return false
+    rmSync(entry.path, { force: true })
+    return true
   } catch { return false }
 }
 
 /**
  * Pick only authenticated, identity-verified launcher records. A requested
- * workspace wins; otherwise the newest healthy record wins. This lets Finder
- * launches reuse a live CLI server without assuming a fixed development port.
+ * workspace wins, then a server built from the installed runtime, then the
+ * newest. This lets Finder launches reuse a live CLI server without assuming a
+ * fixed development port, while never preferring a build we have replaced.
+ *
+ * A server that reports `retiring` is skipped: it is draining and will not take
+ * new work. Records whose server is gone (unreachable AND no live pid) are
+ * pruned when asked, so discovery does not accumulate dead entries forever.
  */
+export async function selectHealthyEntry(
+  serverDir: string,
+  token: string | undefined,
+  preferredWorkspace: string | undefined,
+  deps: ConnectionDependencies = defaults,
+  options: SelectOptions = {},
+): Promise<RecordEntry | undefined> {
+  const pidAlive = deps.pidAlive ?? defaults.pidAlive!
+  const verified = (await Promise.all(recordEntries(serverDir).map(async (entry) => {
+    const identity = await probe(entry.record, token, deps)
+    if (!identity) {
+      // Only prune what is provably gone: a live process that merely failed to
+      // answer in time keeps its record (deleting it would retire it).
+      if (options.prune && !pidAlive(entry.record.pid)) rmSync(entry.path, { force: true })
+      return undefined
+    }
+    return identity.retiring === true ? undefined : entry
+  }))).filter((entry): entry is RecordEntry => !!entry)
+  const prefer = options.prefer
+  verified.sort((a, b) => {
+    const workspaceOrder = Number(b.record.workspace === preferredWorkspace) - Number(a.record.workspace === preferredWorkspace)
+    if (workspaceOrder) return workspaceOrder
+    const runtimeOrder = prefer
+      ? Number(matchesRuntime(b.record, prefer)) - Number(matchesRuntime(a.record, prefer))
+      : 0
+    return runtimeOrder || b.record.startedAt - a.record.startedAt || b.record.port - a.record.port
+  })
+  return verified[0]
+}
+
 export async function selectHealthyRecord(
   serverDir: string,
   token: string | undefined,
   preferredWorkspace: string | undefined,
   deps: ConnectionDependencies = defaults,
+  options: SelectOptions = {},
 ): Promise<RecordFile | undefined> {
-  const verified = (await Promise.all(records(serverDir).map(async (record) =>
-    (await healthy(record, token, deps)) ? record : undefined,
-  ))).filter((record): record is RecordFile => !!record)
-  verified.sort((a, b) => {
-    const workspaceOrder = Number(b.workspace === preferredWorkspace) - Number(a.workspace === preferredWorkspace)
-    return workspaceOrder || b.startedAt - a.startedAt || b.port - a.port
-  })
-  return verified[0]
+  return (await selectHealthyEntry(serverDir, token, preferredWorkspace, deps, options))?.record
 }
 
 function buildId(runtime: string): string {
@@ -204,6 +302,17 @@ function runtime(env: NodeJS.ProcessEnv): { root: string; bun: string; version: 
     const version = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown }).version
     if (typeof version !== "string" || !version) return undefined
     return { root, bun: resolveBun(env), version }
+  } catch { return undefined }
+}
+
+/** {version, buildId} of the runtime this app would start a server from, or
+ *  undefined when no runtime is installed yet. Exported so callers (and tests)
+ *  can tell an up-to-date server from one built by a replaced runtime. */
+export function installedRuntimeIdentity(env: NodeJS.ProcessEnv = process.env): RuntimeIdentity | undefined {
+  const installed = runtime(env)
+  if (!installed) return undefined
+  try {
+    return { version: installed.version, buildId: buildId(installed.root) }
   } catch { return undefined }
 }
 
@@ -259,11 +368,13 @@ async function startServer(
   const lock = join(serverDir, `${recordKey(targetWorkspace, installed.version, id)}.lock`)
   const release = await acquireLock(lock, deps)
   try {
-    const existing = await selectHealthyRecord(serverDir, token, targetWorkspace, deps)
-    if (existing && existing.workspace === targetWorkspace) {
-      if (existing.version !== installed.version) {
-        deps.log?.(`[@chunky/app] connecting to existing Chunky v${existing.version} server instead of app runtime v${installed.version}`)
-      }
+    // Reuse only a server built from THIS runtime: a healthy older build is
+    // superseded by the caller, not adopted.
+    const existing = await selectHealthyRecord(serverDir, token, targetWorkspace, deps, {
+      prefer: { version: installed.version, buildId: id },
+    })
+    if (existing && existing.workspace === targetWorkspace
+      && existing.version === installed.version && existing.buildId === id) {
       return existing
     }
     const port = deps.allocatePort ? await deps.allocatePort() : await freePort()
@@ -336,6 +447,63 @@ export async function resetChunkyConnectionForTest(): Promise<void> {
   await releaseChunkyConnection()
 }
 
+/**
+ * Forget the memoized resolution and resolve again. Used when a client can no
+ * longer reach its server (it was superseded by a newer runtime, or died): the
+ * next resolve prunes dead records, prefers a server built from the installed
+ * runtime, and may start one.
+ */
+export function refreshChunkyConnection(
+  env = process.env,
+  deps: ConnectionDependencies = defaults,
+): Promise<RuntimeConnection> {
+  resolving = undefined
+  return resolveChunkyConnection(env, deps)
+}
+
+let upgrading: Promise<RuntimeUpgradeResult> | undefined
+
+export interface RuntimeUpgradeResult {
+  upgraded: boolean
+  version?: string
+  /** The connection to use after an upgrade (a server built from it). */
+  connection?: RuntimeConnection
+}
+
+/**
+ * Replace a stale installed runtime and move onto a server built from it.
+ *
+ * The handover is the phase-1 mechanism, not something special-cased here:
+ * re-resolving prefers a server matching the freshly installed runtime, starts
+ * one, and retires the superseded server through its discovery record — which
+ * drains its in-flight runs before exiting.
+ *
+ * Never throws: a failed upgrade leaves the working runtime (and its server)
+ * exactly as they were.
+ */
+export function upgradeRuntimeAndReconnect(
+  env = process.env,
+  deps: ConnectionDependencies = defaults,
+): Promise<RuntimeUpgradeResult> {
+  // One upgrade at a time; a second trigger joins the first.
+  if (upgrading) return upgrading
+  upgrading = (async () => {
+    try {
+      const upgrade = await (deps.upgradeRuntime || upgradeRuntime)(env)
+      if (upgrade.status !== "upgraded") return { upgraded: false, version: upgrade.version }
+      deps.log?.(`[@chunky/app] Chunky server updated to v${upgrade.version}${upgrade.previousVersion ? ` (from v${upgrade.previousVersion})` : ""}`)
+      const connection = await refreshChunkyConnection(env, deps)
+      return { upgraded: true, version: upgrade.version, connection }
+    } catch (error) {
+      deps.log?.(`[@chunky/app] Chunky server update skipped: ${error instanceof Error ? error.message : "unknown error"}`)
+      return { upgraded: false }
+    } finally {
+      upgrading = undefined
+    }
+  })()
+  return upgrading
+}
+
 /** Persist the workspace selected in the desktop UI for deterministic reuse. */
 export function rememberChunkyWorkspace(path: string, env = process.env): void {
   if (!path.trim()) return
@@ -365,22 +533,44 @@ export function resolveChunkyConnection(env = process.env, deps: ConnectionDepen
     const settings = settingsPath(env, state)
     const workspace = desktopWorkspace(env)
     const token = loadToken(settings)
-    const found = await selectHealthyRecord(join(state, "servers"), token, workspace, deps)
-    if (found) {
-      const appVersion = runtime(env)?.version
-      if (workspace && found.workspace === workspace && appVersion && found.version !== appVersion) {
-        deps.log?.(`[@chunky/app] connecting to existing Chunky v${found.version} server instead of app runtime v${appVersion}`)
-      }
-      if (token) maintainLease(found, token, deps)
-      return { baseUrl: `http://localhost:${found.port}`, workspace: found.workspace, serverToken: token }
+    const installed = installedRuntimeIdentity(env)
+    // Pruning happens here (once per launch), so dead records from crashed or
+    // long-superseded servers do not pile up in the discovery directory.
+    const found = await selectHealthyEntry(join(state, "servers"), token, workspace, deps, {
+      prefer: installed,
+      prune: true,
+    })
+    const stale = !!found && !!installed && !matchesRuntime(found.record, installed)
+    if (found && !stale) {
+      if (token) maintainLease(found.record, token, deps)
+      return { baseUrl: `http://localhost:${found.record.port}`, workspace: found.record.workspace, serverToken: token }
+    }
+    if (found && stale) {
+      deps.log?.(`[@chunky/app] Chunky v${found.record.version} server for ${found.record.workspace} predates runtime v${installed!.version}; starting a v${installed!.version} server`)
     }
     try {
       const startedToken = ensureToken(settings)
       const started = await startServer(state, settings, workspace || homedir(), startedToken, env, deps)
+      // Retire the superseded server only once its replacement is serving, and
+      // only for the workspace we just took over.
+      if (found && stale && found.record.workspace === started.workspace) {
+        if (activeLease?.record.port === found.record.port) await releaseChunkyConnection()
+        if (supersedeRecord(found)) {
+          deps.log?.(`[@chunky/app] retiring superseded Chunky v${found.record.version} server on port ${found.record.port}`)
+        }
+      }
       maintainLease(started, startedToken, deps)
       return { baseUrl: `http://localhost:${started.port}`, workspace: started.workspace, serverToken: startedToken }
     } catch (error) {
-      return { baseUrl: "", workspace: workspace || "", connectionError: error instanceof Error ? error.message : "Chunky server is unavailable" }
+      const message = error instanceof Error ? error.message : "Chunky server is unavailable"
+      // A stale-but-healthy server beats no server at all: keep the user
+      // working on the old build rather than failing the launch.
+      if (found) {
+        deps.log?.(`[@chunky/app] could not start a newer Chunky server (${message}); using the existing v${found.record.version} server`)
+        if (token) maintainLease(found.record, token, deps)
+        return { baseUrl: `http://localhost:${found.record.port}`, workspace: found.record.workspace, serverToken: token }
+      }
+      return { baseUrl: "", workspace: workspace || "", connectionError: message }
     }
   })()
   return resolving

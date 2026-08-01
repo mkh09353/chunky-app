@@ -1,11 +1,13 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  installedRuntimeIdentity,
   resetChunkyConnectionForTest,
   resolveChunkyConnection,
   selectHealthyRecord,
+  upgradeRuntimeAndReconnect,
   type ConnectionDependencies,
 } from "./connectionManager"
 
@@ -68,41 +70,179 @@ test("ignores malformed and stale records", async () => {
   expect(await selectHealthyRecord(join(state, "servers"), "token", undefined, deps(new Set(), { count: 0 }))).toBeUndefined()
 })
 
-test("reuses a healthy preferred workspace server from another runtime version", async () => {
-  const state = tempState()
-  const workspace = "/wanted"
-  const existing = record(48201, workspace, Date.now())
-  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(existing))
-  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
-  const runtime = join(state, "runtime")
-  mkdirSync(join(runtime, "packages", "server", "src"), { recursive: true })
-  writeFileSync(join(runtime, "packages", "server", "src", "index.ts"), "")
-  writeFileSync(join(runtime, "package.json"), JSON.stringify({ version: "2" }))
-  writeFileSync(join(runtime, "chunky.ts"), "")
-  writeFileSync(join(runtime, "bun.lock"), "")
-  const starts = { count: 0 }
-  const messages: string[] = []
-  const authorizations: Array<string | null> = []
-  const testDeps = deps(new Set([existing.port]), starts)
-  testDeps.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+/** A minimal installed runtime tree, plus the identity servers built from it
+ *  would advertise. */
+function fakeRuntime(state: string, version: string) {
+  const root = join(state, `runtime-${version}`)
+  mkdirSync(join(root, "packages", "server", "src"), { recursive: true })
+  writeFileSync(join(root, "packages", "server", "src", "index.ts"), `// v${version}`)
+  writeFileSync(join(root, "package.json"), JSON.stringify({ version }))
+  writeFileSync(join(root, "chunky.ts"), "")
+  writeFileSync(join(root, "bun.lock"), "")
+  const identity = installedRuntimeIdentity({ CHUNKY_RUNTIME_DIR: root } as NodeJS.ProcessEnv)!
+  return { root, ...identity }
+}
+
+/** deps whose spawn brings the new server's port to life, so startServer's
+ *  readiness poll succeeds like it would in production. */
+function startableDeps(live: Set<number>, starts: { count: number }, records: Map<number, unknown>) {
+  const testDeps = deps(live, starts)
+  let started: Record<string, string | undefined> = {}
+  testDeps.allocatePort = async () => 43210
+  testDeps.spawn = (_command, options) => {
+    starts.count++
+    started = options.env
+    const port = Number(options.env.CHUNKY_PORT)
+    records.set(port, {
+      id: started.CHUNKY_SERVER_ID, workspace: started.CHUNKY_WORKSPACE, version: started.CHUNKY_VERSION,
+      buildId: started.CHUNKY_BUILD_ID, nonce: started.CHUNKY_SERVER_NONCE, port,
+    })
+    live.add(port)
+    return { pid: 12345 }
+  }
+  testDeps.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(input.toString())
-    if (Number(url.port) !== existing.port) throw new Error("offline")
-    if (url.pathname === "/_chunky/server-identity") return new Response(JSON.stringify(existing))
-    if (url.pathname === "/api/info") authorizations.push(new Headers(init?.headers).get("authorization"))
+    const port = Number(url.port)
+    if (!live.has(port)) throw new Error("offline")
+    if (url.pathname === "/_chunky/server-identity") return new Response(JSON.stringify(records.get(port)))
     return new Response("{}", { status: 200 })
   }) as typeof fetch
-  testDeps.log = (message) => messages.push(message)
+  return testDeps
+}
+
+test("reuses a healthy server built from the installed runtime", async () => {
+  const state = tempState()
+  const workspace = "/wanted"
+  const runtime = fakeRuntime(state, "2")
+  const existing = { ...record(48201, workspace, Date.now()), version: runtime.version, buildId: runtime.buildId }
+  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(existing))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set([existing.port]), starts, new Map([[existing.port, existing]]))
 
   const result = await resolveChunkyConnection({
-    CHUNKY_HOME: state,
-    CHUNKY_WORKSPACE: workspace,
-    CHUNKY_RUNTIME_DIR: runtime,
+    CHUNKY_HOME: state, CHUNKY_WORKSPACE: workspace, CHUNKY_RUNTIME_DIR: runtime.root,
   }, testDeps)
 
   expect(result).toMatchObject({ baseUrl: `http://localhost:${existing.port}`, workspace, serverToken: "shared-token" })
   expect(starts.count).toBe(0)
-  expect(authorizations).toEqual(["Bearer shared-token"])
-  expect(messages).toEqual(["[@chunky/app] connecting to existing Chunky v1 server instead of app runtime v2"])
+  expect(existsSync(join(state, "servers", "cli.json"))).toBe(true)
+})
+
+test("supersedes a healthy server built by a replaced runtime", async () => {
+  const state = tempState()
+  const workspace = "/wanted"
+  const runtime = fakeRuntime(state, "2")
+  // Same workspace, older build: healthy, but not ours any more.
+  const stale = { ...record(48201, workspace, Date.now()), version: "1", buildId: "old-build" }
+  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(stale))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const messages: string[] = []
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set([stale.port]), starts, new Map([[stale.port, stale]]))
+  testDeps.log = (message) => messages.push(message)
+
+  const result = await resolveChunkyConnection({
+    CHUNKY_HOME: state, CHUNKY_WORKSPACE: workspace, CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  // A server from the installed runtime is started instead of adopting the old one.
+  expect(starts.count).toBe(1)
+  expect(result.baseUrl).toBe("http://localhost:43210")
+  // The old server is retired through its discovery record, never by signal.
+  expect(existsSync(join(state, "servers", "cli.json"))).toBe(false)
+  expect(messages.join("\n")).toContain("predates runtime v2")
+  expect(messages.join("\n")).toContain("retiring superseded Chunky v1 server")
+})
+
+test("leaves another workspace's older server alone", async () => {
+  const state = tempState()
+  const runtime = fakeRuntime(state, "2")
+  const other = { ...record(48202, "/somewhere-else", Date.now()), version: "1", buildId: "old-build" }
+  writeFileSync(join(state, "servers", "other.json"), JSON.stringify(other))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set([other.port]), starts, new Map([[other.port, other]]))
+
+  await resolveChunkyConnection({
+    CHUNKY_HOME: state, CHUNKY_WORKSPACE: "/wanted", CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  expect(starts.count).toBe(1)
+  expect(existsSync(join(state, "servers", "other.json"))).toBe(true)
+})
+
+test("falls back to the stale server when the newer one cannot start", async () => {
+  const state = tempState()
+  const workspace = "/wanted"
+  const runtime = fakeRuntime(state, "2")
+  const stale = { ...record(48203, workspace, Date.now()), version: "1", buildId: "old-build" }
+  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(stale))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set([stale.port]), starts, new Map([[stale.port, stale]]))
+  testDeps.spawn = () => ({ pid: undefined }) // the spawn fails outright
+
+  const result = await resolveChunkyConnection({
+    CHUNKY_HOME: state, CHUNKY_WORKSPACE: workspace, CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  expect(result.baseUrl).toBe(`http://localhost:${stale.port}`)
+  expect(existsSync(join(state, "servers", "cli.json"))).toBe(true)
+})
+
+test("skips a server that is draining after being superseded", async () => {
+  const state = tempState()
+  const retiring = record(48204, "/wanted", Date.now())
+  writeFileSync(join(state, "servers", "retiring.json"), JSON.stringify(retiring))
+  const testDeps = deps(new Set([retiring.port]), { count: 0 })
+  testDeps.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(input.toString())
+    if (url.pathname === "/_chunky/server-identity") {
+      return new Response(JSON.stringify({ ...retiring, retiring: true }))
+    }
+    return new Response("{}", { status: 200 })
+  }) as typeof fetch
+
+  expect(await selectHealthyRecord(join(state, "servers"), "token", "/wanted", testDeps)).toBeUndefined()
+  // Draining is self-cleaning: its record is not ours to delete.
+  expect(existsSync(join(state, "servers", "retiring.json"))).toBe(true)
+})
+
+test("prunes records whose process is gone, keeping unreachable-but-alive ones", async () => {
+  const state = tempState()
+  writeFileSync(join(state, "servers", "dead.json"), JSON.stringify(record(48205, "/gone", 1)))
+  writeFileSync(join(state, "servers", "hung.json"), JSON.stringify(record(48206, "/hung", 2)))
+  const testDeps = deps(new Set(), { count: 0 })
+  testDeps.pidAlive = (pid) => pid === 48206 // the hung one is still running
+
+  expect(await selectHealthyRecord(join(state, "servers"), "token", undefined, testDeps, { prune: true })).toBeUndefined()
+  expect(existsSync(join(state, "servers", "dead.json"))).toBe(false)
+  expect(existsSync(join(state, "servers", "hung.json"))).toBe(true)
+})
+
+test("prefers a matching-runtime server over a newer stale one", async () => {
+  const state = tempState()
+  const matching = { ...record(48207, "/wanted", 1), version: "2", buildId: "build-2" }
+  const newerStale = { ...record(48208, "/wanted", 99), version: "1", buildId: "build-1" }
+  writeFileSync(join(state, "servers", "matching.json"), JSON.stringify(matching))
+  writeFileSync(join(state, "servers", "stale.json"), JSON.stringify(newerStale))
+  const live = new Set([matching.port, newerStale.port])
+  const testDeps = deps(live, { count: 0 })
+  testDeps.fetch = (async (input: RequestInfo | URL) => {
+    const url = new URL(input.toString())
+    const port = Number(url.port)
+    if (!live.has(port)) throw new Error("offline")
+    if (url.pathname === "/_chunky/server-identity") {
+      return new Response(JSON.stringify(port === matching.port ? matching : newerStale))
+    }
+    return new Response("{}", { status: 200 })
+  }) as typeof fetch
+
+  const chosen = await selectHealthyRecord(join(state, "servers"), "token", "/wanted", testDeps, {
+    prefer: { version: "2", buildId: "build-2" },
+  })
+  expect(chosen?.port).toBe(matching.port)
 })
 
 test("reports automatic runtime installation failure actionably", async () => {
@@ -152,4 +292,61 @@ test("starts an isolated runtime and waits until its authenticated server is rea
   expect(result.baseUrl).toBe("http://localhost:43210")
   expect(result.serverToken).toBeTruthy()
   expect(starts.count).toBe(1)
+})
+
+test("an upgraded runtime moves the app onto a server built from it", async () => {
+  const state = tempState()
+  const workspace = "/wanted"
+  const runtime = fakeRuntime(state, "2")
+  // The server the app is on today, from the runtime we just replaced.
+  const stale = { ...record(48301, workspace, Date.now()), version: "1", buildId: "old-build" }
+  writeFileSync(join(state, "servers", "cli.json"), JSON.stringify(stale))
+  writeFileSync(join(state, "settings.json"), JSON.stringify({ serverToken: "shared-token" }))
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set([stale.port]), starts, new Map([[stale.port, stale]]))
+  testDeps.upgradeRuntime = async () => ({ status: "upgraded", version: "2", previousVersion: "1" })
+
+  const result = await upgradeRuntimeAndReconnect({
+    CHUNKY_HOME: state, CHUNKY_WORKSPACE: workspace, CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  expect(result.upgraded).toBe(true)
+  expect(result.version).toBe("2")
+  expect(result.connection?.baseUrl).toBe("http://localhost:43210")
+  expect(starts.count).toBe(1)
+  // The superseded server is retired through its record, so it drains and exits.
+  expect(existsSync(join(state, "servers", "cli.json"))).toBe(false)
+})
+
+test("no runtime update means no reconnect", async () => {
+  const state = tempState()
+  const runtime = fakeRuntime(state, "2")
+  const starts = { count: 0 }
+  const testDeps = startableDeps(new Set(), starts, new Map())
+  testDeps.upgradeRuntime = async () => ({ status: "current", version: "2" })
+
+  const result = await upgradeRuntimeAndReconnect({
+    CHUNKY_HOME: state, CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  expect(result).toEqual({ upgraded: false, version: "2" })
+  expect(starts.count).toBe(0)
+})
+
+test("a failed runtime update is reported, not thrown, and changes nothing", async () => {
+  const state = tempState()
+  const runtime = fakeRuntime(state, "2")
+  const starts = { count: 0 }
+  const messages: string[] = []
+  const testDeps = startableDeps(new Set(), starts, new Map())
+  testDeps.log = (message) => messages.push(message)
+  testDeps.upgradeRuntime = async () => { throw new Error("release lookup unavailable") }
+
+  const result = await upgradeRuntimeAndReconnect({
+    CHUNKY_HOME: state, CHUNKY_RUNTIME_DIR: runtime.root,
+  }, testDeps)
+
+  expect(result).toEqual({ upgraded: false })
+  expect(starts.count).toBe(0)
+  expect(messages.join("\n")).toContain("update skipped: release lookup unavailable")
 })

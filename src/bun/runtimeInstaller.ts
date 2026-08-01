@@ -55,6 +55,40 @@ export function runtimeRoot(env: NodeJS.ProcessEnv, home = homedir()): string {
   return env.CHUNKY_RUNTIME_DIR || join(home, ".chunky", "app")
 }
 
+/** The version of the runtime installed at `root`, if it has one. */
+export function installedRuntimeVersion(root: string): string | undefined {
+  try {
+    const version = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown }).version
+    return typeof version === "string" && version ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Compare dotted versions: -1 when `a` is older, 1 when newer, 0 when the same.
+ * A prerelease suffix (1.2.3-beta.1) ranks BELOW the release it precedes, which
+ * is what keeps a local prerelease from being "upgraded" in a loop.
+ */
+export function compareVersions(a: string, b: string): -1 | 0 | 1 {
+  const split = (value: string) => {
+    const [core = "", pre = ""] = value.replace(/^v/, "").split("-", 2)
+    return { parts: core.split(".").map((part) => Number.parseInt(part, 10) || 0), pre }
+  }
+  const left = split(a)
+  const right = split(b)
+  const length = Math.max(left.parts.length, right.parts.length)
+  for (let index = 0; index < length; index++) {
+    const one = left.parts[index] ?? 0
+    const other = right.parts[index] ?? 0
+    if (one !== other) return one > other ? 1 : -1
+  }
+  if (left.pre === right.pre) return 0
+  if (!left.pre) return 1
+  if (!right.pre) return -1
+  return left.pre > right.pre ? 1 : -1
+}
+
 export function hasRuntime(root: string): boolean {
   if (!existsSync(join(root, "packages", "server", "src", "index.ts")) || !existsSync(join(root, "package.json"))) return false
   try {
@@ -120,41 +154,45 @@ function run(command: string[], cwd: string, deps: RuntimeInstallerDependencies,
   if (result.exitCode !== 0) throw new Error(`${description}${result.stderr?.trim() ? `: ${result.stderr.trim()}` : ""}`)
 }
 
-/** Download and atomically install the latest released Chunky runtime. */
-export async function installRuntime(
-  env: NodeJS.ProcessEnv = process.env,
-  injected: Partial<RuntimeInstallerDependencies> = {},
-): Promise<void> {
-  const deps = { ...defaults, ...injected }
-  const root = runtimeRoot(env, deps.homeDir)
-  const parent = dirname(root)
-  const name = basename(root)
-  const temporary = join(parent, `${name}.new`)
-  const previous = join(parent, `${name}.old`)
-  const archive = join(parent, `${name}.update.tar.gz`)
-  mkdirSync(parent, { recursive: true })
-  const release = await acquireInstallLock(join(parent, `.${name}.install.lock`), deps)
+interface LatestRelease {
+  tag: string
+  downloadUrl: string
+}
+
+/** The newest published runtime release (tag + tarball URL). */
+async function fetchLatestRelease(deps: RuntimeInstallerDependencies): Promise<LatestRelease> {
+  let response: Response
   try {
-    // Another desktop instance may have completed its install while we waited.
-    if (hasRuntime(root)) return
-    deps.log("Installing Chunky server…")
+    response = await deps.fetch(RELEASE_URL, { headers: { Accept: "application/vnd.github+json" } })
+  } catch (error) {
+    throw new Error(`Could not check GitHub for the latest Chunky release. Check your network connection or GitHub API rate limit and retry. (${error instanceof Error ? error.message : "request failed"})`)
+  }
+  if (!response.ok) throw new Error(`Could not check GitHub for the latest Chunky release (HTTP ${response.status}). GitHub may be rate limiting unauthenticated requests; wait and retry.`)
 
-    let response: Response
-    try {
-      response = await deps.fetch(RELEASE_URL, { headers: { Accept: "application/vnd.github+json" } })
-    } catch (error) {
-      throw new Error(`Could not check GitHub for the latest Chunky release. Check your network connection or GitHub API rate limit and retry. (${error instanceof Error ? error.message : "request failed"})`)
-    }
-    if (!response.ok) throw new Error(`Could not check GitHub for the latest Chunky release (HTTP ${response.status}). GitHub may be rate limiting unauthenticated requests; wait and retry.`)
+  let latest: Release
+  try { latest = await response.json() as Release } catch { throw new Error("GitHub returned an invalid latest-release response. Please retry.") }
+  const asset = latest.assets?.find((candidate) => typeof candidate.name === "string" && /\.tar\.gz$|\.tgz$/.test(candidate.name) && typeof candidate.browser_download_url === "string")
+  const tag = typeof latest.tag_name === "string" ? latest.tag_name.replace(/^v/, "") : ""
+  if (!asset || !tag) throw new Error("The latest Chunky release did not include a versioned .tar.gz or .tgz runtime archive.")
+  return { tag, downloadUrl: asset.browser_download_url as string }
+}
 
-    let latest: Release
-    try { latest = await response.json() as Release } catch { throw new Error("GitHub returned an invalid latest-release response. Please retry.") }
-    const asset = latest.assets?.find((candidate) => typeof candidate.name === "string" && /\.tar\.gz$|\.tgz$/.test(candidate.name) && typeof candidate.browser_download_url === "string")
-    const tag = typeof latest.tag_name === "string" ? latest.tag_name.replace(/^v/, "") : ""
-    if (!asset || !tag) throw new Error("The latest Chunky release did not include a versioned .tar.gz or .tgz runtime archive.")
-
+/**
+ * Download `release` into `<root>.new`, install its dependencies and verify it.
+ * Nothing touches the live runtime, so any failure in here leaves the installed
+ * one exactly as it was.
+ */
+async function stageRelease(
+  release: LatestRelease,
+  env: NodeJS.ProcessEnv,
+  paths: { root: string; parent: string; temporary: string; archive: string },
+  deps: RuntimeInstallerDependencies,
+): Promise<void> {
+  const { parent, temporary, archive } = paths
+  const tag = release.tag
+  {
     let archiveResponse: Response
-    try { archiveResponse = await deps.fetch(asset.browser_download_url as string) } catch (error) {
+    try { archiveResponse = await deps.fetch(release.downloadUrl) } catch (error) {
       throw new Error(`Could not download the Chunky runtime archive. Check your network connection and retry. (${error instanceof Error ? error.message : "request failed"})`)
     }
     if (!archiveResponse.ok) throw new Error(`Could not download the Chunky runtime archive (HTTP ${archiveResponse.status}). Please retry.`)
@@ -182,18 +220,114 @@ export async function installRuntime(
       try { chmodSync(binary, 0o755) } catch {}
     }
 
-    const installedVersion = (JSON.parse(readFileSync(join(temporary, "package.json"), "utf8")) as { version?: unknown }).version
-    if (installedVersion !== tag) throw new Error(`Expected Chunky release v${tag}, but its package.json reports v${typeof installedVersion === "string" ? installedVersion : "unknown"}.`)
-    rmSync(previous, { recursive: true, force: true })
-    if (existsSync(root)) renameSync(root, previous)
-    // rename is atomic when source and destination are on this filesystem.
-    try { renameSync(temporary, root) } catch (error) {
-      throw new Error(`Could not activate the installed Chunky runtime: ${error instanceof Error ? error.message : "rename failed"}`)
+    // Verify BEFORE anything is swapped in: a half-downloaded or mislabelled
+    // release must never replace a working runtime.
+    const stagedVersion = installedRuntimeVersion(temporary)
+    if (stagedVersion !== tag) throw new Error(`Expected Chunky release v${tag}, but its package.json reports v${stagedVersion ?? "unknown"}.`)
+    if (!hasRuntime(temporary)) throw new Error(`The downloaded Chunky runtime v${tag} is incomplete.`)
+  }
+}
+
+/** Swap the staged runtime in, keeping the replaced one as `<root>.old`. */
+function activateStaged(
+  tag: string,
+  paths: { root: string; temporary: string; previous: string; archive: string },
+): void {
+  const { root, temporary, previous, archive } = paths
+  rmSync(previous, { recursive: true, force: true })
+  if (existsSync(root)) renameSync(root, previous)
+  // rename is atomic when source and destination are on this filesystem.
+  try { renameSync(temporary, root) } catch (error) {
+    // Put the previous runtime back rather than leaving the app with none.
+    if (!existsSync(root) && existsSync(previous)) {
+      try { renameSync(previous, root) } catch { /* nothing better to try */ }
     }
-    const activeVersion = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown }).version
-    if (activeVersion !== tag || !hasRuntime(root)) throw new Error(`Installed Chunky runtime verification failed: expected v${tag}.`)
-    rmSync(archive, { force: true })
+    throw new Error(`Could not activate the installed Chunky runtime: ${error instanceof Error ? error.message : "rename failed"}`)
+  }
+  const activeVersion = installedRuntimeVersion(root)
+  if (activeVersion !== tag || !hasRuntime(root)) throw new Error(`Installed Chunky runtime verification failed: expected v${tag}.`)
+  rmSync(archive, { force: true })
+}
+
+function runtimePaths(env: NodeJS.ProcessEnv, deps: RuntimeInstallerDependencies) {
+  const root = runtimeRoot(env, deps.homeDir)
+  const parent = dirname(root)
+  const name = basename(root)
+  return {
+    root,
+    parent,
+    name,
+    temporary: join(parent, `${name}.new`),
+    previous: join(parent, `${name}.old`),
+    archive: join(parent, `${name}.update.tar.gz`),
+    lock: join(parent, `.${name}.install.lock`),
+  }
+}
+
+/** Download and atomically install the latest released Chunky runtime. Skips
+ *  the work when a usable runtime is already installed (see upgradeRuntime for
+ *  replacing an OLDER one). */
+export async function installRuntime(
+  env: NodeJS.ProcessEnv = process.env,
+  injected: Partial<RuntimeInstallerDependencies> = {},
+): Promise<void> {
+  const deps = { ...defaults, ...injected }
+  const paths = runtimePaths(env, deps)
+  mkdirSync(paths.parent, { recursive: true })
+  const releaseLock = await acquireInstallLock(paths.lock, deps)
+  try {
+    // Another desktop instance may have completed its install while we waited.
+    if (hasRuntime(paths.root)) return
+    deps.log("Installing Chunky server…")
+    const release = await fetchLatestRelease(deps)
+    await stageRelease(release, env, paths, deps)
+    activateStaged(release.tag, paths)
   } finally {
-    release()
+    releaseLock()
+  }
+}
+
+export type RuntimeUpgrade =
+  /** A runtime was installed where there was none. */
+  | { status: "installed"; version: string }
+  /** An older runtime was replaced. */
+  | { status: "upgraded"; version: string; previousVersion?: string }
+  /** Nothing to do: the installed runtime is the latest (or newer). */
+  | { status: "current"; version: string }
+
+/**
+ * Replace an OLDER installed runtime with the latest release, so the desktop
+ * app stops being pinned to whatever it first installed. The swap only happens
+ * after the download verifies, and a newer local runtime is never downgraded.
+ *
+ * Callers treat failures as non-fatal: the existing runtime keeps serving.
+ */
+export async function upgradeRuntime(
+  env: NodeJS.ProcessEnv = process.env,
+  injected: Partial<RuntimeInstallerDependencies> = {},
+): Promise<RuntimeUpgrade> {
+  const deps = { ...defaults, ...injected }
+  const paths = runtimePaths(env, deps)
+  if (!hasRuntime(paths.root)) {
+    await installRuntime(env, injected)
+    return { status: "installed", version: installedRuntimeVersion(paths.root) ?? "unknown" }
+  }
+  const current = installedRuntimeVersion(paths.root)
+  const release = await fetchLatestRelease(deps)
+  // Never downgrade: a local build ahead of the published release stays.
+  if (current && compareVersions(release.tag, current) <= 0) return { status: "current", version: current }
+
+  mkdirSync(paths.parent, { recursive: true })
+  const releaseLock = await acquireInstallLock(paths.lock, deps)
+  try {
+    // Another instance may have upgraded while we waited for the lock.
+    const afterLock = installedRuntimeVersion(paths.root)
+    if (afterLock && compareVersions(release.tag, afterLock) <= 0) return { status: "current", version: afterLock }
+    deps.log(`Updating the Chunky server to v${release.tag}…`)
+    await stageRelease(release, env, paths, deps)
+    activateStaged(release.tag, paths)
+    return { status: "upgraded", version: release.tag, previousVersion: afterLock ?? current }
+  } finally {
+    releaseLock()
   }
 }

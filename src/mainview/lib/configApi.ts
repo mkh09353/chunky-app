@@ -69,6 +69,15 @@ function base(): Promise<string> {
   return basePromise
 }
 
+/**
+ * Point this module at a different server (or forget the memo so the next call
+ * resolves again). Called when the app re-resolves onto a replacement server:
+ * without it every configApi request would keep addressing the dead one.
+ */
+export function setBaseUrl(nextBaseUrl?: string): void {
+  basePromise = nextBaseUrl ? Promise.resolve(nextBaseUrl) : null
+}
+
 function errText(data: unknown, fallback: string): string {
   return bodyError(data) ?? fallback
 }

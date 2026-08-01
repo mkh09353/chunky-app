@@ -80,19 +80,70 @@ const DEFAULT_CONFIG: AppConfig = {
 }
 
 let fetchInstalled = false
+// Held separately from the wrapper so re-resolving onto another server can swap
+// the credential without stacking a second fetch wrapper.
+let authToken: string | undefined
 
 /** Install a once-only fetch wrapper that attaches the bearer token. Never logs it. */
 function installAuthFetch(token?: string): void {
-  if (fetchInstalled || !token) return
+  if (token) authToken = token
+  if (fetchInstalled || !authToken) return
   fetchInstalled = true
   const original = globalThis.fetch
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers)
-    if (!headers.has("Authorization")) {
-      headers.set("Authorization", `Bearer ${token}`)
+    if (authToken && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${authToken}`)
     }
     return original(input, { ...init, headers })
   }) as typeof fetch
+}
+
+/**
+ * Ask Bun to resolve the server again (see src/bun/connectionManager
+ * refreshChunkyConnection) and adopt the result — the app moves onto a
+ * replacement server after its own was superseded or died. Without the native
+ * bridge (plain browser build) this is just loadConfig.
+ */
+export async function reresolveConfig(): Promise<AppConfig> {
+  try {
+    const rpc = await getRpc()
+    const fn = rpc?.request?.chunkyReconnect
+    if (fn) {
+      const data = (await fn()) as Partial<AppConfig> | null
+      if (data?.baseUrl) {
+        installAuthFetch(data.serverToken)
+        return {
+          baseUrl: data.baseUrl,
+          serverToken: data.serverToken,
+          workspace: data.workspace || DEFAULT_CONFIG.workspace,
+          connectionError: data.connectionError,
+        }
+      }
+      if (data?.connectionError) {
+        return { ...DEFAULT_CONFIG, baseUrl: "", connectionError: data.connectionError }
+      }
+    }
+  } catch {
+    /* fall through to a plain resolve */
+  }
+  return loadConfig()
+}
+
+/** Does this server say it is retiring (draining after being superseded)?
+ *  Unauthenticated launcher metadata; false whenever it cannot be determined. */
+export async function fetchServerRetiring(baseUrl: string): Promise<boolean> {
+  if (!baseUrl) return false
+  try {
+    const res = await fetch(`${baseUrl}/_chunky/server-identity`, {
+      signal: AbortSignal.timeout(2_000),
+    })
+    if (!res.ok) return false
+    const identity = (await res.json()) as { retiring?: unknown }
+    return identity?.retiring === true
+  } catch {
+    return false
+  }
 }
 
 export async function loadConfig(): Promise<AppConfig> {

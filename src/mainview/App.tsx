@@ -36,6 +36,7 @@ import {
   createSession,
   fetchModel,
   fetchServerInfo,
+  fetchServerRetiring,
   interruptSession,
   forkSession, getGoal, getRewindPoints, getScoreboard, getUsage, renameSession, rewindSession, setGoal, shipSession,
   listAllModels,
@@ -69,6 +70,7 @@ import {
   runCloneSession,
 } from "./lib/cloneRepo"
 import { cloneRoots } from "./lib/dirSearch"
+import { reresolveConnection, shouldReresolve, subscribeServerChanged } from "./lib/reresolve"
 import {
   desktopUiSnapshot,
   forgetRepoSessions,
@@ -687,6 +689,23 @@ export function App() {
       }
     }
 
+    /** After a failed attachment: when the evidence says the server is gone or
+     *  retiring (not just a hiccup), resolve the connection again and reattach
+     *  to whatever is serving this workspace now. Returns true once this loop
+     *  has handed over — the replacement attachment owns the session from
+     *  there, and full-history replay restores the transcript. */
+    const handOverToReplacement = async (failure?: unknown): Promise<boolean> => {
+      if (!shouldReresolve({ attempts: attempt, error: failure })) return false
+      const next = await reresolveConnection()
+      if (!next || ac.signal.aborted || gen !== attachGen.current) return false
+      if (next.baseUrl === baseUrl) return false
+      // config first: every base-URL-derived caller reads it, and configApi's
+      // memo was already repointed inside reresolveConnection().
+      setConfig(next)
+      void attachSession(next.baseUrl, id)
+      return true
+    }
+
     for (;;) {
       try {
         if (gen !== attachGen.current) return
@@ -697,6 +716,7 @@ export function App() {
         setConnectionState("reconnecting")
         attempt += 1
         await sleep(reconnectDelay(attempt - 1), ac.signal)
+        if (await handOverToReplacement()) return
       } catch (err) {
         if (isIntentionalAbort(err, ac.signal) || gen !== attachGen.current) return
         attempt += 1
@@ -707,6 +727,7 @@ export function App() {
         } catch {
           return
         }
+        if (await handOverToReplacement(err)) return
       }
       if (ac.signal.aborted || gen !== attachGen.current) return
       // The protocol has no since/offset cursor: a new stream always starts at
@@ -748,6 +769,24 @@ export function App() {
     },
     [attachSession, refreshSessions],
   )
+
+  /**
+   * Resolve the server again and reattach to whatever is serving this workspace
+   * now. Shared by the two "the server moved" signals: the retiring probe below
+   * and Bun's announcement after it replaces the installed runtime. Returns
+   * false when nothing changed, so callers can fall back to their own retrying.
+   */
+  const moveToResolvedServer = useCallback(async (): Promise<boolean> => {
+    if (appMode !== "live") return false
+    const next = await reresolveConnection()
+    if (!next?.baseUrl || next.baseUrl === config?.baseUrl) return false
+    setConfig(next)
+    setConnectionState("reconnecting")
+    const sessionId = sessionIdRef.current
+    if (sessionId) void attachSession(next.baseUrl, sessionId)
+    else void openRepoThreads(next.baseUrl, activeRepoIdRef.current)
+    return true
+  }, [appMode, config, attachSession, openRepoThreads])
 
   // ---- Boot ----
   useEffect(() => {
@@ -892,10 +931,34 @@ export function App() {
         playCompletionHorn()
       })
     }
+    /** Proactive handover: a server that is draining after an update will stop
+     *  serving shortly, so move to its replacement BEFORE the stream drops
+     *  rather than after. Advisory — a failure just leaves the reconnect loop
+     *  to notice the hard way. */
+    const checkRetirement = () => {
+      void fetchServerRetiring(config.baseUrl).then(async (retiring) => {
+        if (!retiring || appMode !== "live") return
+        await moveToResolvedServer()
+      }).catch(() => {})
+    }
+
     refreshAllRepos()
-    const t = setInterval(refreshAllRepos, 5_000)
+    checkRetirement()
+    const t = setInterval(() => {
+      refreshAllRepos()
+      checkRetirement()
+    }, 5_000)
     return () => clearInterval(t)
-  }, [config, appMode, connectionState, refreshSessions, repos])
+  }, [config, appMode, connectionState, refreshSessions, repos, moveToResolvedServer])
+
+  // Bun replaced the installed Chunky server and resolved a new one; reattach
+  // to it. The superseded server is draining, so this is a handover, not a loss.
+  useEffect(() => {
+    if (appMode !== "live") return
+    return subscribeServerChanged(() => {
+      void moveToResolvedServer()
+    })
+  }, [appMode, moveToResolvedServer])
 
   // A transition is meaningful only after this connected renderer observed the
   // running state. That avoids replay/initial-load notifications and dots.
@@ -1716,12 +1779,17 @@ export function App() {
     setAppMode("live")
     setConnError(null)
     setConnectionState("connecting")
+    // The server we lost may have been replaced by a newer build on another
+    // port, so resolve again before retrying the address that failed.
+    const resolved = (await reresolveConnection()) ?? config
+    const baseUrl = resolved.baseUrl || config.baseUrl
+    if (resolved.baseUrl && resolved.baseUrl !== config.baseUrl) setConfig(resolved)
     try {
       const [info, reg, sel, rows] = await Promise.all([
-        fetchServerInfo(config.baseUrl),
-        listRepos(config.baseUrl).catch(() => null),
-        fetchModel(config.baseUrl),
-        listAllModels(config.baseUrl).catch(() => [] as ModelRow[]),
+        fetchServerInfo(baseUrl),
+        listRepos(baseUrl).catch(() => null),
+        fetchModel(baseUrl),
+        listAllModels(baseUrl).catch(() => [] as ModelRow[]),
       ])
       setWorkspace(info.workspace || "")
       setModelSel(sel)
@@ -1741,15 +1809,15 @@ export function App() {
       }
 
       if (sessionIdRef.current) {
-        void attachSession(config.baseUrl, sessionIdRef.current)
-        void refreshSessions(config.baseUrl, activeRepoIdRef.current).catch(() => {})
+        void attachSession(baseUrl, sessionIdRef.current)
+        void refreshSessions(baseUrl, activeRepoIdRef.current).catch(() => {})
       } else {
-        await openRepoThreads(config.baseUrl, activeRepoIdRef.current)
+        await openRepoThreads(baseUrl, activeRepoIdRef.current)
       }
     } catch (err) {
       setConnectionState("offline")
       setConnError(
-        `Can't reach Chunky server at ${config.baseUrl}. (${(err as Error).message})`,
+        `Can't reach Chunky server at ${baseUrl}. (${(err as Error).message})`,
       )
     }
   }, [config, attachSession, openRepoThreads, refreshSessions])

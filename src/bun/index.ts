@@ -12,7 +12,13 @@ import {
 import { createDirectory } from "./fsOps"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
-import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
+import {
+  refreshChunkyConnection,
+  releaseChunkyConnection,
+  rememberChunkyWorkspace,
+  resolveChunkyConnection,
+  upgradeRuntimeAndReconnect,
+} from "./connectionManager"
 import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
@@ -41,8 +47,28 @@ const extraRoots = [parentRoot(workspace)].filter((p): p is string => !!p)
 
 let updateInProgress = false
 
+/**
+ * Keep the installed Chunky server (~/.chunky/app) current. Silent on success:
+ * the replacement server takes over and the old one drains, so the only thing
+ * the renderer has to do is reattach — which the message below tells it to do.
+ *
+ * Deliberately not a polling loop: this runs once at boot and whenever the
+ * Electrobun updater check runs.
+ */
+async function checkRuntimeUpdate(): Promise<void> {
+  const result = await upgradeRuntimeAndReconnect()
+  if (!result.upgraded) return
+  const baseUrl = result.connection?.baseUrl
+  if (!baseUrl) return
+  const send = rpc?.send as unknown as Record<string, (value: unknown) => void> | undefined
+  send?.chunkyServerChanged?.({ baseUrl, version: result.version })
+}
+
 /** Check, download, and offer to restart for an Electrobun release update. */
 async function checkForUpdates({ interactive = false } = {}): Promise<void> {
+  // The bundled app and the Chunky server update independently; check both
+  // whenever we check either.
+  void checkRuntimeUpdate()
   if (updateInProgress) return
 
   try {
@@ -191,6 +217,21 @@ rpc = createRPC({
     // token stay in Bun; production renderer assets never contain credentials.
     getConfig: async () => {
       const config = await resolveChunkyConnection()
+      return {
+        ...config,
+        workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
+      }
+    },
+
+    /**
+     * Re-resolve the Chunky server. The renderer calls this when its stream
+     * cannot come back (refused connections, or the server announced that it is
+     * retiring after an update): discovery runs again, so the app moves onto the
+     * replacement server — starting one if necessary — instead of retrying a
+     * dead port.
+     */
+    chunkyReconnect: async () => {
+      const config = await refreshChunkyConnection()
       return {
         ...config,
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
@@ -431,4 +472,5 @@ void win
 console.log("[chunky] window ready")
 
 // Do not delay window startup or surface a dialog unless an update exists.
+// checkForUpdates also refreshes the installed Chunky server runtime.
 setTimeout(() => void checkForUpdates(), 4_000)
