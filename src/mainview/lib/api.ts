@@ -14,6 +14,9 @@ import {
   type ListSessionsResponse,
   type MessageDelivery,
   type FileSearchItem,
+  type PromoteQueueRequest,
+  type PromoteQueueResult,
+  type QueueEntry,
   type ReposResponse,
   type SendBlockedResponse,
   type ServerInfoResponse,
@@ -325,6 +328,50 @@ export async function sendMessage(
   }
   return null
 }
+
+// ---- Queued prompts ------------------------------------------------------
+// A queued message is server state (an in-memory PromptQueue), so acting on one
+// is a server round-trip: there is no client-side queue to mutate.
+
+/** Remove a still-queued entry. `false` means the server no longer had it —
+ *  the drainer already claimed it, so it is running and the chip is stale.
+ *  That is a normal outcome, not an error, so it doesn't throw. */
+export async function deleteQueueEntry(
+  baseUrl: string,
+  sessionId: string,
+  entryId: string,
+): Promise<{ removed: boolean }> {
+  const res = await fetch(baseUrl + ROUTES.queueEntry(sessionId, entryId), { method: "DELETE" })
+  if (res.status === 404) return { removed: false }
+  if (!res.ok) throw new Error(`couldn't remove the queued message (${res.status})`)
+  const data = (await res.json().catch(() => ({}))) as { removed?: boolean }
+  return { removed: data.removed !== false }
+}
+
+/**
+ * Claim a queued entry and re-deliver it as a steer/interjection.
+ *
+ * The claim is atomic server-side (PromptQueue.take), which is what makes this
+ * safe: either this call owns the entry and the server delivers it, or the
+ * queue drainer already did. The caller never has to remove-then-resend and
+ * risk losing the text in between.
+ */
+export async function promoteQueueEntry(
+  baseUrl: string,
+  sessionId: string,
+  entryId: string,
+  delivery: PromoteQueueRequest["delivery"],
+): Promise<PromoteQueueResult> {
+  const res = await fetch(baseUrl + ROUTES.promoteQueueEntry(sessionId, entryId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ delivery } satisfies PromoteQueueRequest),
+  })
+  if (!res.ok) throw new Error(`couldn't steer the queued message (${res.status})`)
+  return (await res.json()) as PromoteQueueResult
+}
+
+export type { PromoteQueueResult, QueueEntry }
 
 /** Fuzzy file/directory search used by the composer @-mention menu. */
 export async function searchFiles(
