@@ -1,13 +1,29 @@
-import { CloudDownload, Eye, Folder, FolderOpen, Loader2, Plus, Search, X } from "lucide-react"
+import {
+  AlertCircle,
+  Check,
+  CloudDownload,
+  Copy,
+  Eye,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Loader2,
+  Plus,
+  Search,
+  X,
+} from "lucide-react"
 import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react"
 import type { Repo } from "~/lib/api"
+import { copyText } from "~/lib/clipboard"
 import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import {
@@ -15,8 +31,9 @@ import {
   searchDirectories,
   type DirSearchHit,
 } from "~/lib/dirSearch"
+import { createDirectory, folderNameError, nativeFsAvailable } from "~/lib/fsOps"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
-import { parseGitUrl } from "~/lib/cloneRepo"
+import { joinPath, parseGitUrl } from "~/lib/cloneRepo"
 import { scmClone } from "~/lib/git"
 import { nativeRpcAvailable } from "~/lib/rpc"
 import { Button } from "./ui/button"
@@ -24,11 +41,17 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu"
 
 const SEARCH_DEBOUNCE_MS = 180
+/** How long a tab shows the "copied" check before returning to its folder icon. */
+const COPY_FEEDBACK_MS = 1500
+
+/** Which source the popover is adding a repository from. */
+type AddMode = "existing" | "new"
 
 /** Live state of an in-flight clone, owned by App and rendered here. */
 export interface CloneStatus {
@@ -76,10 +99,31 @@ export function RepoTabs({
   defaultCloneParent?: string
 }) {
   const [adding, setAdding] = useState(false)
+  const [addMode, setAddMode] = useState<AddMode>("existing")
   const [path, setPath] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [picking, setPicking] = useState(false)
+
+  // "New folder": a parent directory + a name, created through Bun RPC and then
+  // registered through the ordinary add path.
+  const canCreateFolder = nativeFsAvailable()
+  const [newParent, setNewParent] = useState(defaultCloneParent)
+  const [newName, setNewName] = useState("")
+  const [newError, setNewError] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  // The folder we already made on disk. Set once mkdir succeeds, so a failure
+  // to REGISTER it doesn't strand the user: retrying re-runs only the add,
+  // instead of a second mkdir that would now report "already exists".
+  const [createdPath, setCreatedPath] = useState<string | null>(null)
+  const newNameRef = useRef<HTMLInputElement>(null)
+
+  // Copy-path affordances: the right-click menu on a tab, and the short-lived
+  // marker that replaces that tab's folder icon once the path is (or isn't) on
+  // the clipboard — a silent no-op would look identical to success.
+  const [tabMenu, setTabMenu] = useState<{ repoId: string; x: number; y: number } | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<{ repoId: string; ok: boolean } | null>(null)
+  const copyTimer = useRef<number | null>(null)
 
   // Native-only fuzzy directory discovery (hidden in web mode).
   const canNative = nativePickerAvailable()
@@ -110,10 +154,55 @@ export function RepoTabs({
   const formId = useId()
   const listboxId = useId()
 
-  // The default only seeds the field; never clobber what the user typed.
+  // The default only seeds the fields; never clobber what the user typed.
   useEffect(() => {
     setCloneDest((current) => (current ? current : defaultCloneParent))
+    setNewParent((current) => (current ? current : defaultCloneParent))
   }, [defaultCloneParent])
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    }
+  }, [])
+
+  /** Put a repo's absolute path on the clipboard and flash a check on its tab.
+   *  Falls back to execCommand inside the packaged WKWebView (see lib/clipboard). */
+  const copyRepoPath = useCallback(async (repo: Repo) => {
+    const ok = await copyText(repo.path)
+    setCopyFeedback({ repoId: repo.id, ok })
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => {
+      setCopyFeedback(null)
+      copyTimer.current = null
+    }, COPY_FEEDBACK_MS)
+  }, [])
+
+  const openTabMenu = useCallback((repoId: string, e: ReactMouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setTabMenu({ repoId, x: e.clientX, y: e.clientY })
+  }, [])
+
+  const menuRepo = tabMenu ? (repos.find((r) => r.id === tabMenu.repoId) ?? null) : null
+  // A zero-size virtual element at the cursor — the same shape Base UI's own
+  // ContextMenu anchors to (mirrors ExternalLinkMenu).
+  const menuX = tabMenu?.x ?? 0
+  const menuY = tabMenu?.y ?? 0
+  const menuAnchor = useMemo(
+    () => ({
+      getBoundingClientRect: () => DOMRect.fromRect({ x: menuX, y: menuY, width: 0, height: 0 }),
+    }),
+    [menuX, menuY],
+  )
+
+  // Without the native bridge there is nothing to create a folder with, so the
+  // toggle stays hidden and the popover behaves exactly as it did before.
+  const mode: AddMode = canCreateFolder ? addMode : "existing"
+  const newFolderPath =
+    newParent.trim().startsWith("/") && newName.trim()
+      ? joinPath(newParent.trim(), newName.trim())
+      : ""
 
   // Keep the newest agent activity in view (the log is short and scrolls).
   useEffect(() => {
@@ -124,8 +213,12 @@ export function RepoTabs({
 
   const closeAdd = useCallback(() => {
     setAdding(false)
+    setAddMode("existing")
     setPath("")
     setError(null)
+    setNewName("")
+    setNewError(null)
+    setCreatedPath(null)
     setCloneError(null)
     setQuery("")
     setHits([])
@@ -154,13 +247,15 @@ export function RepoTabs({
 
   useEffect(() => {
     if (!adding) return
-    // Prefer search field when native search is available; else path paste.
+    // New-folder mode: the name is the only thing to type. Otherwise prefer the
+    // search field when native search is available; else path paste.
     const t = window.setTimeout(() => {
-      if (canSearch) searchInputRef.current?.focus()
+      if (addMode === "new") newNameRef.current?.focus()
+      else if (canSearch) searchInputRef.current?.focus()
       else pathInputRef.current?.focus()
     }, 0)
     return () => window.clearTimeout(t)
-  }, [adding, canSearch])
+  }, [adding, canSearch, addMode])
 
   // Debounced FFF directory search.
   useEffect(() => {
@@ -237,6 +332,63 @@ export function RepoTabs({
     [path, onAdd, closeAdd],
   )
 
+  /** Create an empty folder through Bun RPC (the renderer has no filesystem),
+   *  then register it exactly like a folder the user picked. */
+  const submitNewFolder = useCallback(async () => {
+    if (creating || submitting) return
+
+    // Already created on a previous attempt: only the registration is left.
+    // Re-running mkdir here would fail with "already exists" and dead-end the
+    // user on a folder we made ourselves.
+    if (createdPath) {
+      setCreating(true)
+      setNewError(null)
+      try {
+        await onAdd(createdPath)
+        closeAdd()
+      } catch (err) {
+        setNewError((err as Error).message || "Couldn't add that folder.")
+      } finally {
+        setCreating(false)
+      }
+      return
+    }
+
+    const parentDir = newParent.trim()
+    if (!parentDir.startsWith("/")) {
+      setNewError("Choose an absolute parent folder.")
+      return
+    }
+    const nameProblem = folderNameError(newName)
+    if (nameProblem) {
+      setNewError(nameProblem)
+      return
+    }
+    setCreating(true)
+    setNewError(null)
+    try {
+      const result = await createDirectory({ parentDir, name: newName.trim() })
+      if (!result.ok || !result.path) {
+        setNewError(result.error ?? "Couldn't create that folder.")
+        return
+      }
+      // Remember it BEFORE registering: if onAdd throws, the retry path above
+      // picks up from here rather than starting over.
+      setCreatedPath(result.path)
+      try {
+        await onAdd(result.path)
+        closeAdd()
+      } catch (err) {
+        const why = (err as Error).message || "Couldn't add that folder."
+        setNewError(`The folder was created, but adding it failed: ${why}`)
+      }
+    } catch (err) {
+      setNewError((err as Error).message || "Couldn't create that folder.")
+    } finally {
+      setCreating(false)
+    }
+  }, [creating, submitting, createdPath, newParent, newName, onAdd, closeAdd])
+
   /** Hand the URL + destination to the agent-backed clone flow (App owns the
    *  session, streaming, and the addRepo that follows). */
   const submitClone = useCallback(async () => {
@@ -306,7 +458,7 @@ export function RepoTabs({
   /** `target` picks which field the chosen folder fills: the repo to add, or
    *  the destination a clone lands in. Fill only — the user still confirms. */
   const onChooseFolder = useCallback(
-    async (target: "path" | "clone" = "path") => {
+    async (target: "path" | "clone" | "new" = "path") => {
       if (!canNative || picking || submitting) return
       setPicking(true)
       setError(null)
@@ -317,6 +469,11 @@ export function RepoTabs({
           setCloneDest(picked)
           setCloneError(null)
           cloneUrlRef.current?.focus()
+        } else if (target === "new") {
+          setNewParent(picked)
+          setNewError(null)
+          setCreatedPath(null)
+          newNameRef.current?.focus()
         } else {
           setPath(picked)
           pathInputRef.current?.focus()
@@ -365,13 +522,22 @@ export function RepoTabs({
       >
         {repos.map((r) => {
           const active = r.id === activeId
+          const feedback = copyFeedback?.repoId === r.id ? copyFeedback : null
           return (
-            <div key={r.id} className="group/tab relative flex shrink-0 items-center">
+            <div
+              key={r.id}
+              className="group/tab relative flex shrink-0 items-center"
+              // Right-click anywhere on the tab (including its menu button) is
+              // the discoverable way to grab the repo's absolute path.
+              onContextMenu={(e) => openTabMenu(r.id, e)}
+            >
               <button
                 type="button"
                 role="tab"
                 aria-selected={active}
-                title={r.path}
+                title={
+                  feedback ? (feedback.ok ? "Path copied" : "Couldn't copy the path") : r.path
+                }
                 disabled={disabled || busy}
                 onClick={() => onSelect(r.id)}
                 className={cn(
@@ -383,7 +549,15 @@ export function RepoTabs({
                   (disabled || busy) && "opacity-60",
                 )}
               >
-                <Folder className="size-3.5 shrink-0 opacity-80" />
+                {feedback ? (
+                  feedback.ok ? (
+                    <Check className="size-3.5 shrink-0 text-primary" />
+                  ) : (
+                    <AlertCircle className="size-3.5 shrink-0 text-destructive" />
+                  )
+                ) : (
+                  <Folder className="size-3.5 shrink-0 opacity-80" />
+                )}
                 <span className="truncate">{r.name}</span>
                 {unreadRepoIds?.has(r.id) && (
                   <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="unread completion" />
@@ -411,6 +585,10 @@ export function RepoTabs({
                       {r.path}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => void copyRepoPath(r)}>
+                      <Copy />
+                      Copy path
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       variant="destructive"
                       onClick={() => void onRemove(r.id)}
@@ -424,6 +602,65 @@ export function RepoTabs({
           )
         })}
       </div>
+
+      {/* Copy outcomes are otherwise only a 1.5s icon swap: announce them too,
+          so the result reaches a screen reader (and a failure is never a
+          silent no-op). */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copyFeedback
+          ? copyFeedback.ok
+            ? "Repository path copied to the clipboard"
+            : "Couldn't copy the repository path"
+          : ""}
+      </span>
+
+      {/* Right-click menu for any tab. One menu for the whole row, anchored to
+          the cursor; `modal={false}` so it never freezes the app behind it. */}
+      {menuRepo && (
+        <DropdownMenu
+          open
+          modal={false}
+          onOpenChange={(open) => {
+            if (!open) setTabMenu(null)
+          }}
+        >
+          <DropdownMenuContent
+            anchor={menuAnchor}
+            side="bottom"
+            align="start"
+            sideOffset={2}
+            className="min-w-52 max-w-80"
+          >
+            <DropdownMenuLabel className="truncate font-mono text-[10.5px]" title={menuRepo.path}>
+              {compactPath(menuRepo.path)}
+            </DropdownMenuLabel>
+            <DropdownMenuItem
+              onClick={() => {
+                void copyRepoPath(menuRepo)
+                setTabMenu(null)
+              }}
+            >
+              <Copy />
+              Copy path
+            </DropdownMenuItem>
+            {repos.length > 1 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={disabled || busy}
+                  onClick={() => {
+                    void onRemove(menuRepo.id)
+                    setTabMenu(null)
+                  }}
+                >
+                  Remove from list…
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
       {/* Add button + its popover (folder search input, path field): every
           control here needs clicks, so the whole subtree opts out of dragging. */}
@@ -454,152 +691,300 @@ export function RepoTabs({
             <div id={formId} className="mb-1.5 font-medium text-[12px] text-foreground">
               Add a repository
             </div>
-            <p className="mb-2.5 text-[11px] text-muted-foreground">
-              {canNative
-                ? "Choose a folder, search nearby projects, or paste an absolute path. Nothing is copied or deleted."
-                : "Paste an absolute path to a local folder. This only registers it with Chunky — nothing is copied or deleted."}
-            </p>
-
-            {canNative && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={submitting || picking}
-                onClick={() => void onChooseFolder("path")}
-                className="mb-2.5 w-full justify-center gap-1.5"
+            {canCreateFolder && (
+              <div
+                role="group"
+                aria-label="Add a repository from"
+                className="mb-2.5 flex items-center gap-0.5 rounded-lg border border-border/70 bg-muted/40 p-0.5"
               >
-                {picking ? (
-                  <Loader2 className="size-3.5 animate-spin" />
-                ) : (
+                <button
+                  type="button"
+                  aria-pressed={mode === "existing"}
+                  disabled={submitting || creating}
+                  onClick={() => setAddMode("existing")}
+                  className={cn(
+                    "inline-flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md text-[11px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                    mode === "existing"
+                      ? "bg-background text-foreground shadow-xs"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
                   <FolderOpen className="size-3.5" />
-                )}
-                {picking ? "Waiting for folder…" : "Choose Folder…"}
-              </Button>
-            )}
-
-            {canSearch && (
-              <div className="mb-2.5">
-                <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Find a project
-                </label>
-                <div className="relative">
-                  <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    ref={searchInputRef}
-                    value={query}
-                    spellCheck={false}
-                    disabled={submitting}
-                    placeholder="e.g. budg, chunky-site"
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyDown={onSearchKeyDown}
-                    aria-controls={listboxId}
-                    aria-autocomplete="list"
-                    aria-activedescendant={
-                      activeHit >= 0 ? `${listboxId}-opt-${activeHit}` : undefined
-                    }
-                    className="h-9 w-full rounded-lg border border-border bg-background py-0 pr-2.5 pl-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
-                  />
-                </div>
-
-                {(query.trim() || searching || searchError) && (
-                  <div
-                    id={listboxId}
-                    role="listbox"
-                    aria-label="Matching folders"
-                    className="mt-1.5 max-h-40 overflow-y-auto rounded-lg border border-border/80 bg-background/60"
-                  >
-                    {searching && hits.length === 0 && (
-                      <div className="flex items-center gap-2 px-2.5 py-2 text-[11px] text-muted-foreground">
-                        <Loader2 className="size-3 animate-spin" />
-                        Searching…
-                      </div>
-                    )}
-                    {!searching && searchError && (
-                      <div className="px-2.5 py-2 text-[11px] text-destructive">
-                        {searchError}
-                      </div>
-                    )}
-                    {!searching && !searchError && query.trim() && hits.length === 0 && (
-                      <div className="px-2.5 py-2 text-[11px] text-muted-foreground">
-                        No folders matched. Try another name or paste a path below.
-                      </div>
-                    )}
-                    {hits.map((hit, i) => {
-                      const active = i === activeHit
-                      return (
-                        <button
-                          key={hit.path}
-                          id={`${listboxId}-opt-${i}`}
-                          type="button"
-                          role="option"
-                          aria-selected={active}
-                          disabled={submitting}
-                          onMouseEnter={() => setActiveHit(i)}
-                          onClick={() => fillFromHit(hit)}
-                          onDoubleClick={() => void submitAdd(hit.path)}
-                          className={cn(
-                            "flex w-full cursor-pointer flex-col gap-0.5 px-2.5 py-1.5 text-left outline-none transition-colors",
-                            active ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
-                          )}
-                        >
-                          <span className="truncate text-[12px] font-medium">{hit.name}</span>
-                          <span
-                            className={cn(
-                              "truncate font-mono text-[10px]",
-                              active ? "text-accent-foreground/70" : "text-muted-foreground",
-                            )}
-                            title={hit.path}
-                          >
-                            {compactPath(hit.path)}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
+                  Existing folder
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={mode === "new"}
+                  disabled={submitting || creating}
+                  onClick={() => setAddMode("new")}
+                  className={cn(
+                    "inline-flex h-7 flex-1 cursor-pointer items-center justify-center gap-1.5 rounded-md text-[11px] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                    mode === "new"
+                      ? "bg-background text-foreground shadow-xs"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <FolderPlus className="size-3.5" />
+                  New folder
+                </button>
               </div>
             )}
 
-            <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Absolute path
-            </label>
-            <input
-              ref={pathInputRef}
-              value={path}
-              spellCheck={false}
-              disabled={submitting}
-              placeholder="/Users/you/code/my-app"
-              onChange={(e) => setPath(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault()
-                  void submitAdd()
-                }
-              }}
-              className="h-9 w-full rounded-lg border border-border bg-background px-2.5 font-mono text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
-            />
-            {error && (
-              <div className="mt-1.5 text-[11px] text-destructive">{error}</div>
+            <p className="mb-2.5 text-[11px] text-muted-foreground">
+              {mode === "new"
+                ? "Pick where it goes and name it. Chunky creates the empty folder and adds it here."
+                : canNative
+                  ? "Choose a folder, search nearby projects, or paste an absolute path. Nothing is copied or deleted."
+                  : "Paste an absolute path to a local folder. This only registers it with Chunky — nothing is copied or deleted."}
+            </p>
+
+            {mode === "existing" ? (
+              <>
+                {canNative && (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={submitting || picking}
+                    onClick={() => void onChooseFolder("path")}
+                    className="mb-2.5 w-full justify-center gap-1.5"
+                  >
+                    {picking ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <FolderOpen className="size-3.5" />
+                    )}
+                    {picking ? "Waiting for folder…" : "Choose Folder…"}
+                  </Button>
+                )}
+
+                {canSearch && (
+                  <div className="mb-2.5">
+                    <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Find a project
+                    </label>
+                    <div className="relative">
+                      <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                      <input
+                        ref={searchInputRef}
+                        value={query}
+                        spellCheck={false}
+                        disabled={submitting}
+                        placeholder="e.g. budg, chunky-site"
+                        onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={onSearchKeyDown}
+                        aria-controls={listboxId}
+                        aria-autocomplete="list"
+                        aria-activedescendant={
+                          activeHit >= 0 ? `${listboxId}-opt-${activeHit}` : undefined
+                        }
+                        className="h-9 w-full rounded-lg border border-border bg-background py-0 pr-2.5 pl-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                      />
+                    </div>
+
+                    {(query.trim() || searching || searchError) && (
+                      <div
+                        id={listboxId}
+                        role="listbox"
+                        aria-label="Matching folders"
+                        className="mt-1.5 max-h-40 overflow-y-auto rounded-lg border border-border/80 bg-background/60"
+                      >
+                        {searching && hits.length === 0 && (
+                          <div className="flex items-center gap-2 px-2.5 py-2 text-[11px] text-muted-foreground">
+                            <Loader2 className="size-3 animate-spin" />
+                            Searching…
+                          </div>
+                        )}
+                        {!searching && searchError && (
+                          <div className="px-2.5 py-2 text-[11px] text-destructive">
+                            {searchError}
+                          </div>
+                        )}
+                        {!searching && !searchError && query.trim() && hits.length === 0 && (
+                          <div className="px-2.5 py-2 text-[11px] text-muted-foreground">
+                            No folders matched. Try another name or paste a path below.
+                          </div>
+                        )}
+                        {hits.map((hit, i) => {
+                          const active = i === activeHit
+                          return (
+                            <button
+                              key={hit.path}
+                              id={`${listboxId}-opt-${i}`}
+                              type="button"
+                              role="option"
+                              aria-selected={active}
+                              disabled={submitting}
+                              onMouseEnter={() => setActiveHit(i)}
+                              onClick={() => fillFromHit(hit)}
+                              onDoubleClick={() => void submitAdd(hit.path)}
+                              className={cn(
+                                "flex w-full cursor-pointer flex-col gap-0.5 px-2.5 py-1.5 text-left outline-none transition-colors",
+                                active ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
+                              )}
+                            >
+                              <span className="truncate text-[12px] font-medium">{hit.name}</span>
+                              <span
+                                className={cn(
+                                  "truncate font-mono text-[10px]",
+                                  active ? "text-accent-foreground/70" : "text-muted-foreground",
+                                )}
+                                title={hit.path}
+                              >
+                                {compactPath(hit.path)}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Absolute path
+                </label>
+                <input
+                  ref={pathInputRef}
+                  value={path}
+                  spellCheck={false}
+                  disabled={submitting}
+                  placeholder="/Users/you/code/my-app"
+                  onChange={(e) => setPath(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      void submitAdd()
+                    }
+                  }}
+                  className="h-9 w-full rounded-lg border border-border bg-background px-2.5 font-mono text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                />
+                {error && (
+                  <div className="mt-1.5 text-[11px] text-destructive">{error}</div>
+                )}
+              </>
+            ) : (
+              <>
+                <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Create it in
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    value={newParent}
+                    spellCheck={false}
+                    disabled={creating}
+                    placeholder="/Users/you/code"
+                    aria-label="Parent folder"
+                    onChange={(e) => {
+                      setNewParent(e.target.value)
+                      setNewError(null)
+                      // A different target means the folder we made no longer
+                      // corresponds to what the form asks for.
+                      setCreatedPath(null)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault()
+                        void submitNewFolder()
+                      }
+                    }}
+                    className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-background px-2.5 font-mono text-[11px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                  />
+                  {canNative && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      title="Choose parent folder"
+                      aria-label="Choose parent folder"
+                      disabled={picking || creating}
+                      onClick={() => void onChooseFolder("new")}
+                    >
+                      {picking ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <FolderOpen className="size-3.5" />
+                      )}
+                    </Button>
+                  )}
+                </div>
+
+                <label className="mt-2.5 mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Folder name
+                </label>
+                <input
+                  ref={newNameRef}
+                  value={newName}
+                  spellCheck={false}
+                  disabled={creating}
+                  placeholder="my-app"
+                  aria-label="New folder name"
+                  onChange={(e) => {
+                    setNewName(e.target.value)
+                    setNewError(null)
+                    setCreatedPath(null)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault()
+                      void submitNewFolder()
+                    }
+                  }}
+                  className="h-9 w-full rounded-lg border border-border bg-background px-2.5 font-mono text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
+                />
+                {newFolderPath && (
+                  <div
+                    className="mt-1.5 truncate font-mono text-[10.5px] text-muted-foreground"
+                    title={newFolderPath}
+                  >
+                    {compactPath(newFolderPath)}
+                  </div>
+                )}
+                {newError && (
+                  <div className="mt-1.5 text-[11px] text-destructive">{newError}</div>
+                )}
+                {createdPath && (
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    The folder exists on disk — retrying only adds it to Chunky.
+                  </div>
+                )}
+              </>
             )}
             <div className="mt-2.5 flex justify-end gap-1.5">
               <Button
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={submitting}
+                disabled={submitting || creating}
                 onClick={closeAdd}
               >
                 Cancel
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={submitting}
-                onClick={() => void submitAdd()}
-              >
-                {submitting ? "Adding…" : "Add"}
-              </Button>
+              {mode === "new" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={creating || submitting || (!createdPath && !newName.trim())}
+                  onClick={() => void submitNewFolder()}
+                >
+                  {creating
+                    ? createdPath
+                      ? "Adding…"
+                      : "Creating…"
+                    : createdPath
+                      ? "Add it again"
+                      : "Create & add"}
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={submitting}
+                  onClick={() => void submitAdd()}
+                >
+                  {submitting ? "Adding…" : "Add"}
+                </Button>
+              )}
             </div>
 
             {canClone && (

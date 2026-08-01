@@ -9,6 +9,7 @@ import {
   parentRoot,
   searchDirectories,
 } from "./dirSearch"
+import { createDirectory } from "./fsOps"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
@@ -315,6 +316,16 @@ rpc = createRPC({
      * Output: { roots: string[] }
      */
     cloneRoots: async () => ({ roots: candidateRoots(extraRoots) }),
+
+    /**
+     * Create a new empty folder for "Add repository → New folder". The webview
+     * has no filesystem; this is a plain node:fs mkdir (no shell), and it
+     * refuses to reuse anything that already exists at the target.
+     * Input: { parentDir: string (absolute, existing), name: string }
+     * Output: { ok, path, error?, existed? }
+     */
+    createDirectory: async (params: unknown) =>
+      createDirectory((params ?? {}) as { parentDir?: unknown; name?: unknown }),
 
     zooStatus: async (params: unknown) => zoo.status(params),
     zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),

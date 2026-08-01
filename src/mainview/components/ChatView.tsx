@@ -221,6 +221,23 @@ export function ChatView({
     return () => el.removeEventListener("scroll", onScroll)
   }, [])
 
+  // Follow the bottom whenever the CONTENT grows, not just when React rows
+  // change: tool output, live delegate streams, expanding cards, images and
+  // markdown all resize the transcript without producing a new message row,
+  // and the render-effect below never fires for them. A ResizeObserver on the
+  // inner column catches every one of those. Instant, never smooth — smooth
+  // restarts per delta and falls behind a fast stream.
+  useEffect(() => {
+    const el = scrollRef.current
+    const inner = innerRef.current
+    if (!el || !inner) return
+    const observer = new ResizeObserver(() => {
+      if (stuckToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
+    })
+    observer.observe(inner)
+    return () => observer.disconnect()
+  }, [])
+
   // Run state → anchors (which pill owns which run) → rows split at those pills.
   const anchors = useMemo(
     () => (transcript ? runAnchors(transcript) : new Map<number, RunAnchor>()),
@@ -292,6 +309,10 @@ export function ChatView({
     // so the cards settling have finished moving the layout first.
     const answerId = lastAnswerId(rowsRef.current)
     if (!answerId) return
+    // Stop the ResizeObserver's bottom-follow immediately. Otherwise a resize
+    // notification between this effect and the animation frame can jump to the
+    // tail just before we park at the answer's start.
+    stuckToBottom.current = false
     const frame = requestAnimationFrame(() => {
       const inner = innerRef.current
       if (!inner) return
@@ -302,7 +323,6 @@ export function ChatView({
       // Clamped by the browser when the answer is short — its start is visible
       // either way, which is the point.
       el.scrollTo({ top: Math.max(0, top - ANSWER_TOP_GAP), behavior: "smooth" })
-      stuckToBottom.current = false
     })
     return () => cancelAnimationFrame(frame)
     // `rows` is a dep so this fires on every streamed delta, not just on
