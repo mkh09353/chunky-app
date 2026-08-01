@@ -10,6 +10,7 @@ import {
   Paperclip,
   Square,
   X,
+  Zap,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { FileSearchItem } from "@chunky/protocol"
@@ -174,6 +175,9 @@ export function Composer({
     el.style.height = "auto"
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`
   }
+
+  /** Nothing to send (and the composer isn't blocked) — shared by every button. */
+  const nothingToSend = (!value.trim() && images.length === 0) || disabled
 
   const submit = (delivery?: "interject") => {
     const text = value.trim()
@@ -631,9 +635,17 @@ export function Composer({
 
           <div className="flex shrink-0 items-center gap-2">
             {contextMeter}
-            <span className="hidden items-center gap-1 text-[11px] text-muted-foreground sm:flex">
+            {/* While running there are two send buttons competing for the same
+                row, so the shortcut hint waits for a wider viewport. Idle keeps
+                the original sm breakpoint. */}
+            <span
+              className={cn(
+                "hidden items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground",
+                streaming ? "md:flex" : "sm:flex",
+              )}
+            >
               <Kbd>⏎</Kbd> {streaming ? "queue" : "send"}
-              {streaming && <><span>·</span><Kbd>⌥⏎</Kbd> interject</>}
+              {streaming && <><span>·</span><Kbd>⌥⏎</Kbd> steer</>}
               <Kbd>⇧⏎</Kbd> newline
             </span>
             {streaming && (
@@ -641,17 +653,64 @@ export function Composer({
                 <Square className="size-3.5 fill-current" />
               </Button>
             )}
-            <Button
-              size="icon"
-              onClick={() => submit()}
-              disabled={(!value.trim() && images.length === 0) || disabled}
-              aria-label={streaming ? "Queue message" : "Send"}
-              variant={streaming ? "secondary" : "default"}
-              className="rounded-full"
-              title={streaming ? "Queue message (agent is running)" : "Send"}
-            >
-              {streaming ? <ListPlus /> : <ArrowUp />}
-            </Button>
+            {streaming ? (
+              // Steering is invisible unless we show it: while a turn runs, the
+              // send affordance splits into the two deliveries the server
+              // actually supports — prompt (queued after the turn) and steer
+              // (interjected now, after the current tool call). Labels collapse
+              // to icons at narrow widths so the row can never wrap.
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => submit()}
+                        disabled={nothingToSend}
+                        aria-label="Queue prompt"
+                        className="gap-1.5"
+                      />
+                    }
+                  >
+                    <ListPlus className="size-3.5" />
+                    <span className="hidden sm:inline">Prompt</span>
+                  </TooltipTrigger>
+                  <TooltipPopup>Send after the current turn finishes</TooltipPopup>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => submit("interject")}
+                        disabled={nothingToSend}
+                        aria-label="Steer the agent now"
+                        // Amber matches the steer chip in QueueChips.
+                        className="gap-1.5 border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:bg-amber-500/15 dark:text-amber-400 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-400"
+                      />
+                    }
+                  >
+                    <Zap className="size-3.5" />
+                    <span className="hidden sm:inline">Steer</span>
+                  </TooltipTrigger>
+                  <TooltipPopup>Deliver now, right after the current tool call</TooltipPopup>
+                </Tooltip>
+              </div>
+            ) : (
+              <Button
+                size="icon"
+                onClick={() => submit()}
+                disabled={nothingToSend}
+                aria-label="Send"
+                variant="default"
+                className="rounded-full"
+                title="Send"
+              >
+                <ArrowUp />
+              </Button>
+            )}
           </div>
         </div>
       </div>
