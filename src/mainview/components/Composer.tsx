@@ -35,6 +35,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
 /** Stable-ish provider section order for the live picker. */
 const PROVIDER_ORDER = ["zen", "grok", "codex", "anthropic"]
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+const SPEEDS = ["standard", "fast"] as const
+
+type Effort = (typeof EFFORTS)[number]
+type Speed = (typeof SPEEDS)[number]
 
 function providerSortKey(vendor: string): string {
   const i = PROVIDER_ORDER.indexOf(vendor.toLowerCase())
@@ -74,6 +79,8 @@ export interface ModeOption {
 export function Composer({
   model,
   models = MODELS,
+  modelEffort,
+  modelSpeed,
   modes = [],
   activeMode = null,
   onSelectMode,
@@ -94,6 +101,9 @@ export function Composer({
 }: {
   model: Model
   models?: Model[]
+  /** Effective reasoning knobs for the selected model, when server-backed. */
+  modelEffort?: string | null
+  modelSpeed?: string | null
   /** Saved modes for the selector's Modes section; empty hides the section. */
   modes?: ModeOption[]
   /** Name of the mode currently in effect — the button's label, when set. */
@@ -101,7 +111,7 @@ export function Composer({
   /** Apply a saved mode (the same path `/mode <name>` / `/<name>` takes). */
   onSelectMode?: (name: string) => void | Promise<void>
   /** Must resolve only after the server confirms (live) or local apply (demo). */
-  onModelChange: (m: Model) => void | Promise<void>
+  onModelChange: (m: Model, options?: { effort?: Effort; speed?: Speed }) => void | Promise<void>
   /** Re-fetch current selection + catalogs when the menu opens (live). */
   onRefreshModels?: () => void | Promise<void>
   onSend: (text: string, opts?: { delivery?: "interject"; images?: { base64: string; mediaType: string }[] }) => void
@@ -124,6 +134,9 @@ export function Composer({
 }) {
   const [value, setValue] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
+  const [pickerStep, setPickerStep] = useState<"models" | "effort" | "speed">("models")
+  const [chosenModel, setChosenModel] = useState<Model | null>(null)
+  const [chosenEffort, setChosenEffort] = useState<Effort | undefined>(undefined)
   const [switchingId, setSwitchingId] = useState<string | null>(null)
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
@@ -337,6 +350,9 @@ export function Composer({
     }
     setMenuOpen(open)
     if (open) {
+      setPickerStep("models")
+      setChosenModel(null)
+      setChosenEffort(undefined)
       setPickerError(null)
       if (onRefreshModels) {
         setRefreshing(true)
@@ -355,10 +371,14 @@ export function Composer({
     handleOpenChange(true)
   }, [openModelPickerSignal])
 
-  const pick = async (m: Model) => {
+  const applyPick = async (m: Model, options?: { effort?: Effort; speed?: Speed }) => {
     if (busy) return
     if (m.ready === false) return
-    if (m.id === model.id) {
+    if (
+      m.id === model.id &&
+      (!options?.effort || options.effort === modelEffort) &&
+      (!options?.speed || options.speed === modelSpeed)
+    ) {
       setMenuOpen(false)
       return
     }
@@ -366,7 +386,7 @@ export function Composer({
     setSwitchingId(m.id)
     setPickerError(null)
     try {
-      await onModelChange(m)
+      await onModelChange(m, options)
       if (gen !== switchGen.current) return
       setMenuOpen(false)
     } catch (err) {
@@ -375,6 +395,27 @@ export function Composer({
     } finally {
       if (gen === switchGen.current) setSwitchingId(null)
     }
+  }
+
+  const pick = (m: Model) => {
+    if (busy || m.ready === false) return
+    if (!m.reasoning) {
+      void applyPick(m)
+      return
+    }
+    setChosenModel(m)
+    setChosenEffort(undefined)
+    setPickerStep("effort")
+  }
+
+  const pickEffort = (effort: Effort) => {
+    if (!chosenModel) return
+    if (chosenModel.vendor.toLowerCase() === "codex") {
+      setChosenEffort(effort)
+      setPickerStep("speed")
+      return
+    }
+    void applyPick(chosenModel, { effort })
   }
 
   return (
@@ -519,7 +560,13 @@ export function Composer({
                 className="flex max-h-80 min-w-72 flex-col overflow-hidden p-0"
               >
                 <div className="flex items-center justify-between gap-2 border-border/70 border-b px-2.5 py-1.5">
-                  <DropdownMenuLabel className="p-0">Model</DropdownMenuLabel>
+                  <DropdownMenuLabel className="p-0">
+                    {pickerStep === "effort"
+                      ? `Reasoning effort${chosenModel ? ` · ${chosenModel.name}` : ""}`
+                      : pickerStep === "speed"
+                        ? `Speed${chosenModel ? ` · ${chosenModel.name}` : ""}`
+                        : "Model"}
+                  </DropdownMenuLabel>
                   {refreshing && (
                     <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground">
                       <Loader2 className="size-3 animate-spin" />
@@ -529,9 +576,48 @@ export function Composer({
                 </div>
 
                 <div className="overflow-y-auto p-1">
-                  {/* Modes first: applying one switches executor + sidekick +
-                      advisor as a unit, so it supersedes a bare model pick.
-                      No saved modes → no section, not an empty header. */}
+                  {pickerStep !== "models" ? (
+                    <>
+                      <DropdownMenuItem
+                        disabled={busy}
+                        closeOnClick={false}
+                        onClick={() => {
+                          setPickerStep(pickerStep === "speed" ? "effort" : "models")
+                          if (pickerStep === "effort") setChosenModel(null)
+                        }}
+                      >
+                        <ChevronRight className="size-3.5 rotate-180" />
+                        Back
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      {(pickerStep === "effort" ? EFFORTS : SPEEDS).map((option) => {
+                        const selected =
+                          chosenModel?.id === model.id &&
+                          (pickerStep === "effort" ? option === modelEffort : option === modelSpeed)
+                        return (
+                          <DropdownMenuItem
+                            key={option}
+                            disabled={busy}
+                            closeOnClick={false}
+                            onClick={() => {
+                              if (pickerStep === "effort") pickEffort(option as Effort)
+                              else if (chosenModel) void applyPick(chosenModel, { effort: chosenEffort, speed: option as Speed })
+                            }}
+                            className={cn(selected && "bg-accent/60")}
+                          >
+                            <span className="flex size-4 shrink-0 items-center justify-center">
+                              {selected && <Check className="size-3.5 text-primary" />}
+                            </span>
+                            <span className="font-medium text-[13px] capitalize text-foreground">{option}</span>
+                          </DropdownMenuItem>
+                        )
+                      })}
+                    </>
+                  ) : (
+                    <>
+                      {/* Modes first: applying one switches executor + sidekick +
+                          advisor as a unit, so it supersedes a bare model pick.
+                          No saved modes → no section, not an empty header. */}
                   {modes.length > 0 && onSelectMode && (
                     <>
                       <DropdownMenuLabel>Modes</DropdownMenuLabel>
@@ -594,7 +680,7 @@ export function Composer({
                               key={m.id}
                               disabled={notReady || (busy && !rowBusy)}
                               closeOnClick={false}
-                              onClick={() => void pick(m)}
+                              onClick={() => pick(m)}
                               className={cn(selected && "bg-accent/60")}
                             >
                               <span className="flex size-4 shrink-0 items-center justify-center">
@@ -619,6 +705,8 @@ export function Composer({
                         })}
                       </div>
                     ))
+                  )}
+                    </>
                   )}
                 </div>
 

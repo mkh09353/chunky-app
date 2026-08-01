@@ -104,6 +104,8 @@ export interface Model {
   name: string
   vendor: string
   note: string
+  /** Whether selecting this model should expose reasoning-effort choices. */
+  reasoning?: boolean
   /** Live provider readiness; omit/true in demo mode. */
   ready?: boolean
 }

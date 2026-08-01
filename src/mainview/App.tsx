@@ -209,6 +209,7 @@ function rowsToModels(rows: ModelRow[]): Model[] {
     id: `${r.provider}/${r.model.id}`,
     name: r.model.name || prettyModel(r.model.id),
     vendor: r.provider,
+    reasoning: r.model.reasoning,
     ready: r.ready,
     note: [
       r.ready ? "ready" : "not logged in",
@@ -1698,7 +1699,7 @@ export function App() {
   }, [cacheGuard, config, sessionId])
 
   const handleModelChange = useCallback(
-    async (m: Model) => {
+    async (m: Model, options?: { effort?: string; speed?: string }) => {
       if (!live) {
         setDemoModel(m)
         return
@@ -1712,7 +1713,12 @@ export function App() {
       // (the global default lives in Settings → Models).
       const next = await selectModel(
         config.baseUrl,
-        { provider: parts.provider, model: parts.model },
+        {
+          provider: parts.provider,
+          model: parts.model,
+          ...(options?.effort ? { effort: options.effort } : {}),
+          ...(options?.speed ? { speed: options.speed } : {}),
+        },
         sid,
       )
       if (sid) setSessionModelSel((prev) => ({ ...prev, [sid]: next }))
@@ -2017,6 +2023,8 @@ export function App() {
                 <Composer
                 model={uiModel}
                 models={uiModels}
+                modelEffort={effectiveModelSel?.effort ?? null}
+                modelSpeed={effectiveModelSel?.speed ?? null}
                 onModelChange={handleModelChange}
                 onRefreshModels={live ? refreshModels : undefined}
                 // While the agent is running, plain ⏎ enqueues; ⌥⏎ interjects.
