@@ -1,5 +1,6 @@
-import type { SessionSummary } from "@chunky/protocol"
-import { QueueFullError, createSession, interruptSession, renameSession, sendMessage, setGoal, shipSession } from "../api"
+import type { AgentEvent, SessionSummary } from "@chunky/protocol"
+import { QueueFullError, createSession, interruptSession, openEventStream, renameSession, sendMessage, setGoal, shipSession } from "../api"
+import { initialState, mainItems, reduce, type TranscriptState } from "../transcript"
 
 export interface VoiceToolContext {
   baseUrl: string
@@ -20,6 +21,7 @@ export const voiceTools: VoiceTool[] = [
   { type: "function", name: "list_threads", description: "List threads in a repository, optionally named by the user.", parameters: { ...object, properties: { repo_name: string } } },
   { type: "function", name: "create_thread", description: "Create a coding thread in a repository and give it a prompt.", parameters: { ...object, required: ["repo_name", "prompt"], properties: { repo_name: string, prompt: string, title: string } } },
   { type: "function", name: "send_to_thread", description: "Send work to a named coding thread.", parameters: { ...object, required: ["thread_query", "text"], properties: { thread_query: string, text: string, delivery } } },
+  { type: "function", name: "read_thread", description: "Read what a thread actually did, said, or found. Use when the user asks about a thread's work or conversation.", parameters: { ...object, required: ["thread_query"], properties: { thread_query: string, last: { type: "number", minimum: 1, maximum: 20 } } } },
   { type: "function", name: "thread_status", description: "Check whether a coding thread is working or idle.", parameters: { ...object, required: ["thread_query"], properties: { thread_query: string } } },
   { type: "function", name: "interrupt_thread", description: "Stop the active work in a coding thread.", parameters: { ...object, required: ["thread_query"], properties: { thread_query: string } } },
   { type: "function", name: "rename_thread", description: "Rename a coding thread.", parameters: { ...object, required: ["thread_query", "new_title"], properties: { thread_query: string, new_title: string } } },
@@ -60,6 +62,79 @@ async function resolveThread(ctx: VoiceToolContext, query: string): Promise<Sess
 }
 function label(name: string): string { return name.replaceAll("_", " ") }
 
+const TEXT_LIMIT = 600
+const RESULT_LIMIT = 4_000
+const REPLAY_QUIET_MS = 300
+const REPLAY_TIMEOUT_MS = 10_000
+
+function truncate(value: string, limit = TEXT_LIMIT): string {
+  return value.length > limit ? `${value.slice(0, Math.max(0, limit - 11))}…truncated` : value
+}
+
+export type ThreadDigest = {
+  title: string
+  status: "running" | "idle"
+  messages: Array<{ role: "user" | "assistant"; text: string }>
+}
+
+/** Compact a reducer-produced replay for the voice model without exposing raw tool output. */
+export function digestThread(title: string, status: "running" | "idle", state: TranscriptState, last = 6): ThreadDigest {
+  const messages: ThreadDigest["messages"] = []
+  let tools = 0
+  for (const item of mainItems(state)) {
+    if (item.kind === "user" && item.text.trim()) messages.push({ role: "user", text: truncate(item.text) })
+    else if (item.kind === "assistant" && item.text.trim()) messages.push({ role: "assistant", text: truncate(item.text) })
+    else if (item.kind === "tool") tools += 1
+  }
+  const selected = messages.slice(-Math.max(1, Math.min(20, Math.floor(last) || 6)))
+  if (tools) {
+    const note = `(assistant ran ${tools} tool${tools === 1 ? "" : "s"})`
+    const lastAssistant = [...selected].reverse().find((message) => message.role === "assistant")
+    if (lastAssistant) lastAssistant.text = truncate(`${lastAssistant.text}\n${note}`)
+    else selected.push({ role: "assistant", text: note })
+  }
+  const digest: ThreadDigest = { title, status, messages: selected }
+  // Preserve valid JSON within the realtime context budget even with many short messages.
+  while (JSON.stringify(digest).length > RESULT_LIMIT && digest.messages.length > 1) digest.messages.shift()
+  if (JSON.stringify(digest).length > RESULT_LIMIT && digest.messages[0]) {
+    digest.messages[0].text = truncate(digest.messages[0].text, 200)
+  }
+  return digest
+}
+
+/** Replay has no caught-up frame: settle after a quiet interval, always aborting the SSE reader. */
+async function replayThread(baseUrl: string, sessionId: string): Promise<TranscriptState> {
+  const controller = new AbortController()
+  let state = initialState
+  let seen = false
+  let timedOut = false
+  let quietTimer: ReturnType<typeof setTimeout> | null = null
+  let resolveDone: (() => void) | null = null
+  const done = new Promise<void>((resolve) => { resolveDone = resolve })
+  const settle = () => { if (quietTimer) clearTimeout(quietTimer); controller.abort(); resolveDone?.() }
+  const resetQuiet = () => {
+    if (quietTimer) clearTimeout(quietTimer)
+    quietTimer = setTimeout(settle, REPLAY_QUIET_MS)
+  }
+  const hardTimer = setTimeout(() => { timedOut = true; settle() }, REPLAY_TIMEOUT_MS)
+  try {
+    const stream = openEventStream(baseUrl, sessionId, (event: AgentEvent) => {
+      seen = true
+      state = reduce(state, event)
+      resetQuiet()
+    }, controller.signal)
+    // A new/empty session emits no frames; wait only to the bounded hard cap.
+    await Promise.race([done, stream])
+    if (timedOut) throw new Error("Thread replay timed out.")
+    if (!seen && !controller.signal.aborted) throw new Error("Thread replay ended without events.")
+    return state
+  } finally {
+    if (quietTimer) clearTimeout(quietTimer)
+    clearTimeout(hardTimer)
+    controller.abort()
+  }
+}
+
 export async function executeVoiceTool(ctx: VoiceToolContext, call: VoiceToolCall): Promise<Record<string, unknown>> {
   try {
     const args = call.args
@@ -88,6 +163,11 @@ export async function executeVoiceTool(ctx: VoiceToolContext, call: VoiceToolCal
     }
     const thread = await resolveThread(ctx, text(args.thread_query))
     if (!thread) return { error: `Thread not found: ${text(args.thread_query)}` }
+    if (call.name === "read_thread") {
+      const requested = typeof args.last === "number" ? args.last : 6
+      const state = await replayThread(ctx.baseUrl, thread.sessionId)
+      return digestThread(thread.title, thread.running ? "running" : "idle", state, requested)
+    }
     if (call.name === "thread_status") return { sessionId: thread.sessionId, title: thread.title, status: thread.running ? "running" : "idle", lastActivity: thread.lastActivity }
     if (call.name === "interrupt_thread") { await interruptSession(ctx.baseUrl, thread.sessionId); ctx.refresh(); return { ok: true, title: thread.title } }
     if (call.name === "rename_thread") { const title = text(args.new_title); if (!title) return { error: "A new title is required." }; await renameSession(ctx.baseUrl, thread.sessionId, title); ctx.refresh(); return { ok: true, title } }

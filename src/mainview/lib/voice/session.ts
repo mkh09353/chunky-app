@@ -62,7 +62,7 @@ export class VoiceSession {
     const type = typeof event.type === "string" ? event.type : ""
     if (type === "session.created") {
       this.send({ type: "session.update", session: {
-        instructions: "You are a voice assistant that manages the Chunky coding-agent desktop app. Dispatch work to coding threads; do not write code yourself. Be brief and conversational.",
+        instructions: "You are a voice assistant that manages the Chunky coding-agent desktop app. Dispatch work to coding threads; do not write code yourself. You can read thread contents to discuss what they did or found. Be brief and conversational.",
         turn_detection: { type: "server_vad" }, tools: this.tools, tool_choice: "auto",
         audio: { input: { transcription: { model: "grok-transcribe" } } },
       } })
