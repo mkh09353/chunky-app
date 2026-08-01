@@ -5,6 +5,7 @@ import {
   Layers,
   Mic,
   Settings2,
+  Smartphone,
   Sparkles,
   UserCog,
   Workflow,
@@ -20,6 +21,7 @@ import { GeneralSection } from "./GeneralSection"
 import { ModelsSection } from "./ModelsSection"
 import { ModesSection } from "./ModesSection"
 import { ProvidersSection } from "./ProvidersSection"
+import { RelaySection } from "./RelaySection"
 import { SidekickSection } from "./SidekickSection"
 import { SkillsSection } from "./SkillsSection"
 import { VoiceSection } from "./VoiceSection"
@@ -35,6 +37,7 @@ type SectionId =
   | "skills"
   | "workflow"
   | "voice"
+  | "relay"
   | "general"
 
 const NAV: { id: SectionId; label: string; icon: typeof Cpu }[] = [
@@ -47,6 +50,7 @@ const NAV: { id: SectionId; label: string; icon: typeof Cpu }[] = [
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "workflow", label: "Workflow", icon: Workflow },
   { id: "voice", label: "Voice", icon: Mic },
+  { id: "relay", label: "Relay", icon: Smartphone },
   { id: "general", label: "General", icon: Settings2 },
 ]
 
@@ -86,6 +90,8 @@ function renderSection(
       return <WorkflowSection />
     case "voice":
       return <VoiceSection />
+    case "relay":
+      return <RelaySection connection={connection} />
     case "general":
       return <GeneralSection connection={connection} />
   }

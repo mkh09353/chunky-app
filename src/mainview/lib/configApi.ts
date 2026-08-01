@@ -108,8 +108,10 @@ function isMissingRoute(err: unknown): boolean {
   return err instanceof HttpError && (err.status === 404 || err.status === 501) && bodyError(err.body) === null
 }
 
-/** Core request helper: prefixes base URL, parses JSON, throws typed errors. */
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+/** Core request helper: prefixes base URL, parses JSON, throws typed errors.
+ *  Exported so sibling server-API modules (e.g. relayApi.ts) reuse this one
+ *  base-URL + auth path instead of forking it. */
+export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const b = await base()
   const method = init?.method ?? "GET"
   let res: Response
@@ -134,7 +136,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** Build a JSON request init. */
-function jsonInit(method: string, body?: unknown): RequestInit {
+export function jsonInit(method: string, body?: unknown): RequestInit {
   return {
     method,
     headers: { "Content-Type": "application/json" },
