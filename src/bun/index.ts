@@ -13,6 +13,7 @@ import { createDirectory } from "./fsOps"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import { releaseChunkyConnection, rememberChunkyWorkspace, resolveChunkyConnection } from "./connectionManager"
+import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
 import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
@@ -204,6 +205,31 @@ rpc = createRPC({
       return setVoiceApiKey(key)
     },
     voiceHasApiKey: async () => ({ ok: true, hasApiKey: hasVoiceApiKey() }),
+
+    /**
+     * Durable renderer UI state (~/.chunky/state/desktop.json): which repo tab
+     * is open and which thread each tab reopens. It lives here, not in the
+     * webview's localStorage, because that storage is inside the app container
+     * and does not survive a reinstall. Bun validates and bounds the payload.
+     */
+    desktopStateGet: async () => {
+      const { activeRepoId = null, lastSessionByRepo = {} } = readDesktopState()
+      return { ok: true, activeRepoId, lastSessionByRepo }
+    },
+    desktopStateSet: async (params: unknown) => {
+      const raw = (params ?? {}) as Record<string, unknown>
+      const patch: DesktopState = {}
+      // Only forward keys the renderer actually sent, so a partial update never
+      // erases the other one. `null` clears the remembered tab.
+      if ("activeRepoId" in raw) {
+        patch.activeRepoId = typeof raw.activeRepoId === "string" ? raw.activeRepoId : null
+      }
+      if ("lastSessionByRepo" in raw) {
+        patch.lastSessionByRepo = (raw.lastSessionByRepo ?? {}) as Record<string, string>
+      }
+      const { activeRepoId = null, lastSessionByRepo = {} } = mergeDesktopState(patch)
+      return { ok: true, activeRepoId, lastSessionByRepo }
+    },
 
     /**
      * What the browser pane is, as a remotely drivable target: which renderer

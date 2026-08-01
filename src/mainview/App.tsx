@@ -69,6 +69,13 @@ import {
   runCloneSession,
 } from "./lib/cloneRepo"
 import { cloneRoots } from "./lib/dirSearch"
+import {
+  desktopUiSnapshot,
+  forgetRepoSessions,
+  loadDesktopUiState,
+  rememberActiveRepo,
+  rememberLastSession,
+} from "./lib/desktopState"
 import type { CloneStatus } from "./components/RepoTabs"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
 import {
@@ -121,8 +128,6 @@ const CLONE_LOG_LINES = 8
 
 /** How long a local apply suppresses the echoed mode.applied notice. */
 const SELF_APPLY_WINDOW_MS = 10_000
-const ACTIVE_REPO_KEY = "chunky.activeRepoId"
-const LAST_SESSION_KEY = "chunky.lastSessionByRepo"
 const MIN_COMPLETION_NOTIFY_MS = 3_000
 
 /** Best effort only: browsers may reject playback before a user gesture. */
@@ -131,27 +136,6 @@ function playCompletionHorn(): void {
     void new Audio(hornUrl).play().catch(() => {})
   } catch {
     // Audio is unavailable in a few embedded/browser contexts.
-  }
-}
-
-function readLastSessions(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(LAST_SESSION_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as unknown
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {}
-  } catch {
-    return {}
-  }
-}
-
-function writeLastSession(repoId: string, sessionId: string) {
-  try {
-    const map = readLastSessions()
-    map[repoId] = sessionId
-    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(map))
-  } catch {
-    /* ignore quota */
   }
 }
 
@@ -339,7 +323,11 @@ export function App() {
   const repoSessionCache = useRef(new Map<string | null, SessionSummary[]>())
   const sessionCache = useRef(new SessionCache(20))
   const onboardingChecked = useRef(false)
-  const lastSessionByRepo = useRef<Record<string, string>>(readLastSessions())
+  // Seeded from the synchronous snapshot, then replaced with the durable
+  // desktop.json state once the connection boots (see the live-connect effect).
+  const lastSessionByRepo = useRef<Record<string, string>>({
+    ...desktopUiSnapshot().lastSessionByRepo,
+  })
 
   sessionIdRef.current = sessionId
   transcriptRef.current = transcript
@@ -582,7 +570,7 @@ export function App() {
     const repoForSession = activeRepoIdRef.current
     if (repoForSession) {
       lastSessionByRepo.current[repoForSession] = id
-      writeLastSession(repoForSession, id)
+      rememberLastSession(repoForSession, id)
     }
     const cached = sessionCache.current.get(id)
     let replayIndex = 0
@@ -791,9 +779,15 @@ export function App() {
         setAppMode("live")
         setConnError(null)
 
+        // Durable UI state (open tab + per-tab thread) lives in desktop.json,
+        // not in the webview's storage, so it survives updates/reinstalls.
+        const ui = await loadDesktopUiState()
+        if (cancelled) return
+        lastSessionByRepo.current = { ...ui.lastSessionByRepo }
+
         let repoId: string | null = null
         if (reg) {
-          const remembered = localStorage.getItem(ACTIVE_REPO_KEY)
+          const remembered = ui.activeRepoId
           repoId =
             (remembered && reg.repos.some((r) => r.id === remembered) ? remembered : null) ??
             reg.activeId ??
@@ -1092,11 +1086,7 @@ export function App() {
       }
       setActiveRepoId(id)
       activeRepoIdRef.current = id
-      try {
-        localStorage.setItem(ACTIVE_REPO_KEY, id)
-      } catch {
-        /* ignore */
-      }
+      rememberActiveRepo(id)
       // Drop current stream before loading the other repo's threads.
       streamAbort.current?.abort()
       const cached = repoSessionCache.current.get(id)
@@ -1127,13 +1117,7 @@ export function App() {
         const openId = reg.activeId ?? reg.repos[reg.repos.length - 1]?.id ?? null
         setActiveRepoId(openId)
         activeRepoIdRef.current = openId
-        if (openId) {
-          try {
-            localStorage.setItem(ACTIVE_REPO_KEY, openId)
-          } catch {
-            /* ignore */
-          }
-        }
+        rememberActiveRepo(openId)
         streamAbort.current?.abort()
         setSessions([])
         setSessionId(null)
@@ -1260,22 +1244,12 @@ export function App() {
         const reg = await removeRepo(config.baseUrl, id)
         setRepos(reg.repos)
         delete lastSessionByRepo.current[id]
-        try {
-          localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(lastSessionByRepo.current))
-        } catch {
-          /* ignore */
-        }
+        forgetRepoSessions(id)
         if (wasOpen) {
           const openId = reg.activeId ?? reg.repos[0]?.id ?? null
           setActiveRepoId(openId)
           activeRepoIdRef.current = openId
-          if (openId) {
-            try {
-              localStorage.setItem(ACTIVE_REPO_KEY, openId)
-            } catch {
-              /* ignore */
-            }
-          }
+          rememberActiveRepo(openId)
           streamAbort.current?.abort()
           setSessions([])
           setSessionId(null)

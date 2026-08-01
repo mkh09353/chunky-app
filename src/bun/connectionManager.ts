@@ -11,6 +11,11 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
+import {
+  mergeDesktopState,
+  readDesktopState,
+  stateDir as desktopStateDir,
+} from "./desktopState"
 import { hasRuntime, installRuntime, resolveBun, runtimeRoot } from "./runtimeInstaller"
 
 const SERVER_IDENTITY_PATH = "/_chunky/server-identity"
@@ -66,28 +71,23 @@ function canonicalWorkspace(path: string): string {
 
 /** Desktop-owned persistent state. Do not use the replaceable runtime directory. */
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env.CHUNKY_HOME || join(homedir(), ".chunky", "state")
+  return desktopStateDir(env)
 }
 
 function settingsPath(env: NodeJS.ProcessEnv, state: string): string {
   return env.CHUNKY_SETTINGS || join(state, "settings.json")
 }
 
-function desktopWorkspace(env: NodeJS.ProcessEnv, state: string): string | undefined {
+function desktopWorkspace(env: NodeJS.ProcessEnv): string | undefined {
   if (env.CHUNKY_WORKSPACE?.trim()) return canonicalWorkspace(env.CHUNKY_WORKSPACE)
-  try {
-    const saved = JSON.parse(readFileSync(join(state, "desktop.json"), "utf8")) as { workspace?: unknown }
-    return typeof saved.workspace === "string" && saved.workspace ? canonicalWorkspace(saved.workspace) : undefined
-  } catch {
-    return undefined
-  }
+  const saved = readDesktopState(env).workspace
+  return saved ? canonicalWorkspace(saved) : undefined
 }
 
-function persistDesktopWorkspace(state: string, workspace: string): void {
-  try {
-    mkdirSync(state, { recursive: true })
-    writeFileSync(join(state, "desktop.json"), JSON.stringify({ workspace }, null, 2), { mode: 0o600 })
-  } catch {}
+/** desktop.json also holds renderer UI state (open tab, per-tab thread), so the
+ *  workspace must be merged in, never written over the whole document. */
+function persistDesktopWorkspace(env: NodeJS.ProcessEnv, workspace: string): void {
+  mergeDesktopState({ workspace }, env)
 }
 
 function loadToken(path: string): string | undefined {
@@ -339,7 +339,7 @@ export async function resetChunkyConnectionForTest(): Promise<void> {
 /** Persist the workspace selected in the desktop UI for deterministic reuse. */
 export function rememberChunkyWorkspace(path: string, env = process.env): void {
   if (!path.trim()) return
-  persistDesktopWorkspace(stateDir(env), canonicalWorkspace(path))
+  persistDesktopWorkspace(env, canonicalWorkspace(path))
   resolving = undefined
 }
 
@@ -363,7 +363,7 @@ export function resolveChunkyConnection(env = process.env, deps: ConnectionDepen
   if (!resolving) resolving = (async () => {
     const state = stateDir(env)
     const settings = settingsPath(env, state)
-    const workspace = desktopWorkspace(env, state)
+    const workspace = desktopWorkspace(env)
     const token = loadToken(settings)
     const found = await selectHealthyRecord(join(state, "servers"), token, workspace, deps)
     if (found) {
