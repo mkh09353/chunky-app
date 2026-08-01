@@ -464,9 +464,9 @@ export function MessageView({
         </div>
 
         {isUser ? (
-          <div className="rounded-2xl bg-foreground/[0.06] px-4 py-2.5 text-[14px] leading-[1.6] text-foreground">
+          <div className="min-w-0 max-w-full rounded-2xl bg-foreground/[0.06] px-4 py-2.5 text-[14px] leading-[1.6] text-foreground">
             {blocks.map((block, bi) => (
-              <p key={bi} className={cn("whitespace-pre-wrap", bi > 0 && "mt-3")}>
+              <p key={bi} className={cn("whitespace-pre-wrap break-words", bi > 0 && "mt-3")}>
                 {block.content}
               </p>
             ))}
