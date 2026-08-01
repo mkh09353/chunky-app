@@ -34,6 +34,7 @@ import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./compon
 import {
   addRepo,
   createSession,
+  deleteQueueEntry,
   fetchModel,
   fetchServerInfo,
   fetchServerRetiring,
@@ -96,8 +97,9 @@ import {
   savedModeForCommand,
   type SlashCommand,
 } from "./lib/slashCommands"
-import type { GoalSnapshot, ModeInfo, ModeSpec, RewindPoint } from "@chunky/protocol"
+import type { GoalSnapshot, ModeInfo, ModeSpec, QueueEntry, RewindPoint } from "@chunky/protocol"
 import { activeModeName } from "./lib/modes"
+import { followUpNotice, steerQueuedMessage } from "./lib/queueActions"
 import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
 import {
@@ -1510,6 +1512,56 @@ export function App() {
     [refreshModels, refreshModes, refreshAgents, markSelfApplied],
   )
 
+  /** Steer a queued message into the running turn. The server's promote route
+   *  claims the entry atomically, so the only client-side job is the fallback
+   *  when it no longer has it (see lib/queueActions) — which is why the chip's
+   *  own text is passed down: a server that lost its queue still can't swallow
+   *  what the user typed. Throwing keeps the chip on screen with the reason. */
+  const handleQueueSteer = useCallback(
+    async (entry: QueueEntry) => {
+      if (!config || !sessionId) throw new Error("Not connected to the Chunky server.")
+      const { followUp } = await steerQueuedMessage(
+        config.baseUrl,
+        sessionId,
+        entry.id,
+        entry.shown || entry.text,
+      )
+      return followUpNotice(followUp)
+    },
+    [config, sessionId],
+  )
+
+  /** Drop a queued message. A 404 means the drainer already claimed it, which
+   *  the helper reports as `removed: false`; queue.changed repaints either way. */
+  const handleQueueDelete = useCallback(
+    async (entry: QueueEntry) => {
+      if (!config || !sessionId) throw new Error("Not connected to the Chunky server.")
+      await deleteQueueEntry(config.baseUrl, sessionId, entry.id)
+    },
+    [config, sessionId],
+  )
+
+  /** Persist an edited mode spec from the composer's per-mode flyout.
+   *  The caller hands over the WHOLE spec (lib/modeSlots spreads the original,
+   *  so `incognito` and any undeclared field round-trip), and the server's POST
+   *  replaces the stored mode under its canonical name. Editing the mode that's
+   *  in effect re-applies it, otherwise the change would sit dormant.
+   *  Throws on failure so the flyout can show the reason inline. */
+  const handleSaveModeSpec = useCallback(
+    async (name: string, spec: ModeSpec) => {
+      const next = await saveMode({ name, spec })
+      setSavedModes(next.modes)
+      setCurrentModeSpec(next.current ?? null)
+      setSlashModes(modeCommands(next.modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
+      if (activeMode && activeMode.toLowerCase() === name.toLowerCase()) {
+        await applyModeByName(name)
+        return
+      }
+      setNotice(`Mode "${name}" updated.`)
+    },
+    [activeMode, applyModeByName],
+  )
+
   /** `/mode` subcommands: bare opens Settings → Modes, save/rm hit the server. */
   const runModeCommand = useCallback(
     async (rest: string) => {
@@ -2061,7 +2113,12 @@ export function App() {
               />
               <div className="flex flex-col gap-2">
                 <TodosPanel todos={liveTodos} />
-                <QueueChips entries={liveQueue} />
+                <QueueChips
+                  entries={liveQueue}
+                  running={streaming}
+                  onSteer={live && config && sessionId ? handleQueueSteer : undefined}
+                  onDelete={live && config && sessionId ? handleQueueDelete : undefined}
+                />
                 <Composer
                 model={uiModel}
                 models={uiModels}
@@ -2079,8 +2136,10 @@ export function App() {
                 onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
                 commands={slashCommands}
                 modes={modeOptions}
+                modeSpecs={live ? savedModes : []}
                 activeMode={activeMode}
                 onSelectMode={live ? applyModeByName : undefined}
+                onSaveMode={live ? handleSaveModeSpec : undefined}
                 openModelPickerSignal={modelPickerSignal}
                 streaming={streaming}
                 onStop={handleStop}

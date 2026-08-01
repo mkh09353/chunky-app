@@ -13,13 +13,14 @@ import {
   Zap,
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { FileSearchItem } from "@chunky/protocol"
+import type { FileSearchItem, ModeInfo, ModeSpec } from "@chunky/protocol"
 import type { Model } from "~/lib/mock"
 import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
 import { providerLabel } from "~/lib/api"
 import { filterCommands, type SlashCommand } from "~/lib/slashCommands"
 import { modeEmoji } from "~/lib/modes"
+import { ModeSlotsMenu } from "./ModeSlotsMenu"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -82,8 +83,10 @@ export function Composer({
   modelEffort,
   modelSpeed,
   modes = [],
+  modeSpecs = [],
   activeMode = null,
   onSelectMode,
+  onSaveMode,
   onModelChange,
   onRefreshModels,
   onSend,
@@ -106,10 +109,16 @@ export function Composer({
   modelSpeed?: string | null
   /** Saved modes for the selector's Modes section; empty hides the section. */
   modes?: ModeOption[]
+  /** The same modes as FULL specs, so each row's flyout can edit its slots.
+   *  Matched to `modes` by name; a mode with no spec just has no flyout. */
+  modeSpecs?: ModeInfo[]
   /** Name of the mode currently in effect — the button's label, when set. */
   activeMode?: string | null
   /** Apply a saved mode (the same path `/mode <name>` / `/<name>` takes). */
   onSelectMode?: (name: string) => void | Promise<void>
+  /** Persist an edited mode spec (the caller re-applies it when it's active).
+   *  Omitted → the per-mode flyout isn't offered. */
+  onSaveMode?: (name: string, spec: ModeSpec) => Promise<void>
   /** Must resolve only after the server confirms (live) or local apply (demo). */
   onModelChange: (m: Model, options?: { effort?: Effort; speed?: Speed }) => void | Promise<void>
   /** Re-fetch current selection + catalogs when the menu opens (live). */
@@ -174,6 +183,13 @@ export function Composer({
     }
     return [...map.entries()].sort(([a], [b]) => providerSortKey(a).localeCompare(providerSortKey(b)))
   }, [models])
+
+  /** Full spec per mode name, for the per-mode flyout. */
+  const specByMode = useMemo(() => {
+    const map = new Map<string, ModeInfo>()
+    for (const spec of modeSpecs) map.set(spec.name, spec)
+    return map
+  }, [modeSpecs])
 
   // Slash popup: only while the whole input is one `/token` (never mid-message),
   // matching the TUI's `value.startsWith("/") && !value.includes(" ")`.
@@ -623,31 +639,45 @@ export function Composer({
                       <DropdownMenuLabel>Modes</DropdownMenuLabel>
                       {modes.map((m) => {
                         const selected = m.name === activeMode
+                        const spec = specByMode.get(m.name)
                         return (
-                          <DropdownMenuItem
-                            key={m.name}
-                            disabled={busy}
-                            onClick={() => void onSelectMode(m.name)}
-                            className={cn(selected && "bg-accent/60")}
-                          >
-                            <span className="flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
-                              {modeEmoji(m.name)}
-                            </span>
-                            <div className="flex min-w-0 flex-col">
-                              <span className="flex min-w-0 items-center gap-1.5">
-                                <span className="truncate font-medium text-[13px] text-foreground">
-                                  {m.name}
-                                </span>
-                                {/* The emoji is identity; the check is state. */}
-                                {selected && <Check className="size-3.5 shrink-0 text-primary" />}
+                          // The row body applies the mode; the flyout beside it
+                          // edits which models the mode pins. Two sibling menu
+                          // items, so neither swallows the other's click.
+                          <div key={m.name} className="flex min-w-0 items-center gap-0.5">
+                            <DropdownMenuItem
+                              disabled={busy}
+                              onClick={() => void onSelectMode(m.name)}
+                              className={cn("min-w-0 flex-1", selected && "bg-accent/60")}
+                            >
+                              <span className="flex size-4 shrink-0 items-center justify-center text-[13px] leading-none">
+                                {modeEmoji(m.name)}
                               </span>
-                              {m.detail && (
-                                <span className="truncate text-[11px] text-muted-foreground">
-                                  {m.detail}
+                              <div className="flex min-w-0 flex-col">
+                                <span className="flex min-w-0 items-center gap-1.5">
+                                  <span className="truncate font-medium text-[13px] text-foreground">
+                                    {m.name}
+                                  </span>
+                                  {/* The emoji is identity; the check is state. */}
+                                  {selected && <Check className="size-3.5 shrink-0 text-primary" />}
                                 </span>
-                              )}
-                            </div>
-                          </DropdownMenuItem>
+                                {m.detail && (
+                                  <span className="truncate text-[11px] text-muted-foreground">
+                                    {m.detail}
+                                  </span>
+                                )}
+                              </div>
+                            </DropdownMenuItem>
+                            {spec && onSaveMode && (
+                              <ModeSlotsMenu
+                                mode={spec}
+                                models={models}
+                                disabled={busy}
+                                onSave={onSaveMode}
+                                onDone={() => setMenuOpen(false)}
+                              />
+                            )}
+                          </div>
                         )
                       })}
                       <DropdownMenuSeparator />

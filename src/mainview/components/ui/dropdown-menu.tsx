@@ -6,6 +6,16 @@ import { cn } from "~/lib/cn"
 export const DropdownMenu = MenuPrimitive.Root
 export const DropdownMenuGroup = MenuPrimitive.Group
 export const DropdownMenuRadioGroup = MenuPrimitive.RadioGroup
+/** Groups a nested menu: one SubTrigger item plus one SubContent popup. */
+export const DropdownMenuSub = MenuPrimitive.SubmenuRoot
+
+/** Row + popup styling shared by items and surfaces, so a submenu can never
+ *  drift from the menu it hangs off. */
+const ITEM_CLASSES =
+  "flex min-h-8 cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 text-sm outline-none transition-colors data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground"
+
+const POPUP_CLASSES =
+  "min-w-44 origin-[var(--transform-origin)] rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-panel outline-none transition-[transform,opacity] duration-150 data-[ending-style]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0"
 
 export function DropdownMenuTrigger({ className, ...props }: MenuPrimitive.Trigger.Props) {
   return <MenuPrimitive.Trigger data-slot="dropdown-trigger" className={className} {...props} />
@@ -31,11 +41,7 @@ export function DropdownMenuContent({
       <MenuPrimitive.Positioner side={side} align={align} sideOffset={sideOffset} anchor={anchor} className="z-50">
         <MenuPrimitive.Popup
           data-slot="dropdown-content"
-          className={cn(
-            "min-w-44 origin-[var(--transform-origin)] rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-panel outline-none",
-            "transition-[transform,opacity] duration-150 data-[ending-style]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0",
-            className,
-          )}
+          className={cn(POPUP_CLASSES, className)}
           {...props}
         >
           {children}
@@ -56,15 +62,54 @@ export function DropdownMenuItem({
       data-slot="dropdown-item"
       data-variant={variant}
       className={cn(
-        "flex min-h-8 cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 text-sm outline-none transition-colors",
-        "data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-        "data-[variant=destructive]:text-destructive data-[variant=destructive]:data-[highlighted]:bg-destructive/10",
-        "[&_svg]:size-4 [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground data-[variant=destructive]:[&_svg]:text-destructive",
+        ITEM_CLASSES,
+        "data-[variant=destructive]:text-destructive data-[variant=destructive]:data-[highlighted]:bg-destructive/10 data-[variant=destructive]:[&_svg]:text-destructive",
         inset && "pl-8",
         className,
       )}
       {...props}
     />
+  )
+}
+
+/** A menu row that opens a nested menu on hover/click. Renders a <div>, so it
+ *  can sit beside a regular item in the same row. */
+export function DropdownMenuSubTrigger({ className, ...props }: MenuPrimitive.SubmenuTrigger.Props) {
+  return (
+    <MenuPrimitive.SubmenuTrigger
+      data-slot="dropdown-sub-trigger"
+      className={cn(ITEM_CLASSES, "data-[popup-open]:bg-accent data-[popup-open]:text-accent-foreground", className)}
+      {...props}
+    />
+  )
+}
+
+/** The nested menu's popup. Portalled like DropdownMenuContent, so a submenu
+ *  is never clipped by a scrolling parent popup. */
+export function DropdownMenuSubContent({
+  className,
+  children,
+  side = "right",
+  align = "start",
+  sideOffset = 6,
+  ...props
+}: MenuPrimitive.Popup.Props & {
+  side?: MenuPrimitive.Positioner.Props["side"]
+  align?: MenuPrimitive.Positioner.Props["align"]
+  sideOffset?: MenuPrimitive.Positioner.Props["sideOffset"]
+}) {
+  return (
+    <MenuPrimitive.Portal>
+      <MenuPrimitive.Positioner side={side} align={align} sideOffset={sideOffset} className="z-50">
+        <MenuPrimitive.Popup
+          data-slot="dropdown-sub-content"
+          className={cn(POPUP_CLASSES, className)}
+          {...props}
+        >
+          {children}
+        </MenuPrimitive.Popup>
+      </MenuPrimitive.Positioner>
+    </MenuPrimitive.Portal>
   )
 }
 
