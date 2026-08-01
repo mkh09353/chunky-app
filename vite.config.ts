@@ -59,10 +59,22 @@ export default defineConfig(({ command, mode }) => {
   root: "src/mainview",
   publicDir: "public",
   resolve: {
-    alias: {
-      "~": path.resolve(__dirname, "src/mainview"),
-      "@chunky/protocol": path.resolve(__dirname, "../chunky/packages/protocol/src/index.ts"),
-    },
+    // Ordered array form, because the object form does PREFIX substitution:
+    // "@chunky/protocol" -> "…/src/index.ts" also rewrote the subpath imports
+    // ("@chunky/protocol/relay" -> "…/src/index.ts/relay", which cannot
+    // resolve). The bare specifier is matched exactly, and subpaths are sent
+    // to the package's src directory instead.
+    alias: [
+      { find: "~", replacement: path.resolve(__dirname, "src/mainview") },
+      {
+        find: /^@chunky\/protocol$/,
+        replacement: path.resolve(__dirname, "../chunky/packages/protocol/src/index.ts"),
+      },
+      {
+        find: /^@chunky\/protocol\//,
+        replacement: path.resolve(__dirname, "../chunky/packages/protocol/src/") + "/",
+      },
+    ],
   },
   optimizeDeps: {
     exclude: ["electrobun"],

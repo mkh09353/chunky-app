@@ -215,20 +215,90 @@ export interface ProviderTestResult extends AuthTestResult {
   unsupported?: boolean
 }
 
-const UNSUPPORTED_TEST =
+export const UNSUPPORTED_TEST =
   "This Chunky server does not support testing a provider connection yet. Update the server to use this."
-const UNSUPPORTED_LOGOUT =
+export const UNSUPPORTED_LOGOUT =
   "This Chunky server does not support disconnecting a provider yet. Update the server to use this."
+
+/**
+ * The slice of ROUTES the auth calls need, with every member optional and
+ * untyped on purpose.
+ *
+ * A packaged renderer bundles a SNAPSHOT of @chunky/protocol. If the app is
+ * built against a protocol older than the code calling it, `ROUTES.authTest`
+ * is typed as a function but is `undefined` at runtime, and calling it throws
+ * `authTest is not a function` (see v0.1.16). Route lookups therefore go
+ * through the resolvers below, which check before they call.
+ */
+export interface AuthRouteTable {
+  authTest?: unknown
+  authLogout?: unknown
+}
+
+/**
+ * COMPILE-TIME skew guard.
+ *
+ * The runtime resolvers below accept a loosely-typed table, which means the
+ * typecheck alone would no longer notice if @chunky/protocol dropped these
+ * builders — the very skew that shipped in v0.1.16. This assertion restores
+ * that: it fails `bun run typecheck` (and therefore `build:web` / `build`)
+ * whenever the protocol this app is built against lacks either auth route.
+ * Exported so `noUnusedLocals` keeps it.
+ */
+interface RequiredAuthRoutes {
+  authTest: (provider: string) => string
+  authLogout: (provider: string) => string
+}
+type Assert<T extends true> = T
+export type AssertAuthRoutesPresent = Assert<
+  typeof ROUTES extends RequiredAuthRoutes ? true : false
+>
+
+/** Build a route path, or null when this bundle's ROUTES lacks the helper. */
+function routeFor(
+  routes: AuthRouteTable,
+  name: keyof AuthRouteTable,
+  provider: string,
+): string | null {
+  const build = routes?.[name]
+  if (typeof build !== "function") return null
+  try {
+    const path = (build as (p: string) => unknown)(provider)
+    return typeof path === "string" && path ? path : null
+  } catch {
+    return null
+  }
+}
+
+/** POST path for the credential preflight, or null when unavailable. */
+export function authTestRoute(routes: AuthRouteTable, provider: string): string | null {
+  return routeFor(routes, "authTest", provider)
+}
+
+/** POST path for removing a stored credential, or null when unavailable. */
+export function authLogoutRoute(routes: AuthRouteTable, provider: string): string | null {
+  return routeFor(routes, "authLogout", provider)
+}
 
 /**
  * Really validate the stored credential (the server preflights an OAuth
  * refresh where it can), so a provider whose `ready` flag lies is caught.
  *
- * Never throws: a failed check is a normal outcome the card renders inline.
+ * Never throws: a failed check is a normal outcome the card renders inline —
+ * including "this bundle has no such route", which reuses the same graceful
+ * `unsupported` result as an old server answering 404.
+ *
+ * `routes` is injectable so the missing-route path is testable without
+ * mutating the canonical ROUTES.
  */
-export async function testProviderAuth(provider: string): Promise<ProviderTestResult> {
+export async function testProviderAuth(
+  provider: string,
+  routes: AuthRouteTable = ROUTES,
+): Promise<ProviderTestResult> {
+  const path = authTestRoute(routes, provider)
+  if (!path) return { ok: false, unsupported: true, error: UNSUPPORTED_TEST }
   try {
-    const data = await req<Partial<AuthTestResult>>(ROUTES.authTest(provider), jsonInit("POST"))
+    const data = await req<Partial<AuthTestResult>>(path, jsonInit("POST"))
     if (data?.ok === true) return { ok: true }
     return { ok: false, error: data?.error || "The provider reported the credential as not usable." }
   } catch (err) {
@@ -237,10 +307,17 @@ export async function testProviderAuth(provider: string): Promise<ProviderTestRe
   }
 }
 
-/** Remove the provider's stored credential. /status then reports not ready. */
-export async function logoutProvider(provider: string): Promise<void> {
+/** Remove the provider's stored credential. /status then reports not ready.
+ *  Throws the same "not supported" error for a missing route helper as for an
+ *  old server, so the UI has one failure mode to render. */
+export async function logoutProvider(
+  provider: string,
+  routes: AuthRouteTable = ROUTES,
+): Promise<void> {
+  const path = authLogoutRoute(routes, provider)
+  if (!path) throw new Error(UNSUPPORTED_LOGOUT)
   try {
-    await req<AuthLogoutResult>(ROUTES.authLogout(provider), jsonInit("POST"))
+    await req<AuthLogoutResult>(path, jsonInit("POST"))
   } catch (err) {
     if (isMissingRoute(err)) throw new Error(UNSUPPORTED_LOGOUT)
     throw err
