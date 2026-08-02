@@ -1,10 +1,7 @@
 import {
   Archive,
   ArchiveRestore,
-  Check,
   ChevronDown,
-  GitBranch,
-  Loader2,
   PenSquare,
   Search,
   Settings,
@@ -12,31 +9,30 @@ import {
 import { useMemo, useState } from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
+import { collapseList } from "~/lib/sessionList"
 import { cn } from "~/lib/cn"
 import { DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
-function StatusPill({ status }: { status: ThreadStatus }) {
-  if (status.kind === "done") {
-    return (
-      <span className="flex items-center gap-1 font-medium text-[10.5px] text-success">
-        {status.unread && <span className="size-1.5 rounded-full bg-primary" aria-label="unread" />}
-        <Check className="size-3" />
-        Done
-      </span>
-    )
-  }
-  if (status.kind === "working") {
-    return (
-      <span className="flex items-center gap-1 font-medium text-[10.5px] text-primary">
-        <Loader2 className="size-3 animate-spin" />
-        Working {status.label}
-      </span>
-    )
-  }
-  return <span className="text-[10.5px] text-muted-foreground/60 tabular-nums">{status.ago}</span>
+/** The row's whole status, in six pixels.
+ *
+ *  A running session pulses; a finished one the reader hasn't looked at yet
+ *  keeps a solid dot until they select it (the unread rule lives in App: set on
+ *  running→idle while unselected, cleared on select — this only paints it).
+ *  Everything settled and seen shows nothing at all, which is what lets a long
+ *  list read as titles instead of badges.
+ *
+ *  The slot is always rendered so titles stay aligned down the column. */
+function StatusDot({ status }: { status: ThreadStatus }) {
+  const dot =
+    status.kind === "working" ? (
+      <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Working" />
+    ) : status.kind === "done" && status.unread ? (
+      <span className="size-1.5 rounded-full bg-primary" aria-label="Unread" />
+    ) : null
+  return <span className="flex size-1.5 shrink-0 items-center justify-center">{dot}</span>
 }
 
 function RepoMark({ mark }: { mark: string }) {
@@ -55,6 +51,7 @@ function ThreadRow({
   onRename,
   onToggleArchive,
   archived = false,
+  showProject = false,
 }: {
   thread: Thread
   project: Project | undefined
@@ -64,6 +61,8 @@ function ThreadRow({
   /** Local-only archive toggle; omitted → no archive affordance on the row. */
   onToggleArchive?: () => void
   archived?: boolean
+  /** Only when the list can span repos: name the one this row belongs to. */
+  showProject?: boolean
 }) {
   return (
     <div className="group relative">
@@ -72,44 +71,42 @@ function ThreadRow({
       onClick={onSelect}
       onDoubleClick={() => onRename?.()}
       className={cn(
-        "relative flex w-full cursor-pointer flex-col gap-1 rounded-lg px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+        "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
         active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
       )}
     >
       {active && (
         <span className="-translate-y-1/2 absolute top-1/2 left-0 h-6 w-[3px] rounded-r-full bg-primary" />
       )}
-      <div className="flex items-center gap-1.5">
-        <RepoMark mark={project?.mark ?? "?"} />
-        <span className="min-w-0 truncate text-[11px] text-muted-foreground/80">
-          {project ? `${project.owner}/${project.name}` : "unknown"}
+      {/* One line: what it is, and when it last moved. The repo it belongs to
+          is the tab overhead, and "Done" is the absence of a dot. */}
+      <div className="flex w-full items-center gap-2">
+        <StatusDot status={thread.status} />
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-[13px] leading-tight",
+            active ? "font-medium text-foreground" : "text-foreground/85",
+          )}
+        >
+          {thread.title}
         </span>
         <span
           className={cn(
-            "ml-auto flex shrink-0 items-center transition-opacity",
+            "shrink-0 text-[10.5px] text-muted-foreground/55 tabular-nums transition-opacity",
             onToggleArchive && "group-hover:opacity-0",
           )}
         >
-          <StatusPill status={thread.status} />
+          {thread.updated}
         </span>
       </div>
-      <span
-        className={cn(
-          "truncate text-[13px] leading-tight",
-          active ? "font-medium text-foreground" : "text-foreground/85",
-        )}
-      >
-        {thread.title}
-      </span>
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground/55">
-        <span className="flex min-w-0 items-center gap-1">
-          <GitBranch className="size-3 shrink-0" />
-          <span className="truncate">{thread.branch}</span>
+      {showProject && (
+        <span className="flex min-w-0 items-center gap-1.5 ps-[14px] text-[11px] text-muted-foreground/60">
+          <RepoMark mark={project?.mark ?? "?"} />
+          <span className="min-w-0 truncate">
+            {project ? `${project.owner}/${project.name}` : "unknown"}
+          </span>
         </span>
-        {thread.number != null && (
-          <span className="shrink-0 tabular-nums">#{thread.number}</span>
-        )}
-      </div>
+      )}
     </button>
     {onToggleArchive && (
       <Tooltip>
@@ -122,7 +119,8 @@ function ThreadRow({
                 event.stopPropagation()
                 onToggleArchive()
               }}
-              className="pointer-events-none absolute top-1.5 right-2 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
+              // Takes the timestamp's place on hover, so the row never grows.
+              className="-translate-y-1/2 pointer-events-none absolute top-[15px] right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
             />
           }
         >
@@ -145,11 +143,15 @@ export function Sidebar({
   onOpenPalette,
   connectionLabel,
   onRenameThread,
+  showProjects = false,
 }: {
   projects: Project[]
   threads: Thread[]
   activeProjectId: string
   activeThreadId: string
+  /** True only where the list can span repos (demo). Live sessions are fetched
+   *  per repo, so naming the repo on every row would just repeat the tab. */
+  showProjects?: boolean
   onSelectThread: (id: string) => void
   onNewThread: () => void
   onOpenSettings: () => void
@@ -160,6 +162,7 @@ export function Sidebar({
 }) {
   const [query, setQuery] = useState("")
   const [archivedOpen, setArchivedOpen] = useState(false)
+  const [settledExpanded, setSettledExpanded] = useState(false)
   const { archived: archivedIds, toggle: toggleArchived } = useArchivedSessions()
   const projectOf = useMemo(
     () => new Map(projects.map((p) => [p.id, p])),
@@ -187,6 +190,13 @@ export function Sidebar({
       archived: list.filter((t) => archivedIds.has(t.id)),
     }
   }, [threads, query, projectOf, archivedIds])
+
+  // Old settled threads are history, not a working list: show a screenful and
+  // let the reader ask for the rest. Selection order stays the server's.
+  const { visible: settledVisible, hidden: settledHidden } = useMemo(
+    () => collapseList(settled, settledExpanded),
+    [settled, settledExpanded],
+  )
 
   return (
     <aside className="relative flex h-full w-72 shrink-0 flex-col overflow-hidden bg-transparent text-sidebar-foreground">
@@ -262,6 +272,7 @@ export function Sidebar({
               onSelect={() => onSelectThread(t.id)}
               onRename={() => onRenameThread?.(t.id)}
               onToggleArchive={() => toggleArchived(t.id)}
+              showProject={showProjects}
             />
           ))}
         </div>
@@ -278,7 +289,7 @@ export function Sidebar({
               </span>
             </div>
             <div className="flex flex-col gap-0.5">
-              {settled.map((t) => (
+              {settledVisible.map((t) => (
                 <ThreadRow
                   key={t.id}
                   thread={t}
@@ -287,9 +298,19 @@ export function Sidebar({
                   onSelect={() => onSelectThread(t.id)}
                   onRename={() => onRenameThread?.(t.id)}
                   onToggleArchive={() => toggleArchived(t.id)}
+                  showProject={showProjects}
                 />
               ))}
             </div>
+            {(settledHidden > 0 || settledExpanded) && (
+              <button
+                type="button"
+                onClick={() => setSettledExpanded((open) => !open)}
+                className="mt-0.5 w-full cursor-pointer rounded-md px-2.5 py-1 text-left text-[11px] text-muted-foreground/70 outline-none transition-colors hover:bg-sidebar-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                {settledExpanded ? "Show less" : `Show ${settledHidden} more`}
+              </button>
+            )}
           </>
         )}
 

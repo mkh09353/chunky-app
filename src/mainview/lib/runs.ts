@@ -24,15 +24,6 @@ export function runAccent(runId: string): string {
   return RUN_ACCENTS[Math.abs(hash) % RUN_ACCENTS.length]!
 }
 
-/** Has this session delegated at all?
- *
- * The gutter is the whole reason the chat column is pinned left, so a session
- * that never delegates must not pay for it: no gutter cell, no cap — just a
- * full-width conversation. */
-export function hasRuns(state: TranscriptState | undefined): boolean {
-  return !!state && state.runs.length > 0
-}
-
 /** A persistent sidekick SEAT, as opposed to a one-shot delegate.
  *
  * The server gives seats a stable thread id (`${rootId}:sidekick[:seat]`) and
@@ -57,7 +48,7 @@ function runsByItem(
   return byItem
 }
 
-/** Settled runs grouped by the tool pill they park beside. */
+/** Settled runs grouped by the tool pill that spawned them. */
 export function parkedRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
   return runsByItem(state, "done")
 }
@@ -76,14 +67,15 @@ export interface RunAnchor {
    *  fires two delegate calls back-to-back can land both on the same pill —
    *  each still streams its own tail inside the card. */
   liveRunIds: string[]
-  /** Settled runs that park in this row's gutter. */
+  /** Runs from this pill that have finished: their transcript hangs off the
+   *  pill's expanded body. */
   parkedRunIds: string[]
   /** Shared hue for the pill's left edge and its cards'. */
   accent: string
 }
 
-/** Tool-item index → the runs it spawned. This is what makes gutter alignment
- *  structural: the row is split at the pill, and the card rides in its gutter. */
+/** Tool-item index → the runs it spawned. This is what lets a pill own its
+ *  delegates: live tails while they run, full transcripts once they settle. */
 export function runAnchors(state: TranscriptState): Map<number, RunAnchor> {
   const anchors = new Map<number, RunAnchor>()
   const add = (at: number, run: RunRecord) => {
@@ -102,6 +94,18 @@ export function runAnchors(state: TranscriptState): Map<number, RunAnchor> {
     if (owner) anchors.set(at, { ...anchor, accent: runAccent(owner) })
   }
   return anchors
+}
+
+/** Main-transcript item indices that own a delegated run.
+ *
+ *  Cheaper than `runAnchors` (no hue/link bookkeeping) and used by the mapper,
+ *  which only needs to know which tool pills must stay standalone blocks. */
+export function anchoredItemIndices(state: TranscriptState | undefined): ReadonlySet<number> {
+  const anchored = new Set<number>()
+  for (const run of state?.runs ?? []) {
+    if (run.parentId === MAIN && run.anchorIndex >= 0) anchored.add(run.anchorIndex)
+  }
+  return anchored
 }
 
 /** Runs by id, for turning anchor ids back into records. */

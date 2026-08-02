@@ -1,14 +1,21 @@
 import {
+  BarChart3,
+  GitFork,
+  History,
   Info,
+  Moon,
   MoreHorizontal,
   PanelRightOpen,
-  Share2,
+  Pencil,
+  Rocket,
   Sparkles,
   SquareTerminal,
+  Sun,
+  Target,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { Repo } from "~/lib/api"
-import type { Project, Thread } from "~/lib/mock"
+import type { Message, Project, Thread } from "~/lib/mock"
 import { Button } from "./ui/button"
 import {
   DropdownMenu,
@@ -23,13 +30,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import { MessageView } from "./Message"
 import { AgentCard } from "./AgentCard"
 import { LiveRunsProvider, type LiveRunsValue } from "./LiveRun"
-import { RunLinkProvider } from "./RunLink"
 import { cn } from "~/lib/cn"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
-import { buildTranscriptRows, type TranscriptRow } from "~/lib/mapTranscript"
-import { hasRuns, liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
+import { applyRunAnchors } from "~/lib/mapTranscript"
+import { liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
 import { useRunClock } from "~/lib/useRunClock"
-import { useFullSizeWindow } from "~/lib/windowSize"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
 
 /** Top chrome strip: repo tabs + actions. */
@@ -47,10 +52,13 @@ export function ChatTopBar({
   onCancelClone,
   onViewCloneThread,
   defaultCloneParent,
+  repoStatus,
   headerRight,
   onToggleBrowser,
   onToggleTerminal,
   terminalOpen = false,
+  theme,
+  onToggleTheme,
   onRename, onFork, onRewind, onGoal, onShip, onStats,
 }: {
   /** Optional; when omitted, repo tabs are hidden (demo / offline). */
@@ -68,11 +76,17 @@ export function ChatTopBar({
   onCancelClone?: () => void
   onViewCloneThread?: (sessionId: string) => void
   defaultCloneParent?: string
+  /** Status that belongs to the active repo (the git branch), shown beside the
+   *  tabs rather than in the action cluster. */
+  repoStatus?: React.ReactNode
   headerRight?: React.ReactNode
   onToggleBrowser?: () => void
-  /** Bottom terminal drawer toggle; omitted → the button is hidden. */
+  /** Bottom terminal drawer toggle; omitted → the menu item is hidden. */
   onToggleTerminal?: () => void
   terminalOpen?: boolean
+  /** Current resolved theme, so the menu row can name the OTHER one. */
+  theme?: "light" | "dark"
+  onToggleTheme?: () => void
   onRename?: () => void; onFork?: () => void; onRewind?: () => void; onGoal?: () => void; onShip?: () => void; onStats?: () => void
 }) {
   const showRepos =
@@ -103,38 +117,23 @@ export function ChatTopBar({
         />
       ) : null}
 
+      {/* Branch/status of the repo whose tab is selected — it reads as a label
+          on the tabs, not as another control in the action cluster. Its own
+          trigger opts out of dragging; the space around it stays grabbable. */}
+      {repoStatus}
+
       {/* The window's guaranteed drag handle. Repo tabs and the action cluster
           both opt out of dragging, so this spacer is what stays grabbable at
           every window width — it grows into the free space and never shrinks
           below a usable strip, and it never hosts controls. */}
       <div aria-hidden className="h-full min-w-12 flex-1" />
 
+      {/* At most a handful of targets live out here: the mic and the session
+          badges that ride in `headerRight`, the side-pane toggle, and the
+          overflow menu. Everything rarer (theme, terminal, share) is a row in
+          that menu instead of another icon competing for the strip. */}
       <div className={cn(NO_DRAG_REGION, "flex shrink-0 items-center gap-1.5")}>
         {headerRight}
-        {onToggleTerminal && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className={cn(NO_DRAG_REGION, terminalOpen && "bg-accent text-foreground")}
-                  onClick={onToggleTerminal}
-                  aria-label="Toggle terminal drawer"
-                />
-              }
-            >
-              <SquareTerminal />
-            </TooltipTrigger>
-            <TooltipPopup>Toggle terminal (Ctrl+`)</TooltipPopup>
-          </Tooltip>
-        )}
-        <Tooltip>
-          <TooltipTrigger render={<Button variant="ghost" size="icon-sm" />}>
-            <Share2 />
-          </TooltipTrigger>
-          <TooltipPopup>Share thread</TooltipPopup>
-        </Tooltip>
         <Tooltip>
           <TooltipTrigger render={<Button variant="ghost" size="icon-sm" onClick={onToggleBrowser} aria-label="Toggle browser pane" />}>
             <PanelRightOpen />
@@ -142,17 +141,51 @@ export function ChatTopBar({
           <TooltipPopup>Toggle browser</TooltipPopup>
         </Tooltip>
         <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="ghost" size="icon-sm" />}>
+          <DropdownMenuTrigger
+            render={<Button variant="ghost" size="icon-sm" aria-label="More actions" />}
+          >
             <MoreHorizontal />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={onRename}>Rename session</DropdownMenuItem>
-            <DropdownMenuItem onClick={onFork}>Fork session…</DropdownMenuItem>
-            <DropdownMenuItem onClick={onRewind}>Rewind to turn…</DropdownMenuItem>
+            <DropdownMenuItem onClick={onRename}>
+              <Pencil />
+              Rename session
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onFork}>
+              <GitFork />
+              Fork session…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onRewind}>
+              <History />
+              Rewind to turn…
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onGoal}>Goal mode…</DropdownMenuItem>
-            <DropdownMenuItem onClick={onShip}>Ship it…</DropdownMenuItem>
-            <DropdownMenuItem onClick={onStats}>Usage & scoreboard</DropdownMenuItem>
+            <DropdownMenuItem onClick={onGoal}>
+              <Target />
+              Goal mode…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onShip}>
+              <Rocket />
+              Ship it…
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={onStats}>
+              <BarChart3 />
+              Usage & scoreboard
+            </DropdownMenuItem>
+            {(onToggleTerminal || onToggleTheme) && <DropdownMenuSeparator />}
+            {onToggleTerminal && (
+              <DropdownMenuItem onClick={onToggleTerminal}>
+                <SquareTerminal />
+                {terminalOpen ? "Hide terminal" : "Show terminal"}
+                <span className="ml-auto ps-4 text-[11px] text-muted-foreground">Ctrl+`</span>
+              </DropdownMenuItem>
+            )}
+            {onToggleTheme && (
+              <DropdownMenuItem onClick={onToggleTheme}>
+                {theme === "dark" ? <Sun /> : <Moon />}
+                {theme === "dark" ? "Light mode" : "Dark mode"}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -171,10 +204,10 @@ const ANSWER_TOP_GAP = 12
 /** Id of the answer that just landed: the trailing assistant message. A turn
  *  that ended without one (stopped, error before any reply) yields undefined —
  *  nothing to re-anchor to, so the viewport is left where it is. */
-function lastAnswerId(rows: TranscriptRow[]): string | undefined {
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const role = rows[i]!.message.role
-    if (role === "assistant") return rows[i]!.message.id
+function lastAnswerId(messages: Message[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = messages[i]!.role
+    if (role === "assistant") return messages[i]!.id
     if (role === "user") return undefined
   }
   return undefined
@@ -238,7 +271,7 @@ export function ChatView({
     return () => observer.disconnect()
   }, [])
 
-  // Run state → anchors (which pill owns which run) → rows split at those pills.
+  // Run state → anchors: which pill owns which run, live or settled.
   const anchors = useMemo(
     () => (transcript ? runAnchors(transcript) : new Map<number, RunAnchor>()),
     [transcript],
@@ -247,8 +280,8 @@ export function ChatView({
     () => (transcript ? runsById(transcript) : new Map<string, RunRecord>()),
     [transcript],
   )
-  const rows = useMemo(
-    () => buildTranscriptRows(thread.messages, anchors),
+  const messages = useMemo(
+    () => applyRunAnchors(thread.messages, anchors),
     [thread.messages, anchors],
   )
   const elapsedOf = useRunClock(transcript?.runs)
@@ -256,10 +289,6 @@ export function ChatView({
   // spawned them (Message → ToolCard → LiveRunSection). Settled runs are not in
   // here, which is what makes a finished card go back to its plain self.
   const liveViews = useMemo(() => liveRunViews(transcript), [transcript])
-  const liveRuns = useMemo<LiveRunsValue>(
-    () => ({ views: liveViews, elapsedOf: (runId) => elapsedOf(runIndex.get(runId)) }),
-    [liveViews, elapsedOf, runIndex],
-  )
 
   // A turn ends when the session goes running → idle: `session.status` from the
   // SSE reducer (transcript.status), or — in demo/offline mode, where there is
@@ -273,8 +302,8 @@ export function ChatView({
   const messageCount = thread.messages.length
   const lastRole = thread.messages[messageCount - 1]?.role
   // Read at turn end (not a dep — the effect must fire on the transition only).
-  const rowsRef = useRef(rows)
-  rowsRef.current = rows
+  const messagesRef = useRef(messages)
+  messagesRef.current = messages
 
   // A fresh user turn always re-anchors to the bottom, even if the reader had
   // scrolled away to re-read the previous answer.
@@ -307,7 +336,7 @@ export function ChatView({
     // The turn is done: park the START of the answer at the top of the
     // scrollport rather than leaving the reader at its tail. One frame later,
     // so the cards settling have finished moving the layout first.
-    const answerId = lastAnswerId(rowsRef.current)
+    const answerId = lastAnswerId(messagesRef.current)
     if (!answerId) return
     // Stop the ResizeObserver's bottom-follow immediately. Otherwise a resize
     // notification between this effect and the animation frame can jump to the
@@ -325,83 +354,91 @@ export function ChatView({
       el.scrollTo({ top: Math.max(0, top - ANSWER_TOP_GAP), behavior: "smooth" })
     })
     return () => cancelAnimationFrame(frame)
-    // `rows` is a dep so this fires on every streamed delta, not just on
+    // `messages` is a dep so this fires on every streamed delta, not just on
     // turn boundaries; the follow above is what tracks mid-message growth.
-  }, [running, messageCount, streamingId, loading, rows])
+  }, [running, messageCount, streamingId, loading, messages])
 
   // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
   // in the same commit can never cancel each other out.
   const collapseSignal = turnEnd * 2 + (foldAll ? 1 : 0)
-  // The gutter only earns its space on a maximized/fullscreen window, AND only
-  // once this session has actually delegated. Any smaller window gets the plain
-  // full-width chat, with agent cards falling inline under their pill.
-  const fullSizeWindow = useFullSizeWindow()
-  const gutterOn = fullSizeWindow && hasRuns(transcript)
 
-  /** Scroll a settled run's card into view (pill → its parked card). */
-  const scrollToParked = useCallback((runId: string) => {
-    const card = innerRef.current?.querySelector<HTMLElement>(
-      `[data-run-parked="${CSS.escape(runId)}"]`,
-    )
-    if (!card) return false
-    card.scrollIntoView({ block: "center", behavior: "smooth" })
-    return true
-  }, [])
+  // Everything a delegate pill needs, in one context: the live tails, the run
+  // records that name them, and a renderer for a settled run's whole
+  // transcript. The pill is the only place a delegated run appears now, so the
+  // detail it can open must be the full AgentCard — handed in as a render prop
+  // because AgentCard renders MessageView, and a message importing it back
+  // would close an import cycle.
+  const liveRuns = useMemo<LiveRunsValue>(
+    () => ({
+      views: liveViews,
+      elapsedOf: (runId) => elapsedOf(runIndex.get(runId)),
+      runs: runIndex,
+      ...(transcript
+        ? {
+            renderRunDetail: (runId: string) => {
+              const run = runIndex.get(runId)
+              if (!run) return null
+              const elapsed = elapsedOf(run)
+              return (
+                <AgentCard
+                  variant="parked"
+                  transcript={transcript}
+                  threadId={run.threadId}
+                  run={run}
+                  {...(modelName ? { modelName } : {})}
+                  {...(elapsed != null ? { elapsedMs: elapsed } : {})}
+                  collapseSignal={collapseSignal}
+                />
+              )
+            },
+          }
+        : {}),
+    }),
+    [liveViews, elapsedOf, runIndex, transcript, modelName, collapseSignal],
+  )
+  // The answer that just landed keeps its actions on show; every other message
+  // reveals them on hover/focus. Nothing is mounted or unmounted either way, so
+  // the transcript's height is identical in both states.
+  const pinnedActionsId = lastAnswerId(messages)
+
+  // A thread with nothing in it yet gets ONE quiet line and the composer — no
+  // start-of-thread marker to mark the start of nothing, and no synthetic
+  // starter content (a new session must attach and be typeable immediately).
+  const empty = thread.messages.length === 0
 
   const body = (
     <div ref={innerRef} className="relative flex flex-col gap-4 pt-5 pr-7 pb-[26px] pl-[22px]">
-      <Row gutterOn={gutterOn}>
-        <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
-          <Sparkles className="size-3 text-primary" />
-          {loading ? "Loading transcript…" : "Start of thread"}
-        </div>
-      </Row>
+      {!empty && (
+        <Row>
+          <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+            <Sparkles className="size-3 text-primary" />
+            {loading ? "Loading transcript…" : "Start of thread"}
+          </div>
+        </Row>
+      )}
 
-      {loading && thread.messages.length === 0 ? (
-        <p className="py-12 text-[13px] text-muted-foreground">Replaying session history…</p>
-      ) : thread.messages.length === 0 ? (
-        <p className="py-12 text-[13px] text-muted-foreground">Send a message to begin.</p>
+      {loading && empty ? (
+        <p className="py-12 text-center text-[13px] text-muted-foreground/70">
+          Replaying session history…
+        </p>
+      ) : empty ? (
+        <p className="py-12 text-center text-[13px] text-muted-foreground/70">
+          What are we working on?
+        </p>
       ) : (
-        rows.map((row) => {
-          // Only SETTLED runs park in the gutter. A run still in flight streams
-          // inside the tool card that spawned it (LiveRunSection), so it is not
-          // duplicated out here.
-          const cards = row.parkedRunIds
-            .map((id) => runIndex.get(id))
-            .filter((run): run is RunRecord => !!run)
-          return (
-            <Row key={row.id} msgId={row.message.id} gutterOn={gutterOn} gutter={
-              cards.length > 0 && transcript ? (
-                <div className="flex flex-col gap-2">
-                  {cards.map((run) => (
-                    <AgentCard
-                      key={run.id}
-                      variant="parked"
-                      transcript={transcript}
-                      threadId={run.threadId}
-                      run={run}
-                      {...(modelName ? { modelName } : {})}
-                      {...(elapsedOf(run) != null ? { elapsedMs: elapsedOf(run)! } : {})}
-                      collapseSignal={collapseSignal}
-                    />
-                  ))}
-                </div>
-              ) : null
-            }>
-              <MessageView
-                message={row.message}
-                streaming={row.message.id === streamingId}
-                blocks={row.blocks}
-                continuation={row.continuation}
-                lastSegment={row.lastSegment}
-              />
-            </Row>
-          )
-        })
+        messages.map((message) => (
+          <Row key={message.id} msgId={message.id}>
+            <MessageView
+              message={message}
+              streaming={message.id === streamingId}
+              actionsPinned={message.id === pinnedActionsId}
+            />
+          </Row>
+        ))
       )}
 
       {compacted > 0 && (
-        <Row gutterOn={gutterOn}>
+        <Row>
           <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
             <Info className="size-3" />
             Context compacted — older turns summarized{compacted > 1 ? ` · ×${compacted}` : ""}
@@ -416,78 +453,34 @@ export function ChatView({
     // @container: every breakpoint below keys off the CHAT PANEL's width, so the
     // sidebar's width (and its collapsing) can never skew them.
     <div className="@container flex min-h-0 min-w-0 flex-1 flex-col">
-      <RunLinkProvider onJump={scrollToParked}>
-        <LiveRunsProvider value={liveRuns}>
-          <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
-            {body}
-          </ScrollArea>
-        </LiveRunsProvider>
-      </RunLinkProvider>
+      <LiveRunsProvider value={liveRuns}>
+        <ScrollArea className="flex-1" viewportRef={scrollRef} viewportClassName="scroll-smooth">
+          {body}
+        </ScrollArea>
+      </LiveRunsProvider>
     </div>
   )
 }
 
-/** One transcript row: text column pinned left, connector, then the gutter.
+/** One transcript row: a single bounded text column.
  *
- *  Breakpoints are CONTAINER queries, not viewport ones: the chat panel sits
- *  beside a ~288px sidebar, so a viewport breakpoint would dissolve the gutter
- *  at the wrong moment (and differently once the sidebar collapses).
- *  Below GUTTER_AT the row stacks and cards fall inline under their pill.
- *
- *  Note the row never wraps: the text column has a 58rem BASIS and grows into
- *  whatever the gutter leaves, so the gutter always stays beside it instead of
- *  dropping to the next line.
- *
- *  `gutterOn` is the session-level switch: with no runs anywhere (or in a
- *  smaller window) there is no gutter cell, so the conversation uses the full
- *  width and any cards fall inline under the pill that spawned them — they must
- *  never become invisible just because the gutter is off. */
+ *  There used to be a right-hand gutter here that parked settled delegate runs
+ *  beside the pill that spawned them. It cost every row a reserved cell (and a
+ *  maximized-window gate to earn it) to show what the pill itself can hold, so
+ *  the runs moved inside the pill and the column reclaimed the width. The cap
+ *  stays: prose is unreadable full-bleed. */
 function Row({
   children,
-  gutter,
-  gutterOn,
   msgId,
 }: {
   children: React.ReactNode
-  gutter?: React.ReactNode
-  gutterOn: boolean
-  /** The message this row belongs to; a split message tags every segment, so
-   *  the FIRST match in the DOM is where that message starts. */
+  /** The message this row belongs to — the turn-end scroll anchors on it. */
   msgId?: string
 }) {
-  if (!gutterOn) {
-    return (
-      <div data-chat-row="" data-msg-id={msgId}>
-        <div data-chat-col="" className="min-w-0 max-w-[88rem]">
-          {children}
-          {gutter && <div className="mt-2 max-w-[42rem] ps-[46px]">{gutter}</div>}
-        </div>
-      </div>
-    )
-  }
   return (
-    <div
-      data-chat-row=""
-      data-msg-id={msgId}
-      className="flex flex-col gap-2 @[1074px]:flex-row @[1074px]:items-start @[1074px]:gap-x-6 @[1074px]:gap-y-0"
-    >
-      <div data-chat-col="" className="min-w-0 @[1074px]:max-w-[76rem] @[1074px]:flex-[1_1_58rem]">
+    <div data-chat-row="" data-msg-id={msgId}>
+      <div data-chat-col="" className="min-w-0 max-w-[88rem]">
         {children}
-      </div>
-      <div
-        className={cn(
-          "mt-[19px] hidden h-px min-w-0 flex-1 @[1074px]:block",
-          gutter && "border-success/30 border-t border-dashed",
-        )}
-      />
-      <div
-        data-chat-gutter=""
-        /* The cell keeps its width even when empty: every row's text column must
-           be the same width whether or not that row owns a card. Only when
-           stacked does an empty gutter collapse away. */
-        className="ps-[46px] @max-[1073px]:empty:hidden @[1074px]:w-[380px] @[1074px]:shrink-0 @[1074px]:ps-0"
-      >
-        {gutter}
       </div>
     </div>
   )

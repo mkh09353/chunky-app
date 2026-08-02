@@ -30,7 +30,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu"
-import { Kbd } from "./ui/kbd"
 import { Textarea } from "./ui/textarea"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
@@ -753,19 +752,8 @@ export function Composer({
 
           <div className="flex shrink-0 items-center gap-2">
             {contextMeter}
-            {/* While running there are two send buttons competing for the same
-                row, so the shortcut hint waits for a wider viewport. Idle keeps
-                the original sm breakpoint. */}
-            <span
-              className={cn(
-                "hidden items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground",
-                streaming ? "md:flex" : "sm:flex",
-              )}
-            >
-              <Kbd>⏎</Kbd> {streaming ? "queue" : "send"}
-              {streaming && <><span>·</span><Kbd>⌥⏎</Kbd> steer</>}
-              <Kbd>⇧⏎</Kbd> newline
-            </span>
+            {/* No keyboard hints here: the send/steer buttons carry their own
+                tooltips, and this row is for state, not instructions. */}
             {streaming && (
               <Button size="icon" variant="secondary" onClick={onStop} aria-label="Stop">
                 <Square className="size-3.5 fill-current" />

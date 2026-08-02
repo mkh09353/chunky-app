@@ -26,11 +26,12 @@ import type {
   ToolBlockData,
 } from "~/lib/mock"
 import chunkyLogo from "~/assets/chunky-logo.png"
+import type { ToolSummary } from "~/lib/toolSummary"
+import { groupStatus, groupSummary, toolKind } from "~/lib/toolSummary"
 import { cn } from "~/lib/cn"
 import { renderMarkdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
 import { LiveRunSection, useLiveRuns } from "./LiveRun"
-import { isRunLit, runLinkProps, useRunLink } from "./RunLink"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
 /** Collapsible "Worked for 3m 11s ›" divider between the prompt and the reply. */
@@ -131,6 +132,10 @@ function IconButton({ label, children }: { label: string; children: React.ReactN
         render={
           <button
             type="button"
+            // The row is reachable by keyboard (focus reveals it), so each
+            // button needs a name a screen reader can read — the tooltip alone
+            // is a hover affordance.
+            aria-label={label}
             className="inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 [&_svg]:size-3.5"
           />
         }
@@ -143,12 +148,55 @@ function IconButton({ label, children }: { label: string; children: React.ReactN
 }
 
 function toolIcon(name: string) {
-  const n = name.toLowerCase()
-  if (n.includes("bash")) return Terminal
-  if (n.includes("ffgrep") || n.includes("fffind")) return Search
-  if (n.includes("read") || n.includes("write") || n.includes("edit")) return FileText
-  if (n.includes("sidekick") || n.includes("spawn")) return Bot
-  return Wrench
+  switch (toolKind(name)) {
+    case "bash":
+      return Terminal
+    case "search":
+      return Search
+    case "read":
+    case "write":
+    case "edit":
+      return FileText
+    case "delegate":
+      return Bot
+    default:
+      return Wrench
+  }
+}
+
+/** Icon for a whole activity group: the family it is made of, or a generic
+ *  wrench once it is mixed. */
+function groupIcon(tools: ToolBlockData[]) {
+  const first = tools[0]
+  if (!first) return Wrench
+  const kind = toolKind(first.name)
+  return tools.every((tool) => toolKind(tool.name) === kind) ? toolIcon(first.name) : Wrench
+}
+
+/** What a call did, in words: dim verb + the argument that matters. */
+function ToolSummaryLine({
+  summary,
+  withLabel = true,
+}: {
+  summary: ToolSummary
+  /** The standalone card already names the tool, so it drops the verb. */
+  withLabel?: boolean
+}) {
+  return (
+    <>
+      {withLabel && <span className="shrink-0 text-muted-foreground">{summary.label}</span>}
+      {summary.detail && (
+        <span
+          className={cn(
+            "min-w-0 truncate text-[11.5px] text-muted-foreground",
+            summary.mono && "font-mono",
+          )}
+        >
+          {summary.detail}
+        </span>
+      )}
+    </>
+  )
 }
 
 function DiffView({ diff }: { diff: FileDiffData }) {
@@ -202,58 +250,222 @@ function ToolStatus({ tool }: { tool: ToolBlockData }) {
   return <Check className="size-3.5 text-success" />
 }
 
+/** Aggregate status of an activity group: waiting, then failed, then done. */
+function GroupStatus({ tools }: { tools: ToolBlockData[] }) {
+  const status = groupStatus(tools)
+  if (status === "running") return <Loader2 className="size-3.5 animate-spin text-primary" />
+  if (status === "failed") return <X className="size-3.5 text-destructive" />
+  return <Check className="size-3.5 text-success" />
+}
+
+/** Is there anything to reveal when this call is expanded? */
+function toolHasBody(tool: ToolBlockData): boolean {
+  return !!(tool.inputJson || tool.output || tool.progress || tool.diff)
+}
+
+/** The full detail of one call — diff, raw arguments, progress, output. Shared
+ *  by the standalone card and by a row inside an activity group. */
+function ToolDetail({ tool }: { tool: ToolBlockData }) {
+  return (
+    <div className="flex flex-col gap-2 border-border border-t bg-muted/20 p-2.5">
+      {tool.diff && <DiffView diff={tool.diff} />}
+      {tool.inputJson && (
+        <pre className="max-h-72 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {tool.inputJson}
+        </pre>
+      )}
+      {!tool.done && tool.progress && (
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          {tool.progress}
+        </pre>
+      )}
+      {tool.output && (
+        <pre
+          className={cn(
+            "max-h-72 overflow-auto whitespace-pre-wrap rounded-md border p-2 font-mono text-[11px] leading-relaxed",
+            tool.ok === false
+              ? "border-destructive/30 bg-destructive/5 text-foreground"
+              : "border-border bg-background/60 text-muted-foreground",
+          )}
+        >
+          {tool.output}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+/** One call inside an expanded activity group: its summary line, click-expanded
+ *  to exactly the detail the standalone card shows. */
+function ToolGroupRow({ tool }: { tool: ToolBlockData }) {
+  const [open, setOpen] = useState(false)
+  const Icon = toolIcon(tool.name)
+  const hasBody = toolHasBody(tool)
+  return (
+    <div className="border-border/50 [&:not(:last-child)]:border-b">
+      <button
+        type="button"
+        onClick={() => hasBody && setOpen((o) => !o)}
+        className={cn(
+          "flex w-full items-center gap-2 px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          hasBody && "cursor-pointer hover:bg-accent/30",
+        )}
+      >
+        <Icon className="size-3.5 shrink-0 text-muted-foreground/70" />
+        <span className="flex min-w-0 items-center gap-1.5 text-[11.5px]">
+          <ToolSummaryLine summary={tool.summary} />
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {tool.diff && (
+            <span className="flex items-center gap-1.5 font-mono text-[11px] tabular-nums">
+              <span className="text-success">+{tool.diff.added}</span>
+              <span className="text-destructive">−{tool.diff.removed}</span>
+            </span>
+          )}
+          <ToolStatus tool={tool} />
+          {hasBody && (
+            <ChevronRight
+              className={cn(
+                "size-3.5 text-muted-foreground transition-transform",
+                open && "rotate-90",
+              )}
+            />
+          )}
+        </span>
+      </button>
+      {open && hasBody && <ToolDetail tool={tool} />}
+    </div>
+  )
+}
+
+/** Consecutive plain tool calls, folded into one secondary activity line.
+ *
+ *  Collapsed it is a single row ("Ran 6 commands ✓"), so the assistant's prose
+ *  keeps the page. While the newest call is still in flight the group shows
+ *  that one line under the header — enough to see the agent working — and
+ *  drops back to the single line once everything has settled. */
+function ToolGroupCard({ tools }: { tools: ToolBlockData[] }) {
+  const [open, setOpen] = useState(false)
+  const Icon = groupIcon(tools)
+  const last = tools[tools.length - 1]
+  const running = !!last && !last.done
+  return (
+    <div className="my-2 overflow-hidden rounded-lg border border-border/60 bg-muted/20">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left outline-none transition-colors hover:bg-accent/30 focus-visible:ring-2 focus-visible:ring-ring/40"
+      >
+        <Icon className="size-3.5 shrink-0 text-muted-foreground/70" />
+        <span className="truncate font-medium text-[12px] text-muted-foreground">
+          {groupSummary(tools)}
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          <GroupStatus tools={tools} />
+          <ChevronRight
+            className={cn(
+              "size-3.5 text-muted-foreground transition-transform",
+              open && "rotate-90",
+            )}
+          />
+        </span>
+      </button>
+      {!open && running && last && (
+        // Live activity: the call currently in flight, one line, no controls.
+        <div className="flex items-center gap-2 border-border/50 border-t px-2.5 py-1.5 text-[11.5px]">
+          <Loader2 className="size-3 shrink-0 animate-spin text-primary" />
+          <span className="flex min-w-0 items-center gap-1.5">
+            <ToolSummaryLine summary={last.summary} />
+          </span>
+        </div>
+      )}
+      {open && (
+        <div className="flex flex-col border-border/50 border-t">
+          {tools.map((tool, i) => (
+            <ToolGroupRow key={`${tool.id}:${i}`} tool={tool} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ToolCard({
   tool,
   runId,
   runIds,
+  settledRunIds,
   accent,
 }: {
   tool: ToolBlockData
-  /** Present when this call spawned a delegate: wires the pill to its card. */
+  /** Present when this call spawned a delegate: the run it owns. */
   runId?: string
   /** Runs spawned by this call that are still in flight: each streams a live
    *  tail inside the card until it settles. */
   runIds?: string[]
+  /** Runs spawned by this call that have finished: their whole transcript is
+   *  reachable from this card's expanded body. */
+  settledRunIds?: string[]
   accent?: string
 }) {
   const [open, setOpen] = useState(false)
-  const Icon = toolIcon(tool.name)
-  const hasBody = !!(tool.inputJson || tool.output || tool.progress || tool.diff)
-  const link = useRunLink()
-  const lit = isRunLit(runId, link)
-  // Live delegate streams for this pill. Empty whenever the runs have settled
-  // (or no agent-stream events ever arrived), which is exactly what makes the
-  // completed card identical to the one this file rendered before.
-  const { views, elapsedOf } = useLiveRuns()
+  // Everything this pill's delegates need: the live tails while they run, the
+  // run records that name them, and the renderer for their full transcript.
+  const { views, elapsedOf, runs, renderRunDetail } = useLiveRuns()
   const live = (runIds ?? (runId ? [runId] : []))
     .map((id) => views.get(id))
     .filter((view): view is NonNullable<typeof view> => !!view)
+  const settled = (settledRunIds ?? [])
+    .map((id) => runs.get(id))
+    .filter((run): run is NonNullable<typeof run> => !!run)
+  const delegate = live.length > 0 || settled.length > 0
+  const detailIds = renderRunDetail ? settled.map((run) => run.id) : []
+  const hasBody = toolHasBody(tool) || detailIds.length > 0
+  const expandable = hasBody || live.length > 0
+
+  // A delegate pill says who ran, not what JSON went in: the brief itself is
+  // in the expanded detail, and the run's own title is what the reader tracks.
+  const title = live[0]?.title ?? settled[0]?.title
+  const toolCount =
+    live.reduce((sum, view) => sum + view.toolCount, 0) +
+    settled.reduce((sum, run) => sum + run.toolCount, 0)
+  const Icon = toolIcon(tool.name)
+
   return (
     <div
       {...(runId ? { "data-run-pill": runId } : {})}
-      {...runLinkProps(runId, link)}
       style={accent ? { borderLeftColor: accent } : undefined}
       className={cn(
         "my-2 overflow-hidden rounded-lg border border-border bg-card/50 shadow-xs transition-colors",
         accent && "border-l-2",
         live.length > 0 && "border-primary/30",
-        lit && "bg-accent/40 ring-1 ring-ring/40",
       )}
     >
       <button
         type="button"
-        onClick={() => (hasBody || live.length > 0) && setOpen((o) => !o)}
+        onClick={() => expandable && setOpen((o) => !o)}
         className={cn(
           "flex w-full items-center gap-2 px-2.5 py-2 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-          (hasBody || live.length > 0) && "cursor-pointer hover:bg-accent/40",
+          expandable && "cursor-pointer hover:bg-accent/40",
         )}
       >
         <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 font-medium text-[12.5px]">{tool.name}</span>
-        {tool.inputPreview && (
-          <span className="truncate font-mono text-[11.5px] text-muted-foreground">
-            {tool.inputPreview}
-          </span>
+        {delegate && title ? (
+          <>
+            <span className="min-w-0 truncate font-medium text-[12.5px]">{title}</span>
+            {toolCount > 0 && (
+              <span className="shrink-0 text-[11px] text-muted-foreground">
+                {toolCount} tool{toolCount === 1 ? "" : "s"}
+              </span>
+            )}
+          </>
+        ) : (
+          <>
+            <span className="shrink-0 font-medium text-[12.5px]">{tool.name}</span>
+            {/* The card already names the tool, so the summary drops its verb
+                and shows only the argument that matters. */}
+            <ToolSummaryLine summary={tool.summary} withLabel={false} />
+          </>
         )}
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {tool.diff && (
@@ -263,13 +475,16 @@ function ToolCard({
             </span>
           )}
           <ToolStatus tool={tool} />
-          {(hasBody || live.length > 0) && (
+          {expandable && (
             <ChevronRight
               className={cn("size-3.5 text-muted-foreground transition-transform", open && "rotate-90")}
             />
           )}
         </span>
       </button>
+      {/* Watch it work: the tail streams here while the run is in flight and
+          disappears of its own accord the moment the run settles — at which
+          point the same delegate is readable in full below. */}
       {live.map((view) => (
         <LiveRunSection
           key={view.runId}
@@ -278,52 +493,46 @@ function ToolCard({
           expanded={open}
         />
       ))}
-      {open && hasBody && (
-        <div className="flex flex-col gap-2 border-border border-t bg-muted/20 p-2.5">
-          {tool.diff && <DiffView diff={tool.diff} />}
-          {tool.inputJson && (
-            <pre className="max-h-72 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-              {tool.inputJson}
-            </pre>
-          )}
-          {!tool.done && tool.progress && (
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
-              {tool.progress}
-            </pre>
-          )}
-          {tool.output && (
-            <pre
-              className={cn(
-                "max-h-72 overflow-auto whitespace-pre-wrap rounded-md border p-2 font-mono text-[11px] leading-relaxed",
-                tool.ok === false
-                  ? "border-destructive/30 bg-destructive/5 text-foreground"
-                  : "border-border bg-background/60 text-muted-foreground",
-              )}
-            >
-              {tool.output}
-            </pre>
-          )}
-        </div>
-      )}
+      {open && toolHasBody(tool) && <ToolDetail tool={tool} />}
+      {open &&
+        detailIds.map((id) => (
+          <div key={id} className="border-border border-t bg-muted/20 p-2">
+            {renderRunDetail!(id)}
+          </div>
+        ))}
     </div>
   )
 }
 
+/** Reasoning, folded to one quiet line — the same activity card as a tool
+ *  group, so everything the agent did between two paragraphs of prose reads as
+ *  one visual family: muted text, subtle border, chevron, detail on demand. */
 function ThinkingCard({ label, steps }: { label: string; steps?: string[] }) {
   const [open, setOpen] = useState(false)
+  const hasSteps = !!steps && steps.length > 0
   return (
-    <div className="my-1.5">
+    <div className="my-2 overflow-hidden rounded-lg border border-border/60 bg-muted/20">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 py-1 font-medium text-[11.5px] text-muted-foreground outline-none transition-colors hover:border-ring/40 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
+        onClick={() => hasSteps && setOpen((o) => !o)}
+        className={cn(
+          "flex w-full items-center gap-2 px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          hasSteps && "cursor-pointer hover:bg-accent/30",
+        )}
       >
-        <Brain className="size-3 text-primary/70" />
-        {label}
-        <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+        <Brain className="size-3.5 shrink-0 text-muted-foreground/70" />
+        <span className="truncate font-medium text-[12px] text-muted-foreground">{label}</span>
+        {hasSteps && (
+          <ChevronRight
+            className={cn(
+              "ml-auto size-3.5 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-90",
+            )}
+          />
+        )}
       </button>
-      {open && steps && steps.length > 0 && (
-        <div className="mt-2 rounded-lg border border-border bg-muted/20 p-3 text-[12px] text-muted-foreground leading-relaxed">
+      {open && hasSteps && (
+        <div className="border-border/50 border-t p-2.5 text-[11.5px] text-muted-foreground leading-relaxed">
           {steps.map((s, i) => (
             <p key={i} className={cn(i > 0 && "mt-1.5")}>
               {s}
@@ -352,12 +561,16 @@ function AssistantBlock({
   if (block.type === "thinking") {
     return <ThinkingCard label={block.content} steps={block.steps} />
   }
+  if (block.type === "toolGroup" && block.tools && block.tools.length > 0) {
+    return <ToolGroupCard tools={block.tools} />
+  }
   if (block.type === "tool" && block.tool) {
     return (
       <ToolCard
         tool={block.tool}
         {...(block.runId ? { runId: block.runId } : {})}
         {...(block.runIds ? { runIds: block.runIds } : {})}
+        {...(block.settledRunIds ? { settledRunIds: block.settledRunIds } : {})}
         {...(block.accent ? { accent: block.accent } : {})}
       />
     )
@@ -378,25 +591,29 @@ function AssistantBlock({
   )
 }
 
+/** The action row is quiet by default and fades in on hover. It is NOT
+ *  conditionally mounted — it holds its space at all times, so revealing it can
+ *  never reflow the transcript (which would wake the bottom-follow observer
+ *  mid-scroll). Focus-within covers keyboard users, and a pointer that cannot
+ *  hover (touch) gets the row outright, since it would otherwise be
+ *  unreachable. */
+const ACTION_ROW_REVEAL =
+  "opacity-0 transition-opacity group-hover/msg:opacity-100 group-focus-within/msg:opacity-100 [@media(hover:none)]:opacity-100"
+
 export function MessageView({
   message,
   streaming,
-  blocks: blocksProp,
-  continuation = false,
-  lastSegment = true,
+  actionsPinned = false,
 }: {
   message: Message
   streaming?: boolean
-  /** Render only this slice of the message (transcript row segmentation). */
-  blocks?: MessageBlock[]
-  /** A continuation row: no avatar/header, indented to the avatar gutter. */
-  continuation?: boolean
-  /** False for every segment but the last: hides the caret and action row. */
-  lastSegment?: boolean
+  /** Keep the actions visible without hovering — set on the answer that just
+   *  landed, so what you can do with a reply is discoverable. */
+  actionsPinned?: boolean
 }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === "user"
-  const blocks = blocksProp ?? message.blocks
+  const blocks = message.blocks
 
   const copyAll = () => {
     const text = blocks.map((b) => b.content).join("\n\n")
@@ -407,24 +624,6 @@ export function MessageView({
     }
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
-  }
-
-  // Continuation segment: the avatar/name already rendered in an earlier row,
-  // so this one only indents to keep the text column aligned.
-  if (continuation) {
-    return (
-      <div className="group/msg ps-[46px]">
-        {blocks.map((block, bi) => (
-          <AssistantBlock
-            key={bi}
-            block={block}
-            bi={bi}
-            {...(streaming ? { streaming } : {})}
-            last={lastSegment && bi === blocks.length - 1}
-          />
-        ))}
-      </div>
-    )
   }
 
   return (
@@ -479,17 +678,23 @@ export function MessageView({
                 block={block}
                 bi={bi}
                 streaming={streaming}
-                last={lastSegment && bi === blocks.length - 1}
+                last={bi === blocks.length - 1}
               />
             ))}
           </div>
         )}
 
-        {!isUser && !streaming && lastSegment && (
-          <div className="flex items-center gap-0.5 px-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100">
+        {!isUser && !streaming && (
+          <div
+            className={cn(
+              "flex items-center gap-0.5 px-0.5",
+              actionsPinned ? "opacity-100" : ACTION_ROW_REVEAL,
+            )}
+          >
             <button
               type="button"
               onClick={copyAll}
+              aria-label={copied ? "Copied" : "Copy message"}
               className={cn(
                 "inline-flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 [&_svg]:size-3.5",
                 copied && "text-success",

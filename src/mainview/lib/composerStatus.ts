@@ -1,11 +1,13 @@
 // Composer status chips — the app's port of the TUI's input bottom rule
 // (../chunky/packages/tui/src/App.tsx `bottomStatus`).
 //
-// Semantics are copied literally from the TUI: the executor model+effort is the
-// ACCENT headline, and sidekick/advisor/goal are DIM chips shown ONLY when
-// present. Absence means off, so there is never an "off" label. Incognito comes
-// first, in the loud (red) accent. Demo/offline yields a single dim `demo` chip
-// rather than pretending a server config exists.
+// The rule is deliberately SHORT: only state you must not miss rides in it —
+// incognito (loud), the executor model+effort (accent headline), and a goal
+// (it silently spends turns). The sidekick seats and the advisor are supporting
+// cast: they are carried as the executor chip's `details` and revealed on
+// hover, not spelled out inline. Absence still means off, so there is never an
+// "off" label. Demo/offline yields a single dim `demo` chip rather than
+// pretending a server config exists.
 //
 // This module is pure so the semantics can be reasoned about (and tested)
 // without React; ComposerStatus.tsx only paints what it returns.
@@ -28,7 +30,7 @@ export interface StatusChip {
   tone: ChipTone
   /** Longer hover text; the chip itself stays compact. */
   title?: string
-  /** What the chip's compact suffix collapses — revealed on hover. */
+  /** The seats and roles this chip stands in for — revealed on hover. */
   details?: ChipDetail[]
 }
 
@@ -69,59 +71,41 @@ export function buildComposerStatus(input: ComposerStatusInput): StatusChip[] {
     })
   }
 
-  // Executor headline: `Claude Fable 5 (low)`.
+  // Sidekick — only when the default seat is enabled. An unconfigured seat
+  // INHERITS the executor, so record the effective model (what a handoff
+  // actually runs on) rather than the word "inherit".
+  const details: ChipDetail[] = []
+  const sidekick = input.sidekick
+  if (sidekick?.default.enabled) {
+    const seatNames = Object.keys(sidekick.seats)
+    const model = sidekick.default.model ? prettyModel(sidekick.default.model) : label
+    details.push({ name: seatNames.length ? "sidekick (default)" : "sidekick", model })
+    for (const name of seatNames) {
+      const seatModel = sidekick.seats[name]?.model
+      details.push({
+        name: `sidekick (${name})`,
+        model: seatModel ? prettyModel(seatModel) : model,
+      })
+    }
+  }
+
+  // Advisor — only when enabled AND it has a model; marked when suppressed.
+  const advisor = input.advisor
+  if (advisor?.config.enabled && advisor.config.model) {
+    const model = prettyModel(advisor.config.model)
+    details.push({ name: "advisor", model: advisor.active ? model : `${model} (unavailable)` })
+  }
+
+  // Executor headline: `Claude Fable 5 (low)`, standing in for every seat it
+  // feeds. The seats hang off it rather than crowding the rule.
   const effort = input.executor?.effort
   chips.push({
     key: "executor",
     text: `${label}${effort ? ` (${effort})` : ""}`,
     tone: "accent",
     title: `Executor model${effort ? ` · effort ${effort}` : ""}`,
+    ...(details.length ? { details: [{ name: "executor", model: label }, ...details] } : {}),
   })
-
-  // Sidekick — only when the default seat is enabled. An unconfigured seat
-  // INHERITS the executor, so show the effective model (what a handoff actually
-  // runs on) rather than the word "inherit". Seat suffix: exactly one named
-  // seat → ` +name`, more than one → ` +N`.
-  const sidekick = input.sidekick
-  if (sidekick?.default.enabled) {
-    const seatNames = Object.keys(sidekick.seats)
-    const seatSuffix =
-      seatNames.length === 0
-        ? ""
-        : seatNames.length === 1
-          ? ` +${seatNames[0]}`
-          : ` +${seatNames.length}`
-    const model = sidekick.default.model ? prettyModel(sidekick.default.model) : label
-    // Every seat with the model a handoff actually RUNS on: an unset seat
-    // inherits the default seat, which itself inherits the executor. This is
-    // what the `+name` / `+N` suffix collapses, so hover can spell it out.
-    const details: ChipDetail[] = [
-      { name: "default", model },
-      ...seatNames.map((name) => {
-        const seatModel = sidekick.seats[name]?.model
-        return { name, model: seatModel ? prettyModel(seatModel) : model }
-      }),
-    ]
-    chips.push({
-      key: "sidekick",
-      text: `⚒ sidekick ${model}${seatSuffix}`,
-      tone: "dim",
-      title:
-        seatNames.length > 1 ? `Sidekick seats: ${seatNames.join(", ")}` : "Sidekick worker model",
-      details,
-    })
-  }
-
-  // Advisor — only when enabled AND it has a model; ` ✕` when suppressed.
-  const advisor = input.advisor
-  if (advisor?.config.enabled && advisor.config.model) {
-    chips.push({
-      key: "advisor",
-      text: `✦ advisor ${prettyModel(advisor.config.model)}${advisor.active ? "" : " ✕"}`,
-      tone: "dim",
-      title: advisor.active ? "Advisor model" : "Advisor configured but unavailable",
-    })
-  }
 
   // Goal — only when one exists; WARNING while active (it carries turns).
   const goal = input.goal

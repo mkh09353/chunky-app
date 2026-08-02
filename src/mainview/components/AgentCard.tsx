@@ -1,15 +1,15 @@
-// One delegated agent, in three dresses:
-//   running — live tail of the last few output lines. The transcript gutter no
-//             longer uses this: a run in flight streams inside the TOOL CARD
-//             that spawned it (components/LiveRun). It is still what a NESTED
-//             child thread renders as while its parent's card is expanded.
-//   parked  — condensed settled run, expandable (transcript gutter)
-//   idle    — condensed seat row, expandable; kept for a seat-list surface,
-//             nothing renders it since the live agents rail was removed
+// One delegated agent, in two dresses:
+//   running — live tail of the last few output lines. Only a NESTED child
+//             thread renders as this (while its parent's card is expanded); a
+//             top-level run in flight streams inside the TOOL CARD that spawned
+//             it (components/LiveRun).
+//   parked  — a settled run: its summary, expandable to the whole thing.
 //
-// All three expand to the SAME full detail the old inline thread panels showed:
-// the delegate's messages and any nested sub-threads.
-import { Bot, ChevronRight, CornerUpLeft, Sparkles } from "lucide-react"
+// This is the DETAIL renderer for a delegate pill: ChatView hands it to the
+// pill through the runs context (renderRunDetail), and the pill shows it in its
+// expanded body. Both dresses expand to the same full detail the old inline
+// thread panels showed: the delegate's messages and any nested sub-threads.
+import { Bot, ChevronRight, Sparkles } from "lucide-react"
 import { useEffect, useState } from "react"
 import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
@@ -17,7 +17,6 @@ import type { RunRecord, TranscriptState } from "~/lib/transcript"
 import { formatElapsed, isSeat, runAccent, runSummary, runTail } from "~/lib/runs"
 import { TailLines } from "./LiveRun"
 import { MessageView } from "./Message"
-import { isRunLit, runLinkProps, useRunLink } from "./RunLink"
 
 /** The delegate's own transcript — what the old inline panel rendered. */
 function ThreadDetail({
@@ -59,7 +58,7 @@ function ThreadDetail({
 }
 
 export interface AgentCardProps {
-  variant: "running" | "idle" | "parked"
+  variant: "running" | "parked"
   transcript: TranscriptState
   threadId: string
   /** The specific run this card represents (parked/running); omitted for a seat. */
@@ -85,14 +84,11 @@ export function AgentCard({
     setOpen(false)
   }, [collapseSignal])
 
-  const link = useRunLink()
-
   const node = transcript.threads[threadId]
   if (!node) return null
 
   const runId = run?.id
   const accent = runId ? runAccent(runId) : undefined
-  const lit = isRunLit(runId, link)
 
   const items = node.items
   const from = run?.itemStart ?? 0
@@ -109,13 +105,11 @@ export function AgentCard({
   return (
     <article
       {...cardAttrs}
-      {...runLinkProps(runId, link)}
       style={accent ? { borderLeftColor: accent } : undefined}
       className={cn(
         "overflow-hidden rounded-xl border border-border bg-card/85 shadow-xs transition-colors",
         accent && "border-l-2",
         isRunning && "border-primary/30 bg-card/95",
-        lit && "bg-accent/40 ring-1 ring-ring/40",
       )}
     >
       <button
@@ -140,11 +134,11 @@ export function AgentCard({
         <span
           className={cn(
             "flex shrink-0 items-center gap-1.5 text-[10.5px]",
-            isRunning ? "text-primary" : variant === "idle" ? "text-muted-foreground" : "text-success",
+            isRunning ? "text-primary" : "text-success",
           )}
         >
           {isRunning && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
-          {isRunning ? "Running" : variant === "idle" ? "Idle" : "Done"}
+          {isRunning ? "Running" : "Done"}
         </span>
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
@@ -188,18 +182,6 @@ export function AgentCard({
             to={to}
             modelName={modelName}
           />
-          {variant === "idle" && runId && (
-            <div className="flex gap-1.5 px-3 pb-3">
-              <button
-                type="button"
-                onClick={() => link.jumpToRun(runId)}
-                className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11.5px] text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-              >
-                <CornerUpLeft className="size-3" />
-                Jump to last run
-              </button>
-            </div>
-          )}
         </div>
       )}
     </article>

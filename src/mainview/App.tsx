@@ -1,4 +1,4 @@
-import { AlertCircle, EyeOff, Moon, Sun, WifiOff } from "lucide-react"
+import { AlertCircle, EyeOff, WifiOff } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
@@ -30,7 +30,7 @@ import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrow
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
 import { Button } from "./components/ui/button"
-import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
+import { TooltipProvider } from "./components/ui/tooltip"
 import {
   addRepo,
   createSession,
@@ -1967,15 +1967,8 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey)
   }, [toggle, handleNewThread, streaming, live, handleStop])
 
-  const themeToggle = (
-    <Tooltip>
-      <TooltipTrigger render={<Button variant="ghost" size="icon-sm" onClick={toggle} />}>
-        <Sun className={cn("size-4 transition-all", resolved === "dark" && "hidden")} />
-        <Moon className={cn("size-4 transition-all", resolved === "light" && "hidden")} />
-      </TooltipTrigger>
-      <TooltipPopup>{resolved === "dark" ? "Light mode" : "Dark mode"}</TooltipPopup>
-    </Tooltip>
-  )
+  // The theme switch lives in the top bar's overflow menu now (ChatTopBar),
+  // which is handed `resolved` + `toggle` directly.
 
   const statusBanner =
     connectionState === "booting" ? (
@@ -2048,6 +2041,10 @@ export function App() {
         <Sidebar
           projects={projects}
           threads={threads}
+          // Live sessions are fetched per repo (listSessions(baseUrl, repoId)),
+          // so the repo tab already says which one they belong to. Only the demo
+          // list can span projects, so only it labels its rows.
+          showProjects={!live}
           activeProjectId={activeThread.projectId}
           activeThreadId={live ? sessionId ?? "" : demoActiveId}
           onSelectThread={handleSelectThread}
@@ -2070,7 +2067,10 @@ export function App() {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
-            headerRight={<>{live && <GitToolbar cwd={gitCwd} />}{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} />{themeToggle}</>}
+            repoStatus={live ? <GitToolbar cwd={gitCwd} /> : null}
+            headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} /></>}
+            theme={resolved}
+            onToggleTheme={toggle}
             onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}

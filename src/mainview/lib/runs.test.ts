@@ -3,7 +3,7 @@ import type { AgentEvent } from "@chunky/protocol"
 import { initialState, reduce, MAIN } from "./transcript"
 import type { TranscriptState } from "./transcript"
 import {
-  hasRuns,
+  anchoredItemIndices,
   isSeat,
   liveRunViews,
   LIVE_TAIL_MAX,
@@ -12,7 +12,7 @@ import {
   runTail,
   runSummary,
 } from "./runs"
-import { buildTranscriptRows, itemsToMessages } from "./mapTranscript"
+import { applyRunAnchors, itemsToMessages } from "./mapTranscript"
 
 function play(events: AgentEvent[]): TranscriptState {
   return events.reduce(reduce, initialState)
@@ -111,8 +111,8 @@ describe("run records", () => {
   })
 })
 
-describe("gutter switch", () => {
-  test("a session that never delegates has no gutter", () => {
+describe("delegation, seen from the transcript", () => {
+  test("a session that never delegates anchors nothing", () => {
     const plain = play([
       { type: "message.user", text: "hello" },
       { type: "message.start", role: "assistant" },
@@ -120,26 +120,22 @@ describe("gutter switch", () => {
       { type: "tool.start", id: "t1", name: "read", input: { path: "a.ts" } },
       { type: "tool.end", id: "t1", ok: true, output: "ok" },
     ])
-    expect(hasRuns(plain)).toBe(false)
+    expect(plain.runs).toEqual([])
     expect(runAnchors(plain).size).toBe(0)
   })
 
   test("demo/offline (no transcript at all) is treated the same", () => {
-    expect(hasRuns(undefined)).toBe(false)
-    expect(hasRuns(initialState)).toBe(false)
+    expect(runAnchors(initialState).size).toBe(0)
+    expect(anchoredItemIndices(undefined).size).toBe(0)
   })
 
-  test("one delegation switches the gutter on", () => {
-    expect(hasRuns(play(DELEGATING_TURN))).toBe(true)
-  })
-
-  test("once every run has settled the gutter stays", () => {
+  test("a settled run stays anchored to its own pill", () => {
     const state = play([
       { type: "tool.start", id: "t1", name: "spawn_thread", input: { title: "docs" } },
       { type: "thread.spawn", threadId: "child-1", parentThreadId: null, title: "docs sweep" },
       { type: "thread.status", threadId: "child-1", status: "idle" },
     ])
-    expect(hasRuns(state)).toBe(true)
+    expect(state.runs).toHaveLength(1)
     expect(parkedRunsByItem(state).size).toBe(1)
   })
 })
@@ -248,9 +244,11 @@ describe("live delegate streams", () => {
     expect(anchor.liveRunIds).toEqual(["sk:frontend#0", "sk:backend#0"])
     expect(anchor.liveRunId).toBe("sk:frontend#0")
 
-    const messages = itemsToMessages(state.threads[MAIN]!.items)
-    const rows = buildTranscriptRows(messages, runAnchors(state))
-    const pill = rows.flatMap((r) => r.blocks).find((b) => b.runIds)!
+    const messages = applyRunAnchors(
+      itemsToMessages(state.threads[MAIN]!.items, undefined, anchoredItemIndices(state)),
+      runAnchors(state),
+    )
+    const pill = messages.flatMap((m) => m.blocks).find((b) => b.runIds)!
     expect(pill.runIds).toEqual(["sk:frontend#0", "sk:backend#0"])
   })
 
@@ -260,54 +258,57 @@ describe("live delegate streams", () => {
   })
 })
 
-describe("transcript rows", () => {
-  test("an assistant message splits at the pill that spawned a run", () => {
+describe("run anchors on the pill", () => {
+  const pillOf = (state: TranscriptState) => {
+    const messages = applyRunAnchors(
+      itemsToMessages(state.threads[MAIN]!.items, undefined, anchoredItemIndices(state)),
+      runAnchors(state),
+    )
+    return messages.flatMap((m) => m.blocks).find((b) => b.runId || b.settledRunIds)
+  }
+
+  test("a settled run hangs off the pill that spawned it \u2014 no second home", () => {
     const state = play([
       ...DELEGATING_TURN,
       { type: "thread.status", threadId: "sk:frontend", status: "idle" },
     ])
-    const messages = itemsToMessages(state.threads[MAIN]!.items)
-    const rows = buildTranscriptRows(messages, runAnchors(state))
-
-    // user row, assistant prose row, then the pill row carrying the card.
-    const pillRow = rows.find((r) => r.parkedRunIds.length > 0)
-    expect(pillRow).toBeDefined()
-    expect(pillRow!.parkedRunIds).toEqual(["sk:frontend#0"])
-    expect(pillRow!.blocks[0]!.type).toBe("tool")
-    expect(pillRow!.blocks[0]!.accent).toBeTruthy()
-    expect(pillRow!.continuation).toBe(true)
-    // Exactly one row owns the run: no duplicate cards down the transcript.
-    expect(rows.filter((r) => r.parkedRunIds.length > 0)).toHaveLength(1)
+    const pill = pillOf(state)!
+    expect(pill.type).toBe("tool")
+    expect(pill.tool!.name).toBe("sidekick")
+    expect(pill.settledRunIds).toEqual(["sk:frontend#0"])
+    // Settled: nothing is streaming into it any more.
+    expect(pill.runIds).toBeUndefined()
+    expect(pill.accent).toBeTruthy()
   })
 
-  // The pill's runId is what ChatView turns into a LIVE card in that same row;
-  // parkedRunIds only fills in once the run settles.
-  test("a running run marks its pill, and parks nothing yet", () => {
-    const state = play(DELEGATING_TURN)
-    const messages = itemsToMessages(state.threads[MAIN]!.items)
-    const rows = buildTranscriptRows(messages, runAnchors(state))
-    const pillRow = rows.find((r) => r.blocks.some((b) => b.runId))
-    expect(pillRow!.blocks[0]!.runId).toBe("sk:frontend#0")
-    expect(pillRow!.parkedRunIds).toEqual([])
+  test("a running run marks its pill live, and has nothing settled yet", () => {
+    const pill = pillOf(play(DELEGATING_TURN))!
+    expect(pill.runId).toBe("sk:frontend#0")
+    expect(pill.runIds).toEqual(["sk:frontend#0"])
+    expect(pill.settledRunIds).toBeUndefined()
   })
 
-  test("only the last slice of a message shows the caret and actions", () => {
-    const state = play(DELEGATING_TURN)
-    const messages = itemsToMessages(state.threads[MAIN]!.items)
-    const rows = buildTranscriptRows(messages, runAnchors(state))
-    const slices = rows.filter((r) => r.message.role === "assistant")
-    expect(slices.length).toBeGreaterThan(1)
-    expect(slices.filter((r) => r.lastSegment)).toHaveLength(1)
-    expect(slices.at(-1)!.lastSegment).toBe(true)
+  test("stamping never splits or reorders a message", () => {
+    const state = play([
+      ...DELEGATING_TURN,
+      { type: "thread.status", threadId: "sk:frontend", status: "idle" },
+    ])
+    const messages = itemsToMessages(
+      state.threads[MAIN]!.items,
+      undefined,
+      anchoredItemIndices(state),
+    )
+    const stamped = applyRunAnchors(messages, runAnchors(state))
+    expect(stamped).toHaveLength(messages.length)
+    expect(stamped.map((m) => m.id)).toEqual(messages.map((m) => m.id))
+    expect(stamped.map((m) => m.blocks.length)).toEqual(messages.map((m) => m.blocks.length))
   })
 
-  test("with no runs, rows are just the messages (demo mode)", () => {
+  test("with no runs the messages come back untouched (demo mode)", () => {
     const messages = itemsToMessages([
       { kind: "user", text: "hi" },
       { kind: "assistant", text: "hello", streaming: false },
     ])
-    const rows = buildTranscriptRows(messages, new Map())
-    expect(rows).toHaveLength(messages.length)
-    expect(rows.every((r) => !r.continuation && r.lastSegment)).toBe(true)
+    expect(applyRunAnchors(messages, new Map())).toBe(messages)
   })
 })

@@ -11,19 +11,66 @@ import type {
 } from "./mock"
 import type { SessionSummary } from "./api"
 import { extractDiff, prettyJson, truncateText } from "./toolDiff"
+import { describeTool, isGroupableTool } from "./toolSummary"
 import { relativeTime, threadLabel, workspaceMark, workspaceName } from "./format"
 import type { Item, ThreadNode, TranscriptState } from "./transcript"
 import { isStreaming, mainItems } from "./transcript"
 import type { RunAnchor } from "./runs"
+import { anchoredItemIndices } from "./runs"
 
-function toolInputPreview(input: unknown): string {
-  if (input == null) return ""
-  if (typeof input === "string") return input.slice(0, 200)
-  try {
-    return JSON.stringify(input).slice(0, 200)
-  } catch {
-    return String(input).slice(0, 200)
+/** Item indices that own a delegate run — nothing anchored may be folded away. */
+const NO_ANCHORS: ReadonlySet<number> = new Set<number>()
+
+/**
+ * Fold each run of consecutive plain tool blocks into ONE `toolGroup` block, so
+ * a turn that fired six commands reads as one activity line instead of six
+ * full-width cards.
+ *
+ * Two calls are only consecutive if nothing else came between them: any prose,
+ * thinking, diff summary or delegate pill closes the run. Blocks that anchor a
+ * delegated run (or whose tool spawns one by name) are NEVER folded — they keep
+ * their own block, which is what carries the run's identity and its detail.
+ *
+ * A lone call stays a plain `tool` block: a group of one would add a click for
+ * nothing.
+ */
+function groupToolBlocks(blocks: MessageBlock[], anchored: ReadonlySet<number>): MessageBlock[] {
+  const out: MessageBlock[] = []
+  let run: MessageBlock[] = []
+
+  const flushRun = () => {
+    if (run.length === 0) return
+    if (run.length === 1) {
+      out.push(run[0]!)
+    } else {
+      const first = run[0]!
+      out.push({
+        type: "toolGroup",
+        content: "",
+        tools: run.map((block) => block.tool!),
+        // The group stands where its first call did, so a run anchor or a
+        // gutter card that looks up srcIndex still lands in the right row.
+        ...(first.srcIndex != null ? { srcIndex: first.srcIndex } : {}),
+      })
+    }
+    run = []
   }
+
+  for (const block of blocks) {
+    const groupable =
+      block.type === "tool" &&
+      !!block.tool &&
+      isGroupableTool(block.tool.name) &&
+      !(block.srcIndex != null && anchored.has(block.srcIndex))
+    if (groupable) {
+      run.push(block)
+      continue
+    }
+    flushRun()
+    out.push(block)
+  }
+  flushRun()
+  return out
 }
 
 /** Merge per-file diffs of one turn into a changed-files summary, or null. */
@@ -48,7 +95,12 @@ function aggregateChangedFiles(diffs: FileDiff[]): ChangedFiles | null {
 }
 
 /** Fold sequential items into UI messages: per-tool cards + a thinking block. */
-export function itemsToMessages(items: Item[], modelName?: string): Message[] {
+export function itemsToMessages(
+  items: Item[],
+  modelName?: string,
+  /** Item indices carrying a delegated run: those pills stay standalone. */
+  anchored: ReadonlySet<number> = NO_ANCHORS,
+): Message[] {
   const messages: Message[] = []
   let seq = 0
   const nextId = () => `ev-${seq++}`
@@ -74,7 +126,14 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
       const at = lastToolIndex >= 0 ? lastToolIndex + 1 : blocks.length
       blocks.splice(at, 0, { type: "files", content: "", files })
     }
-    messages.push({ id: nextId(), role: "assistant", model: modelName, blocks })
+    messages.push({
+      id: nextId(),
+      role: "assistant",
+      model: modelName,
+      // Grouping runs LAST, on the finished block list, so the changed-files
+      // summary keeps its place after the tools it describes.
+      blocks: groupToolBlocks(blocks, anchored),
+    })
     asstBlocks = []
     asstStreaming = false
     turnDiffs = []
@@ -122,7 +181,7 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
         const tool: ToolBlockData = {
           id: it.id,
           name: it.name,
-          inputPreview: toolInputPreview(it.input),
+          summary: describeTool(it.name, it.input),
           inputJson: prettyJson(it.input),
           done: it.done,
           diff,
@@ -185,78 +244,37 @@ export function itemsToMessages(items: Item[], modelName?: string): Message[] {
   return messages
 }
 
-/** One rendered transcript row: a message, or a *slice* of an assistant message
- *  that starts at a run-spawning tool pill so the gutter card can sit level with
- *  it. Splitting is structural — driven by the run anchors, not by offsets. */
-export interface TranscriptRow {
-  id: string
-  message: Message
-  blocks: MessageBlock[]
-  /** Later slices of the same message: no avatar/header, indented instead. */
-  continuation: boolean
-  /** Only the final slice shows the streaming caret and hover actions. */
-  lastSegment: boolean
-  /** Settled runs that park in this row's gutter. */
-  parkedRunIds: string[]
-}
-
-export function buildTranscriptRows(
+/**
+ * Tie each delegate-spawning tool block to the runs it opened.
+ *
+ * A run belongs INSIDE the pill that started it: while it is in flight the pill
+ * streams its tail, and once it settles its whole transcript is one expansion
+ * away. So this only stamps identity onto the block — it never restructures the
+ * message. (It used to split a message into slices so a card could ride level
+ * with its pill out in a right-hand gutter; that gutter is gone.)
+ */
+export function applyRunAnchors(
   messages: Message[],
   anchors: Map<number, RunAnchor>,
-): TranscriptRow[] {
-  const rows: TranscriptRow[] = []
-  for (const message of messages) {
-    if (message.role !== "assistant" || anchors.size === 0) {
-      rows.push({
-        id: message.id,
-        message,
-        blocks: message.blocks,
-        continuation: false,
-        lastSegment: true,
-        parkedRunIds: [],
-      })
-      continue
-    }
-
-    let blocks: MessageBlock[] = []
-    let parkedRunIds: string[] = []
-    let seg = 0
-    const flush = () => {
-      if (blocks.length === 0) return
-      rows.push({
-        id: `${message.id}:${seg}`,
-        message,
-        blocks,
-        continuation: seg > 0,
-        lastSegment: false,
-        parkedRunIds,
-      })
-      seg++
-      blocks = []
-      parkedRunIds = []
-    }
-
-    for (const block of message.blocks) {
+): Message[] {
+  if (anchors.size === 0) return messages
+  return messages.map((message) => {
+    if (message.role !== "assistant") return message
+    let touched = false
+    const blocks = message.blocks.map((block) => {
       const anchor = block.srcIndex != null ? anchors.get(block.srcIndex) : undefined
-      if (anchor) {
-        // The pill starts its own row, so its card can ride level with it.
-        flush()
-        blocks.push({
-          ...block,
-          ...(anchor.liveRunId ? { runId: anchor.liveRunId } : {}),
-          ...(anchor.liveRunIds.length ? { runIds: anchor.liveRunIds } : {}),
-          accent: anchor.accent,
-        })
-        parkedRunIds = anchor.parkedRunIds
-        continue
+      if (!anchor) return block
+      touched = true
+      return {
+        ...block,
+        ...(anchor.liveRunId ? { runId: anchor.liveRunId } : {}),
+        ...(anchor.liveRunIds.length ? { runIds: anchor.liveRunIds } : {}),
+        ...(anchor.parkedRunIds.length ? { settledRunIds: anchor.parkedRunIds } : {}),
+        accent: anchor.accent,
       }
-      blocks.push(block)
-    }
-    flush()
-    const last = rows[rows.length - 1]
-    if (last && last.message === message) last.lastSegment = true
-  }
-  return rows
+    })
+    return touched ? { ...message, blocks } : message
+  })
 }
 
 /** Child nodes are deliberately kept separate from main messages so the view can
@@ -350,7 +368,11 @@ export function buildActiveThread(
   transcript: TranscriptState,
   modelName?: string,
 ): Thread {
-  const messages = itemsToMessages(mainItems(transcript), modelName)
+  const messages = itemsToMessages(
+    mainItems(transcript),
+    modelName,
+    anchoredItemIndices(transcript),
+  )
   if (!session) {
     return {
       id: "none",

@@ -127,12 +127,17 @@ export function GitToolbar({ cwd }: { cwd?: string }) {
   return (
     <>
       <Tooltip>
+        {/* Status text, not a control: it reads as a label on the repo tabs and
+            only picks up a hover treatment to show it still opens the panel. */}
         <TooltipTrigger
           render={
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
-              className={cn(NO_DRAG_REGION, "max-w-[13rem] gap-1.5")}
+              className={cn(
+                NO_DRAG_REGION,
+                "h-7 max-w-[13rem] gap-1.5 px-1.5 font-normal text-muted-foreground hover:text-foreground",
+              )}
               onClick={() => setOpen(true)}
               aria-label="Open git panel"
             />

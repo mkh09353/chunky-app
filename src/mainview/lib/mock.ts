@@ -1,3 +1,5 @@
+import type { ToolSummary } from "./toolSummary"
+
 export interface Project {
   id: string
   name: string
@@ -40,8 +42,9 @@ export interface FileDiff {
 export interface ToolBlockData {
   id: string
   name: string
-  /** One-line argument preview derived from `input`. */
-  inputPreview: string
+  /** What this call did, in words — verb phrase + the argument that matters.
+   *  Replaces the raw JSON preview the header used to wear. */
+  summary: ToolSummary
   /** Pretty-printed input JSON (2-space), truncated. */
   inputJson: string
   /** Tool output (truncated) once done. */
@@ -55,7 +58,7 @@ export interface ToolBlockData {
 }
 
 export interface MessageBlock {
-  type: "text" | "code" | "worked" | "files" | "tool" | "thinking"
+  type: "text" | "code" | "worked" | "files" | "tool" | "toolGroup" | "thinking"
   content: string
   lang?: string
   /** worked / thinking block: the tool/step lines revealed when expanded. */
@@ -64,6 +67,9 @@ export interface MessageBlock {
   files?: ChangedFiles
   /** tool block: rich per-tool-call render data. */
   tool?: ToolBlockData
+  /** toolGroup block: consecutive non-delegate calls folded into one activity
+   *  line. Always ≥2 entries; a lone call stays a plain `tool` block. */
+  tools?: ToolBlockData[]
   /** Index of the transcript Item this block came from (anchors agent runs). */
   srcIndex?: number
   /** Set when this tool call spawned a delegated run: ties the pill to its card. */
@@ -71,6 +77,9 @@ export interface MessageBlock {
   /** Every run still in flight from this tool call — each streams a live tail
    *  inside the card while it runs. Empty/absent once they all settle. */
   runIds?: string[]
+  /** Runs spawned by this call that have finished: their full transcript is
+   *  reachable from the card's expanded body. */
+  settledRunIds?: string[]
   /** The run's accent hue, worn by both the pill and its card. */
   accent?: string
 }

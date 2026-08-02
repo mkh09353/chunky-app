@@ -1,11 +1,11 @@
-// Live delegate streams, rendered INSIDE the tool card that spawned them.
+// Delegated runs, rendered INSIDE the tool card that spawned them.
 //
 // A `sidekick` / `spawn_thread` / `workflow` call opens a child thread; the
 // transcript reducer records that as a RunRecord anchored to the tool pill it
-// came from (lib/transcript + lib/runs). While the run is in flight the pill's
-// card carries a live tail of the delegate's own output; the moment the run
-// settles the section is gone and the card is the ordinary completed tool card
-// again.
+// came from (lib/transcript + lib/runs). The pill is the run's ONLY home in the
+// transcript: while it is in flight the card carries a live tail of the
+// delegate's own output, and once it settles that tail is replaced by the whole
+// delegate transcript, one expansion away (`renderRunDetail`).
 //
 // A context rather than prop-drilling: the pill lives inside
 // ChatView → row → Message → block → ToolCard, several levels below anything
@@ -15,6 +15,7 @@ import { Bot, Sparkles } from "lucide-react"
 import { createContext, useContext } from "react"
 import { cn } from "~/lib/cn"
 import { formatElapsed, type LiveRunView, type TailLine, type TailTone } from "~/lib/runs"
+import type { RunRecord } from "~/lib/transcript"
 
 export const TAIL_TONE: Record<TailTone, string> = {
   cmd: "text-foreground/80",
@@ -71,9 +72,17 @@ export interface LiveRunsValue {
   views: Map<string, LiveRunView>
   /** Wall-clock elapsed for a run we watched start, else undefined. */
   elapsedOf: (runId: string) => number | undefined
+  /** Every run by id, live or settled — a pill names the runs it owns. */
+  runs: Map<string, RunRecord>
+  /** The delegate's own transcript, rendered in the pill's expanded body.
+   *
+   *  A render prop rather than the component itself: the detail renderer
+   *  (AgentCard) already renders MessageView, so importing it from a message
+   *  would close an import cycle. ChatView owns transcript state anyway. */
+  renderRunDetail?: (runId: string) => React.ReactNode
 }
 
-const EMPTY: LiveRunsValue = { views: new Map(), elapsedOf: () => undefined }
+const EMPTY: LiveRunsValue = { views: new Map(), elapsedOf: () => undefined, runs: new Map() }
 
 const LiveRunsContext = createContext<LiveRunsValue>(EMPTY)
 

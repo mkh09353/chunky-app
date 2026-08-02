@@ -30,29 +30,25 @@ describe("buildComposerStatus", () => {
     expect(chips[1]).toMatchObject({ key: "executor", tone: "accent" })
   })
 
-  it("omits the sidekick chip unless the default seat is enabled", () => {
+  it("never gives the sidekick a chip of its own — it hangs off the executor", () => {
+    const seat = { enabled: true, provider: "zen", model: "glm-5.2" }
     expect(texts({ ...live, sidekick: { default: { enabled: false }, seats: {} } })).toEqual([
       "Claude Fable 5 (low)",
     ])
-  })
-
-  it("shows the effective (inherited) sidekick model and the seat suffix", () => {
-    const seat = { enabled: true, provider: "zen", model: "glm-5.2" }
-    expect(texts({ ...live, sidekick: { default: { enabled: true }, seats: {} } })).toContain(
-      "⚒ sidekick Claude Fable 5",
-    )
     expect(
       texts({ ...live, sidekick: { default: { enabled: true }, seats: { backend: seat } } }),
-    ).toContain("⚒ sidekick Claude Fable 5 +backend")
-    expect(
-      texts({
-        ...live,
-        sidekick: { default: { enabled: true, model: "gpt-5.5" }, seats: { backend: seat, ui: seat } },
-      }),
-    ).toContain("⚒ sidekick GPT 5.5 +2")
+    ).toEqual(["Claude Fable 5 (low)"])
   })
 
-  it("carries every seat and its effective model for the hover breakdown", () => {
+  it("omits details entirely when nothing is configured behind the executor", () => {
+    expect(buildComposerStatus(live)[0]!.details).toBeUndefined()
+    expect(
+      buildComposerStatus({ ...live, sidekick: { default: { enabled: false }, seats: {} } })[0]!
+        .details,
+    ).toBeUndefined()
+  })
+
+  it("carries every seat and its effective model as executor details", () => {
     const chips = buildComposerStatus({
       ...live,
       sidekick: {
@@ -60,27 +56,52 @@ describe("buildComposerStatus", () => {
         seats: { frontend: { enabled: true, model: "grok-4.5" }, websearch: { enabled: true } },
       },
     })
-    expect(chips.find((c) => c.key === "sidekick")?.details).toEqual([
-      { name: "default", model: "Claude Fable 5" },
-      { name: "frontend", model: "Grok 4.5" },
+    expect(chips.find((c) => c.key === "sidekick")).toBeUndefined()
+    expect(chips.find((c) => c.key === "executor")?.details).toEqual([
+      { name: "executor", model: "Claude Fable 5" },
+      { name: "sidekick (default)", model: "Claude Fable 5" },
+      { name: "sidekick (frontend)", model: "Grok 4.5" },
       // Unset seat inherits the default seat, which inherits the executor.
-      { name: "websearch", model: "Claude Fable 5" },
+      { name: "sidekick (websearch)", model: "Claude Fable 5" },
     ])
   })
 
-  it("shows the advisor only when enabled with a model, marking suppression", () => {
-    expect(texts({ ...live, advisor: { config: { enabled: false, model: "gpt-5.5" }, active: true } })).toEqual([
-      "Claude Fable 5 (low)",
+  it("names the lone default seat plainly when there are no named seats", () => {
+    const chips = buildComposerStatus({
+      ...live,
+      sidekick: { default: { enabled: true, model: "gpt-5.5" }, seats: {} },
+    })
+    expect(chips.find((c) => c.key === "executor")?.details).toEqual([
+      { name: "executor", model: "Claude Fable 5" },
+      { name: "sidekick", model: "GPT 5.5" },
     ])
-    expect(texts({ ...live, advisor: { config: { enabled: true, model: null }, active: true } })).toEqual([
-      "Claude Fable 5 (low)",
+  })
+
+  it("lists the advisor only when enabled with a model, marking suppression", () => {
+    const details = (input: Parameters<typeof buildComposerStatus>[0]) =>
+      buildComposerStatus(input).find((c) => c.key === "advisor" || c.key === "executor")?.details
+    expect(
+      details({ ...live, advisor: { config: { enabled: false, model: "gpt-5.5" }, active: true } }),
+    ).toBeUndefined()
+    expect(
+      details({ ...live, advisor: { config: { enabled: true, model: null }, active: true } }),
+    ).toBeUndefined()
+    expect(
+      details({ ...live, advisor: { config: { enabled: true, model: "gpt-5.5" }, active: true } }),
+    ).toEqual([
+      { name: "executor", model: "Claude Fable 5" },
+      { name: "advisor", model: "GPT 5.5" },
     ])
-    expect(texts({ ...live, advisor: { config: { enabled: true, model: "gpt-5.5" }, active: true } })).toContain(
-      "✦ advisor GPT 5.5",
-    )
-    expect(texts({ ...live, advisor: { config: { enabled: true, model: "gpt-5.5" }, active: false } })).toContain(
-      "✦ advisor GPT 5.5 ✕",
-    )
+    expect(
+      details({ ...live, advisor: { config: { enabled: true, model: "gpt-5.5" }, active: false } }),
+    ).toEqual([
+      { name: "executor", model: "Claude Fable 5" },
+      { name: "advisor", model: "GPT 5.5 (unavailable)" },
+    ])
+    // The advisor never earns a row of its own in the rule.
+    expect(
+      texts({ ...live, advisor: { config: { enabled: true, model: "gpt-5.5" }, active: true } }),
+    ).toEqual(["Claude Fable 5 (low)"])
   })
 
   it("carries turns on an active goal and dims a parked one", () => {
@@ -91,20 +112,21 @@ describe("buildComposerStatus", () => {
     expect(paused.at(-1)).toMatchObject({ text: "goal paused", tone: "dim" })
   })
 
-  it("orders every chip like the TUI's bottom rule", () => {
+  it("keeps the rule to the three chips that must not be missed", () => {
     const chips = buildComposerStatus({
       ...live,
       incognito: true,
-      sidekick: { default: { enabled: true }, seats: {} },
+      sidekick: { default: { enabled: true }, seats: { backend: { enabled: true } } },
       advisor: { config: { enabled: true, model: "gpt-5.5" }, active: true },
       goal: { objective: "ship it", status: "active", turns: 0, maxTurns: 5 },
     })
-    expect(chips.map((c) => c.key)).toEqual([
-      "incognito",
+    expect(chips.map((c) => c.key)).toEqual(["incognito", "executor", "goal"])
+    // Everything dropped from the row is still reachable behind the executor.
+    expect(chips[1]!.details?.map((d) => d.name)).toEqual([
       "executor",
-      "sidekick",
+      "sidekick (default)",
+      "sidekick (backend)",
       "advisor",
-      "goal",
     ])
   })
 })
