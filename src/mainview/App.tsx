@@ -1960,6 +1960,9 @@ export function App() {
         e.preventDefault()
         setFoldThreads((value) => !value)
       } else if (e.key === "Escape" && streaming && live) {
+        // Claim the key so AppKit doesn't also treat Esc as "exit fullscreen".
+        e.preventDefault()
+        e.stopPropagation()
         handleStop()
       }
     }
