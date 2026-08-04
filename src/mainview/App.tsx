@@ -8,6 +8,8 @@ import { codeToLabel } from "./lib/pushToTalk"
 import { useVoiceAgent } from "./hooks/useVoiceAgent"
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "./components/ui/dialog"
 import { Composer, type ModeOption } from "./components/Composer"
+import { QuickKeys } from "./components/QuickKeys"
+import { quickKeyForHotkey, type QuickKey } from "./lib/quickKeys"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
 import {
   devOnboardingRequested,
@@ -86,8 +88,10 @@ import {
   desktopUiSnapshot,
   forgetRepoSessions,
   loadDesktopUiState,
+  quickKeysSnapshot,
   rememberActiveRepo,
   rememberLastSession,
+  saveQuickKeys,
 } from "./lib/desktopState"
 import type { CloneStatus } from "./components/RepoTabs"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
@@ -319,6 +323,22 @@ export function App() {
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
   const [sidekickPickerOpen, setSidekickPickerOpen] = useState(false)
+  // Composer quick keys. The list is durable config in desktop.json; the editor's
+  // open state is here so the global ⌘⇧<letter> handler can stand down while it
+  // is up.
+  const [quickKeys, setQuickKeys] = useState<QuickKey[]>(quickKeysSnapshot)
+  const [quickKeyEditorOpen, setQuickKeyEditorOpen] = useState(false)
+  // Quick keys come from Bun-managed desktop.json (the load is memoized, so this
+  // shares the boot read); demo/offline builds simply get the empty list.
+  useEffect(() => {
+    let cancelled = false
+    void loadDesktopUiState().then((ui) => {
+      if (!cancelled) setQuickKeys(ui.quickKeys)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const streamAbort = useRef<AbortController | null>(null)
   const cloneAbort = useRef<AbortController | null>(null)
@@ -1521,6 +1541,26 @@ export function App() {
     [live, stopDemoStream, demoActiveId, demoModel.name, config, sessionId, refreshSessions],
   )
 
+  /** The composer's send path, shared with the quick-key chips. While the agent
+   *  is running, plain ⏎ enqueues; ⌥⏎ interjects. */
+  const submitComposerMessage = useCallback(
+    (
+      text: string,
+      opts?: { delivery?: MessageDelivery; images?: { base64: string; mediaType: string }[] },
+    ) => {
+      void handleSend(text, {
+        ...opts,
+        delivery: opts?.delivery ?? (streaming ? "queue" : "auto"),
+      })
+    },
+    [handleSend, streaming],
+  )
+
+  const handleQuickKeysChange = useCallback((next: QuickKey[]) => {
+    setQuickKeys(next)
+    saveQuickKeys(next)
+  }, [])
+
   const handleStop = useCallback(() => {
     if (!live) {
       stopDemoStream()
@@ -2039,10 +2079,34 @@ export function App() {
     [dispatchAppAction, toggle, uiModels, handleModelChange, openDialog, live],
   )
 
+  // Chips and their hotkeys mirror the composer: no sending while a run streams,
+  // and nothing to send to when we're not live on a session.
+  const quickKeysDisabled =
+    !live || streaming || connectionState !== "connected" || !sessionId || sending
+  // Any modal surface that owns the keyboard while it is up.
+  const overlayOpen =
+    paletteOpen ||
+    settingsOpen ||
+    onboardingOpen ||
+    sidekickPickerOpen ||
+    quickKeyEditorOpen ||
+    prOpen ||
+    dialog !== null
+
   // Global shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey
+      // Quick keys claim ⌘⇧<letter> first. Letters the shortcuts below answer to
+      // are refused by the editor, so this can't shadow one of them.
+      if (meta && e.shiftKey && !e.altKey && !overlayOpen) {
+        const quick = quickKeyForHotkey(quickKeys, e.key)
+        if (quick) {
+          e.preventDefault()
+          if (!quickKeysDisabled) submitComposerMessage(quick.prompt)
+          return
+        }
+      }
       if (meta && e.key.toLowerCase() === "k") {
         e.preventDefault()
         setPaletteOpen((o) => !o)
@@ -2071,7 +2135,17 @@ export function App() {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [toggle, handleNewThread, streaming, live, handleStop])
+  }, [
+    toggle,
+    handleNewThread,
+    streaming,
+    live,
+    handleStop,
+    quickKeys,
+    quickKeysDisabled,
+    overlayOpen,
+    submitComposerMessage,
+  ])
 
   // The theme switch lives in the top bar's overflow menu now (ChatTopBar),
   // which is handed `resolved` + `toggle` directly.
@@ -2236,6 +2310,14 @@ export function App() {
                   onSteer={live && config && sessionId ? handleQueueSteer : undefined}
                   onDelete={live && config && sessionId ? handleQueueDelete : undefined}
                 />
+                <QuickKeys
+                  disabled={quickKeysDisabled}
+                  editorOpen={quickKeyEditorOpen}
+                  keys={quickKeys}
+                  onChange={handleQuickKeysChange}
+                  onEditorOpenChange={setQuickKeyEditorOpen}
+                  onRun={(key) => submitComposerMessage(key.prompt)}
+                />
                 <Composer
                 model={uiModel}
                 models={uiModels}
@@ -2244,12 +2326,7 @@ export function App() {
                 onModelChange={handleModelChange}
                 onRefreshModels={live ? refreshModels : undefined}
                 // While the agent is running, plain ⏎ enqueues; ⌥⏎ interjects.
-                onSend={(t, opts) =>
-                  void handleSend(t, {
-                    ...opts,
-                    delivery: opts?.delivery ?? (streaming ? "queue" : "auto"),
-                  })
-                }
+                onSend={submitComposerMessage}
                 onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
                 commands={slashCommands}
                 modes={modeOptions}

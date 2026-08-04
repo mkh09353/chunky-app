@@ -119,6 +119,41 @@ describe("merge-on-write", () => {
     }
   })
 
+  test("quick keys merge in without disturbing the tab keys, and clean up", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1", workspace: "/w" }, env)
+      mergeDesktopState(
+        {
+          quickKeys: [
+            { id: "qk-1", emoji: " \u{1F6A2} ", label: " Ship it! ", prompt: " ship ", hotkey: "D" },
+            { id: "qk-2", emoji: "", label: "No prompt", prompt: "  ", hotkey: "e" },
+            { id: "qk-3", emoji: "", label: "Dup hotkey", prompt: "x", hotkey: "d" },
+          ],
+        },
+        env,
+      )
+      const state = readDesktopState(env)
+      expect(state.activeRepoId).toBe("r1")
+      expect(state.workspace).toBe("/w")
+      expect(state.quickKeys).toEqual([
+        { id: "qk-1", emoji: "\u{1F6A2}", label: "Ship it!", prompt: "ship", hotkey: "d" },
+        { id: "qk-3", emoji: "", label: "Dup hotkey", prompt: "x", hotkey: "" },
+      ])
+
+      // Writing an unrelated key must leave the quick keys alone.
+      mergeDesktopState({ activeRepoId: "r2" }, env)
+      expect(readDesktopState(env).quickKeys?.length).toBe(2)
+
+      // An explicit empty list clears them.
+      mergeDesktopState({ quickKeys: [] }, env)
+      expect(readDesktopState(env).quickKeys).toBeUndefined()
+      expect(readDesktopState(env).activeRepoId).toBe("r2")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("publishes by temp-file rename and leaves nothing behind", () => {
     const { env, dir } = temp()
     try {

@@ -254,8 +254,8 @@ rpc = createRPC({
      * and does not survive a reinstall. Bun validates and bounds the payload.
      */
     desktopStateGet: async () => {
-      const { activeRepoId = null, lastSessionByRepo = {} } = readDesktopState()
-      return { ok: true, activeRepoId, lastSessionByRepo }
+      const { activeRepoId = null, lastSessionByRepo = {}, quickKeys = [] } = readDesktopState()
+      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys }
     },
     desktopStateSet: async (params: unknown) => {
       const raw = (params ?? {}) as Record<string, unknown>
@@ -268,8 +268,11 @@ rpc = createRPC({
       if ("lastSessionByRepo" in raw) {
         patch.lastSessionByRepo = (raw.lastSessionByRepo ?? {}) as Record<string, string>
       }
-      const { activeRepoId = null, lastSessionByRepo = {} } = mergeDesktopState(patch)
-      return { ok: true, activeRepoId, lastSessionByRepo }
+      if ("quickKeys" in raw) {
+        patch.quickKeys = (raw.quickKeys ?? []) as DesktopState["quickKeys"]
+      }
+      const { activeRepoId = null, lastSessionByRepo = {}, quickKeys = [] } = mergeDesktopState(patch)
+      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys }
     },
 
     /**

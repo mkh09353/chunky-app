@@ -30,11 +30,13 @@ const {
   flushDesktopUiState,
   forgetRepoSessions,
   loadDesktopUiState,
+  quickKeysSnapshot,
   readLegacyUiState,
   rememberActiveRepo,
   rememberLastSession,
   replaceLastSessions,
   resetDesktopUiStateForTest,
+  saveQuickKeys,
 } = await import("./desktopState")
 
 function reset(initial: Record<string, string> = {}) {
@@ -54,13 +56,14 @@ describe("legacy localStorage values", () => {
     expect(readLegacyUiState()).toEqual({
       activeRepoId: "r1",
       lastSessionByRepo: { r1: "s1", r2: "s2" },
+      quickKeys: [],
     })
     expect(desktopUiSnapshot().activeRepoId).toBe("r1")
   })
 
   test("survive corruption and absence", () => {
     reset({ [LAST_SESSION_KEY]: "{not json" })
-    expect(readLegacyUiState()).toEqual({ activeRepoId: null, lastSessionByRepo: {} })
+    expect(readLegacyUiState()).toEqual({ activeRepoId: null, lastSessionByRepo: {}, quickKeys: [] })
     reset({ [LAST_SESSION_KEY]: JSON.stringify({ r1: 7, r2: "s2" }) })
     expect(readLegacyUiState().lastSessionByRepo).toEqual({ r2: "s2" })
   })
@@ -72,6 +75,7 @@ describe("without the native bridge", () => {
     await expect(loadDesktopUiState()).resolves.toEqual({
       activeRepoId: "r9",
       lastSessionByRepo: {},
+      quickKeys: [],
     })
   })
 
@@ -111,5 +115,28 @@ describe("without the native bridge", () => {
     rememberLastSession("", "s1")
     rememberLastSession("r1", "")
     expect(desktopUiSnapshot().lastSessionByRepo).toEqual({})
+  })
+})
+
+describe("quick keys", () => {
+  const chip = { id: "qk-1", emoji: "🚢", label: "Ship it!", prompt: "ship it", hotkey: "d" }
+
+  test("start empty and read back what was saved", () => {
+    expect(quickKeysSnapshot()).toEqual([])
+    saveQuickKeys([chip])
+    expect(quickKeysSnapshot()).toEqual([chip])
+    expect(desktopUiSnapshot().quickKeys).toEqual([chip])
+  })
+
+  test("are never mirrored into localStorage — desktop.json owns them", () => {
+    saveQuickKeys([chip])
+    rememberActiveRepo("r1")
+    expect(JSON.stringify(store.data)).not.toContain("Ship it!")
+  })
+
+  test("a later save replaces the list wholesale", () => {
+    saveQuickKeys([chip])
+    saveQuickKeys([])
+    expect(quickKeysSnapshot()).toEqual([])
   })
 })
