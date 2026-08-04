@@ -171,3 +171,98 @@ describe("merge-on-write", () => {
     expect(mergeDesktopState({ activeRepoId: "r1" }, env)).toEqual({})
   })
 })
+
+// The sidebar's settle/unsettle choice. There is no server-side settled
+// lifecycle, so this file is the only record of it and has to survive a
+// reinstall like any other durable preference.
+describe("session shelf pins", () => {
+  test("round trip, and unrelated keys are left alone", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1" }, env)
+      mergeDesktopState({ sessionShelves: { s1: { shelf: "settled", at: 1234 } } }, env)
+
+      expect(readDesktopState(env).sessionShelves).toEqual({ s1: { shelf: "settled", at: 1234 } })
+      expect(readDesktopState(env).activeRepoId).toBe("r1")
+
+      // Writing something else leaves the pins alone.
+      mergeDesktopState({ displayName: "Ada Lovelace" }, env)
+      expect(readDesktopState(env).sessionShelves).toEqual({ s1: { shelf: "settled", at: 1234 } })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the renderer owns the map, so a patch replaces it wholesale", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState(
+        { sessionShelves: { s1: { shelf: "settled", at: 1 }, s2: { shelf: "active", at: 2 } } },
+        env,
+      )
+      mergeDesktopState({ sessionShelves: { s2: { shelf: "active", at: 2 } } }, env)
+      expect(readDesktopState(env).sessionShelves).toEqual({ s2: { shelf: "active", at: 2 } })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("an empty map is stored as absence, not as an empty object", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1" }, env)
+      mergeDesktopState({ sessionShelves: { s1: { shelf: "settled", at: 1 } } }, env)
+      mergeDesktopState({ sessionShelves: {} }, env)
+
+      expect(readDesktopState(env).sessionShelves).toBeUndefined()
+      expect("sessionShelves" in onDisk(env)).toBe(false)
+      expect(readDesktopState(env).activeRepoId).toBe("r1")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("malformed pins are dropped and a rubbish watermark reads as 0", () => {
+    const { env, dir } = temp()
+    try {
+      writeFileSync(
+        desktopStatePath(env),
+        JSON.stringify({
+          sessionShelves: {
+            good: { shelf: "settled", at: 99 },
+            // A watermark of 0 retires the pin on the session's next observed
+            // activity, which is the safe direction to fail in.
+            noAt: { shelf: "active" },
+            badAt: { shelf: "active", at: "soon" },
+            badShelf: { shelf: "archived", at: 1 },
+            notAnObject: "settled",
+            "": { shelf: "settled", at: 1 },
+          },
+        }),
+      )
+      expect(readDesktopState(env).sessionShelves).toEqual({
+        good: { shelf: "settled", at: 99 },
+        noAt: { shelf: "active", at: 0 },
+        badAt: { shelf: "active", at: 0 },
+      })
+
+      // An array is not a map of pins.
+      writeFileSync(desktopStatePath(env), JSON.stringify({ sessionShelves: ["s1"] }))
+      expect(readDesktopState(env).sessionShelves).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the map is bounded so a hostile renderer cannot grow the file forever", () => {
+    const { env, dir } = temp()
+    try {
+      const huge: Record<string, { shelf: "settled"; at: number }> = {}
+      for (let i = 0; i < 900; i++) huge[`s${i}`] = { shelf: "settled", at: i }
+      mergeDesktopState({ sessionShelves: huge }, env)
+      expect(Object.keys(readDesktopState(env).sessionShelves ?? {})).toHaveLength(500)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

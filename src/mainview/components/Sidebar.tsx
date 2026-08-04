@@ -2,6 +2,8 @@ import {
   Archive,
   ArchiveRestore,
   ChevronDown,
+  History,
+  Inbox,
   Mail,
   MailOpen,
   PenSquare,
@@ -67,6 +69,8 @@ function ThreadRow({
   unreadMarked,
   onToggleArchive,
   archived = false,
+  onSettledChange,
+  settled = false,
   showProject = false,
 }: {
   thread: Thread
@@ -80,11 +84,16 @@ function ThreadRow({
   /** Local-only archive toggle; omitted → no archive affordance on the row. */
   onToggleArchive?: () => void
   archived?: boolean
+  /** Shelf toggle (settle / move back to the working list); omitted → no action. */
+  onSettledChange?: (settled: boolean) => void
+  /** This row is on the history shelf: it renders slimmer and recedes. */
+  settled?: boolean
   /** Only when the list can span repos: name the one this row belongs to. */
   showProject?: boolean
 }) {
   const unread = unreadMarked ?? (thread.status.kind === "done" && thread.status.unread === true)
   const canMarkUnread = thread.status.kind !== "working"
+  const canChangeShelf = thread.status.kind !== "working"
   const dotStatus: ThreadStatus = unread ? { kind: "done", unread: true } : thread.status
   const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null)
   const menuX = menuPoint?.x ?? 0
@@ -95,12 +104,18 @@ function ThreadRow({
     }),
     [menuX, menuY],
   )
-  const openMenu = useCallback((event: ReactMouseEvent) => {
-    if (!onUnreadChange || !canMarkUnread) return
-    event.preventDefault()
-    event.stopPropagation()
-    setMenuPoint({ x: event.clientX, y: event.clientY })
-  }, [canMarkUnread, onUnreadChange])
+  const showUnreadItem = !!onUnreadChange && canMarkUnread
+  const showShelfItem = !!onSettledChange && canChangeShelf
+  const hasMenu = showUnreadItem || showShelfItem
+  const openMenu = useCallback(
+    (event: ReactMouseEvent) => {
+      if (!hasMenu) return
+      event.preventDefault()
+      event.stopPropagation()
+      setMenuPoint({ x: event.clientX, y: event.clientY })
+    },
+    [hasMenu],
+  )
 
   return (
     <div className="group relative" onContextMenu={openMenu}>
@@ -109,7 +124,8 @@ function ThreadRow({
         onClick={onSelect}
         onDoubleClick={() => onRename?.()}
         className={cn(
-          "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          settled ? "py-1" : "py-1.5",
           active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
         )}
       >
@@ -122,8 +138,13 @@ function ThreadRow({
           <StatusDot status={dotStatus} />
           <span
             className={cn(
-              "min-w-0 flex-1 truncate text-[13px] leading-tight",
-              active ? "font-medium text-foreground" : "text-foreground/85",
+              "min-w-0 flex-1 truncate leading-tight",
+              settled ? "text-[12.5px]" : "text-[13px]",
+              active
+                ? "font-medium text-foreground"
+                : settled
+                  ? "text-foreground/65"
+                  : "text-foreground/85",
             )}
           >
             {thread.title}
@@ -158,7 +179,10 @@ function ThreadRow({
                   onToggleArchive()
                 }}
                 // Takes the timestamp's place on hover, so the row never grows.
-                className="-translate-y-1/2 pointer-events-none absolute top-[15px] right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
+                className={cn(
+                  "-translate-y-1/2 pointer-events-none absolute right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100",
+                  settled ? "top-[13px]" : "top-[15px]",
+                )}
               />
             }
           >
@@ -167,7 +191,7 @@ function ThreadRow({
           <TooltipPopup>{archived ? "Unarchive" : "Archive (this device only)"}</TooltipPopup>
         </Tooltip>
       )}
-      {menuPoint && onUnreadChange && canMarkUnread && (
+      {menuPoint && hasMenu && (
         <DropdownMenu
           open
           modal={false}
@@ -182,15 +206,28 @@ function ThreadRow({
             sideOffset={2}
             className="min-w-44"
           >
-            <DropdownMenuItem
-              onClick={() => {
-                onUnreadChange(!unread)
-                setMenuPoint(null)
-              }}
-            >
-              {unread ? <MailOpen /> : <Mail />}
-              {unread ? "Mark as read" : "Mark as unread"}
-            </DropdownMenuItem>
+            {showUnreadItem && (
+              <DropdownMenuItem
+                onClick={() => {
+                  onUnreadChange?.(!unread)
+                  setMenuPoint(null)
+                }}
+              >
+                {unread ? <MailOpen /> : <Mail />}
+                {unread ? "Mark as read" : "Mark as unread"}
+              </DropdownMenuItem>
+            )}
+            {showShelfItem && (
+              <DropdownMenuItem
+                onClick={() => {
+                  onSettledChange?.(!settled)
+                  setMenuPoint(null)
+                }}
+              >
+                {settled ? <Inbox /> : <History />}
+                {settled ? "Move to active" : "Settle thread"}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}
@@ -210,6 +247,8 @@ export function Sidebar({
   onRenameThread,
   onThreadUnreadChange,
   unreadThreadIds,
+  settledThreadIds,
+  onThreadSettledChange,
   prWidget,
   showProjects = false,
 }: {
@@ -231,6 +270,10 @@ export function Sidebar({
   onThreadUnreadChange?: (id: string, unread: boolean) => void
   /** Canonical markers can outlive the row's presentation status (active settled/idle). */
   unreadThreadIds?: Set<string>
+  /** Threads on the history shelf, decided by lifecycle rather than status. */
+  settledThreadIds?: Set<string>
+  /** File a thread into history, or pull it back into the working list. */
+  onThreadSettledChange?: (id: string, settled: boolean) => void
   /** Pinned above the footer, outside the scroll area (the PR reviews widget). */
   prWidget?: ReactNode
 }) {
@@ -243,8 +286,13 @@ export function Sidebar({
     [projects],
   )
 
-  // Archiving is a local view filter that composes with search: the archived
-  // section shows only archived threads that also match the query.
+  // Settled recedes into history but remains listed; archived stays hidden.
+  const isSettled = useCallback(
+    (thread: Thread) =>
+      settledThreadIds ? settledThreadIds.has(thread.id) : thread.status.kind === "done",
+    [settledThreadIds],
+  )
+
   const { active, settled, archived } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const match = (t: Thread) => {
@@ -259,11 +307,11 @@ export function Sidebar({
     const list = threads.filter(match)
     const visible = list.filter((t) => !archivedIds.has(t.id))
     return {
-      active: visible.filter((t) => t.status.kind !== "done"),
-      settled: visible.filter((t) => t.status.kind === "done"),
+      active: visible.filter((t) => !isSettled(t)),
+      settled: visible.filter((t) => isSettled(t)),
       archived: list.filter((t) => archivedIds.has(t.id)),
     }
-  }, [threads, query, projectOf, archivedIds])
+  }, [threads, query, projectOf, archivedIds, isSettled])
 
   // Old settled threads are history, not a working list: show a screenful and
   // let the reader ask for the rest. Selection order stays the server's.
@@ -348,6 +396,9 @@ export function Sidebar({
               onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
               unreadMarked={unreadThreadIds?.has(t.id)}
               onToggleArchive={() => toggleArchived(t.id)}
+              onSettledChange={
+                onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
+              }
               showProject={showProjects}
             />
           ))}
@@ -376,6 +427,10 @@ export function Sidebar({
                   onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
                   unreadMarked={unreadThreadIds?.has(t.id)}
                   onToggleArchive={() => toggleArchived(t.id)}
+                  onSettledChange={
+                    onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
+                  }
+                  settled
                   showProject={showProjects}
                 />
               ))}
@@ -439,6 +494,10 @@ export function Sidebar({
                     onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
                     unreadMarked={unreadThreadIds?.has(t.id)}
                     onToggleArchive={() => toggleArchived(t.id)}
+                    onSettledChange={
+                      onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
+                    }
+                    settled={isSettled(t)}
                     archived
                   />
                 ))}

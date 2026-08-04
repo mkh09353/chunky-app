@@ -37,6 +37,8 @@ const {
   replaceLastSessions,
   resetDesktopUiStateForTest,
   saveQuickKeys,
+  saveSessionShelves,
+  sessionShelvesSnapshot,
 } = await import("./desktopState")
 
 function reset(initial: Record<string, string> = {}) {
@@ -57,13 +59,19 @@ describe("legacy localStorage values", () => {
       activeRepoId: "r1",
       lastSessionByRepo: { r1: "s1", r2: "s2" },
       quickKeys: [],
+      sessionShelves: {},
     })
     expect(desktopUiSnapshot().activeRepoId).toBe("r1")
   })
 
   test("survive corruption and absence", () => {
     reset({ [LAST_SESSION_KEY]: "{not json" })
-    expect(readLegacyUiState()).toEqual({ activeRepoId: null, lastSessionByRepo: {}, quickKeys: [] })
+    expect(readLegacyUiState()).toEqual({
+      activeRepoId: null,
+      lastSessionByRepo: {},
+      quickKeys: [],
+      sessionShelves: {},
+    })
     reset({ [LAST_SESSION_KEY]: JSON.stringify({ r1: 7, r2: "s2" }) })
     expect(readLegacyUiState().lastSessionByRepo).toEqual({ r2: "s2" })
   })
@@ -76,6 +84,7 @@ describe("without the native bridge", () => {
       activeRepoId: "r9",
       lastSessionByRepo: {},
       quickKeys: [],
+      sessionShelves: {},
     })
   })
 
@@ -138,5 +147,38 @@ describe("quick keys", () => {
     saveQuickKeys([chip])
     saveQuickKeys([])
     expect(quickKeysSnapshot()).toEqual([])
+  })
+})
+
+describe("session shelf pins", () => {
+  test("start empty and read back what was saved", () => {
+    expect(sessionShelvesSnapshot()).toEqual({})
+    saveSessionShelves(new Map([["s1", { shelf: "settled" as const, at: 42 }]]))
+    expect(sessionShelvesSnapshot()).toEqual({ s1: { shelf: "settled", at: 42 } })
+    expect(desktopUiSnapshot().sessionShelves).toEqual({ s1: { shelf: "settled", at: 42 } })
+  })
+
+  test("a later save replaces the map wholesale", () => {
+    saveSessionShelves(
+      new Map([
+        ["s1", { shelf: "settled" as const, at: 1 }],
+        ["s2", { shelf: "active" as const, at: 2 }],
+      ]),
+    )
+    saveSessionShelves(new Map([["s2", { shelf: "active" as const, at: 2 }]]))
+    expect(sessionShelvesSnapshot()).toEqual({ s2: { shelf: "active", at: 2 } })
+  })
+
+  test("clearing every pin saves an empty map", () => {
+    saveSessionShelves(new Map([["s1", { shelf: "settled" as const, at: 1 }]]))
+    saveSessionShelves(new Map())
+    expect(sessionShelvesSnapshot()).toEqual({})
+  })
+
+  test("are never mirrored into localStorage — desktop.json owns them", () => {
+    saveSessionShelves(new Map([["session-abc", { shelf: "settled" as const, at: 1 }]]))
+    rememberActiveRepo("r1")
+    rememberLastSession("r1", "s1")
+    expect(JSON.stringify(store.data)).not.toContain("session-abc")
   })
 })

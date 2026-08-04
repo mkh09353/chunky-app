@@ -33,6 +33,11 @@ export interface DesktopQuickKey {
   hotkey: string
 }
 
+export interface DesktopShelfPin {
+  shelf: "settled" | "active"
+  at: number
+}
+
 export interface DesktopState {
   /** The workspace the desktop last resolved a server for. */
   workspace?: string
@@ -42,6 +47,8 @@ export interface DesktopState {
   lastSessionByRepo?: Record<string, string>
   /** User-configured composer quick keys, in display order. */
   quickKeys?: DesktopQuickKey[]
+  /** Explicit per-device sidebar shelf choices. */
+  sessionShelves?: Record<string, DesktopShelfPin>
 }
 
 /** Bounds so a malformed or hostile renderer can't grow the file without end. */
@@ -73,6 +80,25 @@ function cleanSessionMap(value: unknown): Record<string, string> | undefined {
     const sessionId = cleanId(raw)
     if (!repoId || !sessionId) continue
     out[repoId] = sessionId
+    count++
+  }
+  return out
+}
+
+function cleanShelfPins(value: unknown): Record<string, DesktopShelfPin> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const out: Record<string, DesktopShelfPin> = {}
+  let count = 0
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (count >= MAX_SESSION_ENTRIES) break
+    const sessionId = cleanId(key)
+    if (!sessionId || !raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const pin = raw as Record<string, unknown>
+    if (pin.shelf !== "settled" && pin.shelf !== "active") continue
+    const at = typeof pin.at === "number" && Number.isFinite(pin.at)
+      ? Math.max(0, Math.floor(pin.at))
+      : 0
+    out[sessionId] = { shelf: pin.shelf, at }
     count++
   }
   return out
@@ -130,6 +156,8 @@ export function readDesktopState(env: NodeJS.ProcessEnv = process.env): DesktopS
     if (sessions) state.lastSessionByRepo = sessions
     const quickKeys = cleanQuickKeys(raw.quickKeys)
     if (quickKeys && quickKeys.length > 0) state.quickKeys = quickKeys
+    const shelves = cleanShelfPins(raw.sessionShelves)
+    if (shelves && Object.keys(shelves).length > 0) state.sessionShelves = shelves
     return state
   } catch {
     return {}
@@ -166,6 +194,11 @@ export function mergeDesktopState(
     const quickKeys = cleanQuickKeys(patch.quickKeys)
     if (quickKeys && quickKeys.length > 0) next.quickKeys = quickKeys
     else delete next.quickKeys
+  }
+  if (patch.sessionShelves !== undefined) {
+    const shelves = cleanShelfPins(patch.sessionShelves)
+    if (shelves && Object.keys(shelves).length > 0) next.sessionShelves = shelves
+    else delete next.sessionShelves
   }
 
   const path = desktopStatePath(env)

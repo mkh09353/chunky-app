@@ -13,6 +13,7 @@
 
 import { getRpc, nativeRpcAvailable } from "./rpc"
 import { cleanQuickKeys, type QuickKey } from "./quickKeys"
+import { shelfPinsFromRecord, shelfPinsToRecord, type ShelfPin } from "./sessionShelf"
 
 export interface DesktopUiState {
   activeRepoId: string | null
@@ -20,6 +21,7 @@ export interface DesktopUiState {
   lastSessionByRepo: Record<string, string>
   /** Composer quick keys. Durable config: never mirrored to localStorage. */
   quickKeys: QuickKey[]
+  sessionShelves: Record<string, ShelfPin>
 }
 
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
@@ -28,7 +30,7 @@ const LAST_SESSION_KEY = "chunky.lastSessionByRepo"
 const FLUSH_DELAY_MS = 150
 
 function emptyState(): DesktopUiState {
-  return { activeRepoId: null, lastSessionByRepo: {}, quickKeys: [] }
+  return { activeRepoId: null, lastSessionByRepo: {}, quickKeys: [], sessionShelves: {} }
 }
 
 function storage(): Storage | null {
@@ -100,9 +102,12 @@ export function desktopUiSnapshot(): DesktopUiState {
 
 function parseState(value: unknown): DesktopUiState | null {
   if (!value || typeof value !== "object") return null
-  const raw = value as { activeRepoId?: unknown; lastSessionByRepo?: unknown; quickKeys?: unknown }
+  const raw = value as { activeRepoId?: unknown; lastSessionByRepo?: unknown; quickKeys?: unknown; sessionShelves?: unknown }
   const state = emptyState()
   state.quickKeys = cleanQuickKeys(raw.quickKeys)
+  state.sessionShelves = shelfPinsToRecord(
+    shelfPinsFromRecord(raw.sessionShelves as Record<string, ShelfPin> | undefined),
+  )
   if (typeof raw.activeRepoId === "string" && raw.activeRepoId) state.activeRepoId = raw.activeRepoId
   if (raw.lastSessionByRepo && typeof raw.lastSessionByRepo === "object") {
     for (const [repoId, sessionId] of Object.entries(raw.lastSessionByRepo as Record<string, unknown>)) {
@@ -136,8 +141,10 @@ export function loadDesktopUiState(): Promise<DesktopUiState> {
         // Nothing durable yet: migrate whatever the webview still remembers.
         const hasLegacy = !!legacy.activeRepoId || Object.keys(legacy.lastSessionByRepo).length > 0
         if (hasLegacy) {
-          cached = legacy
+          cached = { ...legacy, sessionShelves: durable.sessionShelves }
           queue({ activeRepoId: legacy.activeRepoId, lastSessionByRepo: legacy.lastSessionByRepo })
+        } else {
+          cached = durable
         }
         return cached
       }
@@ -157,6 +164,7 @@ let pending: {
   activeRepoId?: string | null
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
+  sessionShelves?: Record<string, ShelfPin>
 } = {}
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let hideHooked = false
@@ -173,6 +181,7 @@ function queue(patch: {
   activeRepoId?: string | null
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
+  sessionShelves?: Record<string, ShelfPin>
 }): void {
   pending = { ...pending, ...patch }
   if (!nativeRpcAvailable()) {
@@ -267,4 +276,16 @@ export function resetDesktopUiStateForTest(): void {
     clearTimeout(flushTimer)
     flushTimer = null
   }
+}
+
+/** The shelf pins last read from (or written to) desktop.json. */
+export function sessionShelvesSnapshot(): Record<string, ShelfPin> {
+  return ensureSeed().sessionShelves
+}
+
+/** Persist the complete shelf-pin map. */
+export function saveSessionShelves(pins: ReadonlyMap<string, ShelfPin>): void {
+  const state = ensureSeed()
+  state.sessionShelves = shelfPinsToRecord(pins)
+  queue({ sessionShelves: state.sessionShelves })
 }

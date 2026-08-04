@@ -93,7 +93,16 @@ import {
   rememberActiveRepo,
   rememberLastSession,
   saveQuickKeys,
+  saveSessionShelves,
+  sessionShelvesSnapshot,
 } from "./lib/desktopState"
+import {
+  classifyShelf,
+  reconcileShelfPins,
+  shelfPinsFromRecord,
+  type ShelfPin,
+} from "./lib/sessionShelf"
+import { useMinuteClock } from "./hooks/useMinuteClock"
 import type { CloneStatus } from "./components/RepoTabs"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
 import {
@@ -272,6 +281,12 @@ export function App() {
   // row context menu can add/remove the same marker manually. Clicking a row
   // acknowledges and clears its marker, including the already-active row.
   const [unreadDone, setUnreadDone] = useState<Set<string>>(new Set())
+  // Explicit sidebar shelf choices (settle / move to active), keyed by session.
+  // Durable per device: the protocol has no settled lifecycle, so desktop.json
+  // is the only record. Absent = the sidebar decides for itself.
+  const [shelfPins, setShelfPins] = useState<ReadonlyMap<string, ShelfPin>>(() =>
+    shelfPinsFromRecord(sessionShelvesSnapshot()),
+  )
   const selectedTracker = useRef(createCompletionTracker())
   // Sessions outside the selected repo are not in `sessions`, so their
   // transition bookkeeping is deliberately separate from the sidebar's list
@@ -372,7 +387,9 @@ export function App() {
   useEffect(() => {
     let cancelled = false
     void loadDesktopUiState().then((ui) => {
-      if (!cancelled) setQuickKeys(ui.quickKeys)
+      if (cancelled) return
+      setQuickKeys(ui.quickKeys)
+      setShelfPins(shelfPinsFromRecord(ui.sessionShelves))
     })
     return () => {
       cancelled = true
@@ -521,18 +538,64 @@ export function App() {
     unreadDone,
   ])
 
+  // ---- Sidebar shelf (inbox vs history) -----------------------------------
+  //
+  // Deliberately NOT `status.kind === "done"`: presentation says what a row is
+  // doing, this says where it lives. Its own clock ticks so a thread ages into
+  // history on time instead of whenever something else happens to re-render.
+  const shelfNow = useMinuteClock()
+
+  const settledThreadIds = useMemo(() => {
+    const out = new Set<string>()
+    if (!live) return out
+    for (const s of sessions) {
+      const busy =
+        s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : isSessionBusy(s)
+      const shelf = classifyShelf({
+        busy,
+        unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
+        attached: !!s.attached || s.sessionId === sessionId,
+        lastActivity: s.lastActivity,
+        pin: shelfPins.get(s.sessionId),
+        now: shelfNow,
+      })
+      if (shelf === "settled") out.add(s.sessionId)
+    }
+    return out
+    // `transcript.status` stands in for the tree's liveness here, exactly as it
+    // does in `threads` above.
+  }, [live, sessions, sessionId, catchingUp, transcript.status, unreadDone, shelfPins, shelfNow])
+
+  // Real work on a thread retires whatever the user filed it as: a settled
+  // thread that starts running belongs back in the working list, and an active
+  // pin has served its purpose once the thread moves on its own. Merely being
+  // attached is NOT activity, so reading a settled thread leaves it settled.
+  useEffect(() => {
+    if (!live || shelfPins.size === 0) return
+    const next = reconcileShelfPins(shelfPins, sessions)
+    if (!next) return
+    setShelfPins(next)
+    saveSessionShelves(next)
+  }, [live, sessions, shelfPins])
+
   const repoTabUnreadIds = useMemo(() => {
     const out = new Set(unreadRepoIds)
     // The selected repo's list is already local state. Its tab is unread only
-    // for another session, never merely because the selected thread completed.
+    // for another session, never merely because the selected thread completed —
+    // and never for a thread the user has already filed into history.
     if (
       activeRepoId &&
-      sessions.some((s) => unreadDone.has(s.sessionId) && s.sessionId !== sessionId)
+      sessions.some(
+        (s) =>
+          unreadDone.has(s.sessionId) &&
+          s.sessionId !== sessionId &&
+          !settledThreadIds.has(s.sessionId),
+      )
     ) {
       out.add(activeRepoId)
     }
     return out
-  }, [activeRepoId, sessions, unreadDone, unreadRepoIds, sessionId])
+  }, [activeRepoId, sessions, unreadDone, unreadRepoIds, sessionId, settledThreadIds])
 
   const activeThread: Thread = useMemo(() => {
     if (!live) {
@@ -1638,6 +1701,32 @@ export function App() {
     [live],
   )
 
+  /** File a thread into history, or pull it back into the working list.
+   *
+   *  The pin is watermarked with the activity it was made against, so the next
+   *  real turn on that thread retires it (see `reconcileShelfPins`). Settling
+   *  is also an acknowledgement — it clears the revisit marker, the same way
+   *  opening the thread would. */
+  const handleThreadSettledChange = useCallback(
+    (id: string, settled: boolean) => {
+      if (!live) return
+      const summary = sessions.find((s) => s.sessionId === id)
+      if (settled && summary && isSessionBusy(summary)) return
+      const next = new Map(shelfPins)
+      next.set(id, { shelf: settled ? "settled" : "active", at: summary?.lastActivity ?? 0 })
+      setShelfPins(next)
+      saveSessionShelves(next)
+      if (!settled) return
+      setUnreadDone((prev) => {
+        if (!prev.has(id)) return prev
+        const cleared = new Set(prev)
+        cleared.delete(id)
+        return cleared
+      })
+    },
+    [live, sessions, shelfPins],
+  )
+
   // ---- PR reviews ---------------------------------------------------------
 
   /** Read the server's cached board, or force it to poll GitHub again. */
@@ -2492,6 +2581,8 @@ export function App() {
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
           onThreadUnreadChange={handleThreadUnreadChange}
           unreadThreadIds={live ? unreadDone : undefined}
+          settledThreadIds={live ? settledThreadIds : undefined}
+          onThreadSettledChange={live ? handleThreadSettledChange : undefined}
           prWidget={
             live && !prUnsupported ? (
               <PrWidget
