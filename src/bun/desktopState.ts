@@ -49,6 +49,9 @@ export interface DesktopState {
   quickKeys?: DesktopQuickKey[]
   /** Explicit per-device sidebar shelf choices. */
   sessionShelves?: Record<string, DesktopShelfPin>
+  /** Optional sidebar display name, overriding the git-derived one. Absent
+   *  means "no override" - an empty value is deleted, never stored as "". */
+  displayName?: string
 }
 
 /** Bounds so a malformed or hostile renderer can't grow the file without end. */
@@ -62,6 +65,9 @@ const MAX_QUICK_KEY_LABEL = 40
 const MAX_QUICK_KEY_PROMPT = 4000
 /** Absurdity guard applied before the (more expensive) grapheme pass. */
 const MAX_QUICK_KEY_UNITS = 16_000
+/** A sidebar name, bounded like a quick-key label: the same kind of short,
+ *  human-facing string in a narrow row. Graphemes, so an emoji stays whole. */
+const MAX_DISPLAY_NAME = 40
 
 function cleanId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined
@@ -119,6 +125,22 @@ function cleanText(value: unknown, max: number): string {
   return parts.length <= max ? trimmed : parts.slice(0, max).join("")
 }
 
+/**
+ * Normalise a display-name override: control characters and every whitespace
+ * run (tabs, newlines pasted in from anywhere) fold to a single space, the ends
+ * are trimmed, and the result is bounded in graphemes. "" means "no override",
+ * which the reader and the merge both treat as absence.
+ */
+function cleanDisplayName(value: unknown): string {
+  if (typeof value !== "string") return ""
+  const folded = value
+    .slice(0, MAX_QUICK_KEY_UNITS)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: folding them is the point
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+  return cleanText(folded, MAX_DISPLAY_NAME)
+}
+
 /** Keep the well-formed quick keys, drop the rest; ids and hotkeys are unique. */
 function cleanQuickKeys(value: unknown): DesktopQuickKey[] | undefined {
   if (!Array.isArray(value)) return undefined
@@ -158,6 +180,8 @@ export function readDesktopState(env: NodeJS.ProcessEnv = process.env): DesktopS
     if (quickKeys && quickKeys.length > 0) state.quickKeys = quickKeys
     const shelves = cleanShelfPins(raw.sessionShelves)
     if (shelves && Object.keys(shelves).length > 0) state.sessionShelves = shelves
+    const displayName = cleanDisplayName(raw.displayName)
+    if (displayName) state.displayName = displayName
     return state
   } catch {
     return {}
@@ -199,6 +223,12 @@ export function mergeDesktopState(
     const shelves = cleanShelfPins(patch.sessionShelves)
     if (shelves && Object.keys(shelves).length > 0) next.sessionShelves = shelves
     else delete next.sessionShelves
+  }
+  if (patch.displayName !== undefined) {
+    // Empty (or whitespace-only) clears the override, restoring the git name.
+    const displayName = cleanDisplayName(patch.displayName)
+    if (displayName) next.displayName = displayName
+    else delete next.displayName
   }
 
   const path = desktopStatePath(env)

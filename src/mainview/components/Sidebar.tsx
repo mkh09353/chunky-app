@@ -19,6 +19,7 @@ import {
 } from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
+import { avatarInitial, resolveDisplayName } from "~/lib/identity"
 import { collapseList } from "~/lib/sessionList"
 import { cn } from "~/lib/cn"
 import { DRAG_REGION } from "~/lib/dragRegion"
@@ -244,6 +245,7 @@ export function Sidebar({
   onOpenSettings,
   onOpenPalette,
   connectionLabel,
+  displayName,
   onRenameThread,
   onThreadUnreadChange,
   unreadThreadIds,
@@ -265,6 +267,9 @@ export function Sidebar({
   onOpenPalette: () => void
   /** Optional live/demo connection badge in the footer. */
   connectionLabel?: string
+  /** The user's git display name, resolved by App. Absent/empty means "Chunky".
+   *  This row never fetches it itself. */
+  displayName?: string
   onRenameThread?: (id: string) => void
   /** Manual revisit marker. Right-click/two-finger-click any non-running row. */
   onThreadUnreadChange?: (id: string, unread: boolean) => void
@@ -512,12 +517,16 @@ export function Sidebar({
       {/* Footer */}
       <div className="relative z-10 flex items-center gap-2 border-border/70 border-t px-3 py-2.5">
         <div className="flex size-8 items-center justify-center rounded-full bg-gradient-to-br from-primary to-[oklch(0.6_0.2_320)] font-semibold text-[13px] text-white">
-          M
+          {avatarInitial(displayName)}
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate font-medium text-[13px]">Max Headley</span>
-          <span className="truncate text-[11px] text-muted-foreground">
-            {connectionLabel ? (
+          <span className="truncate font-medium text-[13px]">
+            {resolveDisplayName(displayName)}
+          </span>
+          {/* Only a real status line here: with no connection to report the row
+              is just the name, never an invented plan or tier. */}
+          {connectionLabel && (
+            <span className="truncate text-[11px] text-muted-foreground">
               <span
                 className={cn(
                   connectionLabel === "Live" && "text-success",
@@ -527,10 +536,8 @@ export function Sidebar({
               >
                 {connectionLabel}
               </span>
-            ) : (
-              "Pro plan"
-            )}
-          </span>
+            </span>
+          )}
         </div>
         <Tooltip>
           <TooltipTrigger

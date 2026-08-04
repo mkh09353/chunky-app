@@ -254,8 +254,14 @@ rpc = createRPC({
      * and does not survive a reinstall. Bun validates and bounds the payload.
      */
     desktopStateGet: async () => {
-      const { activeRepoId = null, lastSessionByRepo = {}, quickKeys = [], sessionShelves = {} } = readDesktopState()
-      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys, sessionShelves }
+      const {
+        activeRepoId = null,
+        lastSessionByRepo = {},
+        quickKeys = [],
+        displayName = "",
+        sessionShelves = {},
+      } = readDesktopState()
+      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys, displayName, sessionShelves }
     },
     desktopStateSet: async (params: unknown) => {
       const raw = (params ?? {}) as Record<string, unknown>
@@ -271,11 +277,22 @@ rpc = createRPC({
       if ("quickKeys" in raw) {
         patch.quickKeys = (raw.quickKeys ?? []) as DesktopState["quickKeys"]
       }
+      // "" is a real instruction here (clear the override), so a non-string is
+      // normalised to it rather than dropped.
+      if ("displayName" in raw) {
+        patch.displayName = typeof raw.displayName === "string" ? raw.displayName : ""
+      }
       if ("sessionShelves" in raw) {
         patch.sessionShelves = (raw.sessionShelves ?? {}) as DesktopState["sessionShelves"]
       }
-      const { activeRepoId = null, lastSessionByRepo = {}, quickKeys = [], sessionShelves = {} } = mergeDesktopState(patch)
-      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys, sessionShelves }
+      const {
+        activeRepoId = null,
+        lastSessionByRepo = {},
+        quickKeys = [],
+        displayName = "",
+        sessionShelves = {},
+      } = mergeDesktopState(patch)
+      return { ok: true, activeRepoId, lastSessionByRepo, quickKeys, displayName, sessionShelves }
     },
 
     /**
@@ -423,6 +440,7 @@ rpc = createRPC({
     terminalResize: async (params: unknown) => terminals.resize(params),
     terminalClose: async (params: unknown) => terminals.close(params),
 
+    gitIdentity: async (params: unknown) => git.gitIdentity(params ?? {}),
     gitStatus: async (params: unknown) => git.gitStatus(params ?? {}),
     gitBranches: async (params: unknown) => git.gitBranches(params ?? {}),
     gitStage: async (params: unknown) => git.gitStage(params ?? {}),

@@ -66,10 +66,22 @@ export interface SettingsConnectionInfo {
   mode: "live" | "demo"
 }
 
+/** The sidebar name, owned by App. Settings edits it but never reads it from
+ *  git itself — `gitName` is the fallback the editor shows, not a saved value. */
+export interface SettingsIdentityInfo {
+  /** The configured override, or "" when the git name is in use. */
+  override: string
+  /** `git config user.name`, or "" when it can't be read. */
+  gitName: string
+  /** Persist a new override; "" clears it. */
+  onChange: (next: string) => void
+}
+
 function renderSection(
   id: SectionId,
   connection?: SettingsConnectionInfo,
   onModesChanged?: () => void,
+  identity?: SettingsIdentityInfo,
 ) {
   switch (id) {
     case "providers":
@@ -93,7 +105,7 @@ function renderSection(
     case "relay":
       return <RelaySection connection={connection} />
     case "general":
-      return <GeneralSection connection={connection} />
+      return <GeneralSection connection={connection} identity={identity} />
   }
 }
 
@@ -102,12 +114,15 @@ export function SettingsCenter({
   onOpenChange,
   initialSection,
   connection,
+  identity,
   onModesChanged,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   initialSection?: string
   connection?: SettingsConnectionInfo
+  /** Sidebar display name + its git fallback, supplied and persisted by App. */
+  identity?: SettingsIdentityInfo
   /** Called after a mode is applied/saved/deleted (refresh models + aliases). */
   onModesChanged?: () => void
 }) {
@@ -165,7 +180,7 @@ export function SettingsCenter({
           </nav>
 
           <ScrollArea className="min-w-0 flex-1" viewportClassName="p-5">
-            {renderSection(section, connection, onModesChanged)}
+            {renderSection(section, connection, onModesChanged, identity)}
           </ScrollArea>
         </div>
       </DialogPopup>

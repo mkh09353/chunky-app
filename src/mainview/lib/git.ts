@@ -12,6 +12,8 @@ export type ScmPr = { number: number; title: string; url: string; state: string;
 export type ScmCreatePrResult = CommandResult & { url: string | null }
 export type ScmListPrsResult = CommandResult & { prs: ScmPr[] }
 export type ScmCloneResult = CommandResult & { path: string | null }
+/** `git config user.name` only. Never the email, the OS account or the host. */
+export type GitIdentity = { name: string }
 
 const noStatus = (): GitStatus => ({ isRepo: false, branch: "", upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [] })
 const noBranches = (): GitBranches => ({ current: "", local: [], remote: [], worktrees: [] })
@@ -23,6 +25,10 @@ async function call<T>(name: string, params: object, fallback: T): Promise<T> {
   try { return await fn(params) as T } catch { return fallback }
 }
 
+/** The user's git display name, or "" wherever it can't be read (no native RPC
+ *  in the plain browser build, git missing, `user.name` unset). Callers turn ""
+ *  into the neutral fallback via ~/lib/identity. */
+export async function gitIdentity(params: { cwd?: string }): Promise<GitIdentity> { return call("gitIdentity", params, { name: "" }) }
 export async function gitStatus(params: { cwd: string }): Promise<GitStatus> { return call("gitStatus", params, noStatus()) }
 export async function gitBranches(params: { cwd: string }): Promise<GitBranches> { return call("gitBranches", params, noBranches()) }
 export async function gitStage(params: { cwd: string; paths: string[] }): Promise<CommandResult> { return call("gitStage", params, unavailable()) }

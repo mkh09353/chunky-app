@@ -22,6 +22,9 @@ export interface DesktopUiState {
   /** Composer quick keys. Durable config: never mirrored to localStorage. */
   quickKeys: QuickKey[]
   sessionShelves: Record<string, ShelfPin>
+  /** Sidebar display-name override, or "" for none (use the git name).
+   *  Durable config, like the quick keys: desktop.json is its only home. */
+  displayName: string
 }
 
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
@@ -30,7 +33,13 @@ const LAST_SESSION_KEY = "chunky.lastSessionByRepo"
 const FLUSH_DELAY_MS = 150
 
 function emptyState(): DesktopUiState {
-  return { activeRepoId: null, lastSessionByRepo: {}, quickKeys: [], sessionShelves: {} }
+  return {
+    activeRepoId: null,
+    lastSessionByRepo: {},
+    quickKeys: [],
+    displayName: "",
+    sessionShelves: {},
+  }
 }
 
 function storage(): Storage | null {
@@ -67,8 +76,9 @@ export function readLegacyUiState(): DesktopUiState {
   return state
 }
 
-// Only the two tab preferences are mirrored. Quick keys are user CONFIG, not a
-// disposable UI preference, so desktop.json is their only home.
+// Only the two tab preferences are mirrored. Quick keys, the display name and
+// the shelf pins are user CONFIG, not disposable UI preferences, so desktop.json
+// is their only home.
 function mirrorToStorage(state: DesktopUiState): void {
   const store = storage()
   if (!store) return
@@ -102,12 +112,20 @@ export function desktopUiSnapshot(): DesktopUiState {
 
 function parseState(value: unknown): DesktopUiState | null {
   if (!value || typeof value !== "object") return null
-  const raw = value as { activeRepoId?: unknown; lastSessionByRepo?: unknown; quickKeys?: unknown; sessionShelves?: unknown }
+  const raw = value as {
+    activeRepoId?: unknown
+    lastSessionByRepo?: unknown
+    quickKeys?: unknown
+    displayName?: unknown
+    sessionShelves?: unknown
+  }
   const state = emptyState()
   state.quickKeys = cleanQuickKeys(raw.quickKeys)
   state.sessionShelves = shelfPinsToRecord(
     shelfPinsFromRecord(raw.sessionShelves as Record<string, ShelfPin> | undefined),
   )
+  // Bun already trimmed, folded and bounded this; keep whatever it published.
+  if (typeof raw.displayName === "string") state.displayName = raw.displayName
   if (typeof raw.activeRepoId === "string" && raw.activeRepoId) state.activeRepoId = raw.activeRepoId
   if (raw.lastSessionByRepo && typeof raw.lastSessionByRepo === "object") {
     for (const [repoId, sessionId] of Object.entries(raw.lastSessionByRepo as Record<string, unknown>)) {
@@ -141,7 +159,14 @@ export function loadDesktopUiState(): Promise<DesktopUiState> {
         // Nothing durable yet: migrate whatever the webview still remembers.
         const hasLegacy = !!legacy.activeRepoId || Object.keys(legacy.lastSessionByRepo).length > 0
         if (hasLegacy) {
-          cached = { ...legacy, sessionShelves: durable.sessionShelves }
+          // The name and the shelf pins are durable config that localStorage
+          // never held, so they survive the migration rather than being reset
+          // by the legacy seed.
+          cached = {
+            ...legacy,
+            displayName: durable.displayName,
+            sessionShelves: durable.sessionShelves,
+          }
           queue({ activeRepoId: legacy.activeRepoId, lastSessionByRepo: legacy.lastSessionByRepo })
         } else {
           cached = durable
@@ -165,6 +190,7 @@ let pending: {
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
   sessionShelves?: Record<string, ShelfPin>
+  displayName?: string
 } = {}
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let hideHooked = false
@@ -182,6 +208,7 @@ function queue(patch: {
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
   sessionShelves?: Record<string, ShelfPin>
+  displayName?: string
 }): void {
   pending = { ...pending, ...patch }
   if (!nativeRpcAvailable()) {
@@ -264,6 +291,20 @@ export function saveQuickKeys(keys: QuickKey[]): void {
   const state = ensureSeed()
   state.quickKeys = [...keys]
   queue({ quickKeys: state.quickKeys })
+}
+
+/** The display-name override last read from (or written to) desktop.json. */
+export function displayNameSnapshot(): string {
+  return ensureSeed().displayName
+}
+
+/** Persist the display-name override. "" (or whitespace) clears it, which Bun
+ *  publishes by deleting the key: the sidebar falls back to the git name. */
+export function saveDisplayName(name: string): void {
+  const state = ensureSeed()
+  const next = name.trim()
+  state.displayName = next
+  queue({ displayName: next })
 }
 
 /** Test-only: forget the process cache and any queued write. */

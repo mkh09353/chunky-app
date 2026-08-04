@@ -2,6 +2,7 @@
 // as argv (never through a shell), and every public function converts failures
 // into a safe RPC result.
 import { existsSync, statSync } from "node:fs"
+import { homedir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 
 export type GitFile = { path: string; status: string }
@@ -40,6 +41,10 @@ export type ScmPr = {
 export type ScmCreatePrResult = CommandResult & { url: string | null }
 export type ScmListPrsResult = CommandResult & { prs: ScmPr[] }
 export type ScmCloneResult = CommandResult & { path: string | null }
+/** The user's git display name, and deliberately nothing else. `user.email`,
+ *  the OS account and the hostname are all off limits: this exists only to put
+ *  a real person's name on the sidebar row instead of a hardcoded one. */
+export type GitIdentity = { name: string }
 
 const EMPTY_STATUS: GitStatus = {
   isRepo: false, branch: "", upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], untracked: [],
@@ -125,6 +130,34 @@ async function info(cwd: string): Promise<ScmInfo> {
 
 function invalidCommand(): CommandResult {
   return { ok: false, output: "cwd must be an absolute existing directory" }
+}
+
+/** Past this a value is not somebody's name, so the caller's neutral fallback
+ *  is the better answer than a row-wrecking string. */
+const MAX_IDENTITY_NAME = 80
+/** `git config` answers from memory; it must never hold the sidebar up. */
+const IDENTITY_TIMEOUT_MS = 5_000
+
+/**
+ * `git config --get user.name` — one value, read-only, argv only.
+ *
+ * A repository cwd lets a per-repo override win. Without one we still read the
+ * GLOBAL config, from the home directory: that is only a working directory for
+ * the spawn, never itself read as (or shown as) an identity.
+ */
+export async function gitIdentity(params: { cwd?: unknown }): Promise<GitIdentity> {
+  const cwd = validDirectory(params?.cwd) ?? validDirectory(homedir())
+  if (!cwd) return { name: "" }
+  const result = await command(["git", "config", "--get", "user.name"], cwd, IDENTITY_TIMEOUT_MS)
+  // Unset (exit 1) and "git is missing" are the same answer here: no name.
+  if (!result.ok) return { name: "" }
+  // First line only, with control characters folded to spaces so a stray tab or
+  // CR in a config value cannot render as broken whitespace in the row.
+  const name = (result.output.split(/\r?\n/, 1)[0] ?? "")
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .trim()
+  return { name: name.length > MAX_IDENTITY_NAME ? "" : name }
 }
 
 export async function gitStatus(params: { cwd?: unknown }): Promise<GitStatus> {

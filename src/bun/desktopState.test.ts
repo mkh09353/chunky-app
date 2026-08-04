@@ -154,6 +154,70 @@ describe("merge-on-write", () => {
     }
   })
 
+  test("a display name merges in, normalises, and clears on empty", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1", workspace: "/w" }, env)
+
+      // Trimmed, and every whitespace run folded to one space.
+      mergeDesktopState({ displayName: "  Ada   Lovelace \n" }, env)
+      expect(readDesktopState(env).displayName).toBe("Ada Lovelace")
+      // Unrelated keys survive the write.
+      expect(readDesktopState(env).activeRepoId).toBe("r1")
+      expect(readDesktopState(env).workspace).toBe("/w")
+
+      // Writing something else leaves the name alone.
+      mergeDesktopState({ activeRepoId: "r2" }, env)
+      expect(readDesktopState(env).displayName).toBe("Ada Lovelace")
+
+      // Whitespace-only clears the override by DELETING the key, so "no
+      // override" is absence rather than a stored empty string.
+      mergeDesktopState({ displayName: "   " }, env)
+      expect(readDesktopState(env).displayName).toBeUndefined()
+      expect("displayName" in onDisk(env)).toBe(false)
+      expect(readDesktopState(env).activeRepoId).toBe("r2")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a display name is bounded in graphemes and never split mid-emoji", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ displayName: "N".repeat(200) }, env)
+      expect(readDesktopState(env).displayName?.length).toBe(40)
+
+      // 40 ZWJ families: a UTF-16 cap would slice one into replacement glyphs.
+      mergeDesktopState({ displayName: "👩\u200d👩\u200d👧\u200d👦".repeat(50) }, env)
+      const emoji = readDesktopState(env).displayName ?? ""
+      expect(emoji).not.toContain("�")
+      expect(emoji.endsWith("👦")).toBe(true)
+
+      // A non-string is not an override.
+      mergeDesktopState({ displayName: 42 as unknown as string }, env)
+      expect(readDesktopState(env).displayName).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a hand-edited or hostile display name is cleaned on read", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1" }, env)
+      writeFileSync(
+        desktopStatePath(env),
+        JSON.stringify({ activeRepoId: "r1", displayName: "Ada\tLovelace\u0000" }),
+      )
+      expect(readDesktopState(env).displayName).toBe("Ada Lovelace")
+
+      writeFileSync(desktopStatePath(env), JSON.stringify({ displayName: ["nope"] }))
+      expect(readDesktopState(env).displayName).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("publishes by temp-file rename and leaves nothing behind", () => {
     const { env, dir } = temp()
     try {

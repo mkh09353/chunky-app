@@ -1,9 +1,12 @@
 import { Monitor, Moon, Sparkles, Sun, Wifi } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { getCacheGuard, runDream, setCacheGuard } from "~/lib/configApi"
 import type { CacheGuardResponse } from "~/lib/configApi"
 import { cn } from "~/lib/cn"
+import { FALLBACK_DISPLAY_NAME } from "~/lib/identity"
+import { graphemeLength } from "~/lib/quickKeys"
 import { useTheme, type ThemeMode } from "~/lib/theme"
+import type { SettingsIdentityInfo } from "./SettingsCenter"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -25,11 +28,16 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: "system", label: "System", icon: Monitor },
 ]
 
-export function GeneralSection({ connection }: { connection?: { state: string; baseUrl: string; workspace: string; sessionCount: number; mode: "live" | "demo" } }) {
+/** Same bound the desktop-state writer applies, so the field can say no before
+ *  Bun silently truncates. */
+const MAX_DISPLAY_NAME = 40
+
+export function GeneralSection({ connection, identity }: { connection?: { state: string; baseUrl: string; workspace: string; sessionCount: number; mode: "live" | "demo" }; identity?: SettingsIdentityInfo }) {
   const { mode, setMode } = useTheme()
 
   return (
     <SectionShell title="General" description="Appearance, cache safety, and repository memory.">
+      {identity && <IdentityCard identity={identity} />}
       <Card>
         <SubLabel>Appearance</SubLabel>
         <FieldRow title="Theme" description="Light, dark, or follow the system.">
@@ -69,6 +77,73 @@ export function GeneralSection({ connection }: { connection?: { state: string; b
       <CacheGuardCard />
       <DreamCard />
     </SectionShell>
+  )
+}
+
+/**
+ * The sidebar's display name. An explicit override that beats the git name;
+ * empty means "no override", not an empty name.
+ *
+ * Explicit save (Enter or Apply), like every other text field in Settings —
+ * App persists it and re-renders the sidebar underneath the open dialog.
+ */
+function IdentityCard({ identity }: { identity: SettingsIdentityInfo }) {
+  const [draft, setDraft] = useState(identity.override)
+
+  // Adopt the value App owns whenever it actually changes (first load from
+  // desktop.json, or a clear), rather than stranding a stale draft.
+  useEffect(() => setDraft(identity.override), [identity.override])
+
+  const fallback = identity.gitName || FALLBACK_DISPLAY_NAME
+  const trimmed = draft.trim()
+  const tooLong = graphemeLength(trimmed) > MAX_DISPLAY_NAME
+  const dirty = trimmed !== identity.override
+  // Enter and Apply share one guard: an unchanged (or too long) draft commits
+  // nothing, so Enter can't re-save what the disabled button refuses.
+  const apply = () => {
+    if (dirty && !tooLong) identity.onChange(trimmed)
+  }
+
+  return (
+    <Card>
+      <SubLabel>Identity</SubLabel>
+      <FieldRow
+        title="Display name"
+        description={
+          identity.override
+            ? `Overriding ${identity.gitName ? "your Git name" : "the default"}, ${fallback}.`
+            : `Using ${identity.gitName ? "your Git name" : "the default"}. Set one to override it.`
+        }
+      >
+        <div className="flex items-center gap-2">
+          <TextInput
+            value={draft}
+            onChange={setDraft}
+            placeholder={fallback}
+            className="w-[12rem]"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") apply()
+            }}
+          />
+          <Button size="sm" variant="outline" disabled={!dirty || tooLong} onClick={apply}>
+            Apply
+          </Button>
+        </div>
+      </FieldRow>
+      {tooLong && (
+        <InlineError>{`Keep the name to ${MAX_DISPLAY_NAME} characters or fewer.`}</InlineError>
+      )}
+      {identity.override && (
+        <div className="flex items-center justify-between gap-3 border-border/60 border-t pt-3">
+          <span className="min-w-0 truncate text-[12px] text-muted-foreground">
+            {identity.gitName ? `Git name · ${identity.gitName}` : "No Git name is configured."}
+          </span>
+          <Button size="sm" variant="ghost" onClick={() => identity.onChange("")}>
+            {identity.gitName ? "Use Git name" : "Clear"}
+          </Button>
+        </div>
+      )}
+    </Card>
   )
 }
 

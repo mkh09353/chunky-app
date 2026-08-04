@@ -21,6 +21,8 @@ import { QueueChips } from "./components/QueueChips"
 import { TodosPanel } from "./components/TodosPanel"
 import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
 import { GitToolbar } from "./components/GitPanel"
+import { gitIdentity } from "./lib/git"
+import { pickDisplayName } from "./lib/identity"
 import { Sidebar } from "./components/Sidebar"
 import { PrWidget } from "./components/PrWidget"
 import { PrPanel } from "./components/PrPanel"
@@ -87,11 +89,13 @@ import { cloneRoots } from "./lib/dirSearch"
 import { reresolveConnection, shouldReresolve, subscribeServerChanged } from "./lib/reresolve"
 import {
   desktopUiSnapshot,
+  displayNameSnapshot,
   forgetRepoSessions,
   loadDesktopUiState,
   quickKeysSnapshot,
   rememberActiveRepo,
   rememberLastSession,
+  saveDisplayName,
   saveQuickKeys,
   saveSessionShelves,
   sessionShelvesSnapshot,
@@ -382,6 +386,8 @@ export function App() {
   // is up.
   const [quickKeys, setQuickKeys] = useState<QuickKey[]>(quickKeysSnapshot)
   const [quickKeyEditorOpen, setQuickKeyEditorOpen] = useState(false)
+  // Optional sidebar name the user set in Settings. "" = no override.
+  const [nameOverride, setNameOverride] = useState<string>(displayNameSnapshot)
   // Quick keys come from Bun-managed desktop.json (the load is memoized, so this
   // shares the boot read); demo/offline builds simply get the empty list.
   useEffect(() => {
@@ -390,6 +396,7 @@ export function App() {
       if (cancelled) return
       setQuickKeys(ui.quickKeys)
       setShelfPins(shelfPinsFromRecord(ui.sessionShelves))
+      setNameOverride(ui.displayName)
     })
     return () => {
       cancelled = true
@@ -650,6 +657,21 @@ export function App() {
     const sessionWorkspace = sessions.find((s) => s.sessionId === sessionId)?.workspace
     return sessionWorkspace || activeRepo?.path || workspace || config?.workspace || undefined
   }, [live, sessions, sessionId, activeRepo, workspace, config])
+
+  // Sidebar identity: the user's git display name (name only, never the email),
+  // read from whichever git directory the window is pointed at so a per-repo
+  // override wins. "" everywhere it can't be read; Sidebar turns that into the
+  // neutral "Chunky" fallback.
+  const [gitUserName, setGitUserName] = useState("")
+  useEffect(() => {
+    let cancelled = false
+    void gitIdentity({ cwd: gitCwd }).then((identity) => {
+      if (!cancelled) setGitUserName(identity.name)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [gitCwd])
 
   // Session-scoped rich data lives on TranscriptState (auto-resets on switch).
   const liveTodos = live ? transcript.todos : []
@@ -1908,6 +1930,14 @@ export function App() {
     saveQuickKeys(next)
   }, [])
 
+  // Settings edits the override; App owns the live value so the sidebar changes
+  // under the open dialog. Blank clears it and the git name comes back.
+  const handleDisplayNameChange = useCallback((next: string) => {
+    const trimmed = next.trim()
+    setNameOverride(trimmed)
+    saveDisplayName(trimmed)
+  }, [])
+
   const handleStop = useCallback(() => {
     if (!live) {
       stopDemoStream()
@@ -2583,6 +2613,7 @@ export function App() {
           unreadThreadIds={live ? unreadDone : undefined}
           settledThreadIds={live ? settledThreadIds : undefined}
           onThreadSettledChange={live ? handleThreadSettledChange : undefined}
+          displayName={pickDisplayName(nameOverride, gitUserName)}
           prWidget={
             live && !prUnsupported ? (
               <PrWidget
@@ -2752,6 +2783,11 @@ export function App() {
             }
           }}
           initialSection={settingsSection}
+          identity={{
+            override: nameOverride,
+            gitName: gitUserName,
+            onChange: handleDisplayNameChange,
+          }}
           onModesChanged={() => {
             void refreshModels()
             void refreshModes()
