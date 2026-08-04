@@ -450,6 +450,18 @@ const win = new BrowserWindow({
   minHeight: 560,
 })
 
+// AppKit resets the standard window buttons to their default position when a
+// window leaves fullscreen, ignoring our custom offset until the next layout
+// pass. Reapply the offset on every resize (exiting fullscreen fires one) so
+// the traffic lights never sit over the brand strip's Chunky mark.
+win.on("resize", () => {
+  try {
+    if (!win.isFullScreen()) win.setWindowButtonPosition(12, 18)
+  } catch {
+    // Best-effort cosmetic fix; never let it interfere with resizing.
+  }
+})
+
 // Tear down native FFF handles when the process is leaving.
 const cleanup = () => {
   terminals.destroy()
