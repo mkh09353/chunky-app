@@ -3,6 +3,7 @@ import {
   GitFork,
   History,
   Info,
+  Loader2,
   Moon,
   MoreHorizontal,
   PanelRightOpen,
@@ -223,6 +224,7 @@ export function ChatView({
   thread,
   streamingId,
   loading = false,
+  catchingUp = false,
   transcript,
   modelName,
   foldAll = false,
@@ -233,6 +235,9 @@ export function ChatView({
   streamingId: string | null
   headerRight?: React.ReactNode
   loading?: boolean
+  /** Replay is still in flight: what is on screen is last-seen state, so say
+   *  so rather than letting a stale "working…" pass for the live picture. */
+  catchingUp?: boolean
   transcript?: TranscriptState
   modelName?: string
   foldAll?: boolean
@@ -408,16 +413,27 @@ export function ChatView({
 
   const body = (
     <div ref={innerRef} className="relative flex flex-col gap-4 pt-5 pr-7 pb-[26px] pl-[22px]">
+      {/* Sticky, because the reader is normally at the TAIL of a long
+          transcript when they switch back to a session that ran in the
+          background — a marker at the start of the thread would never be seen. */}
+      {catchingUp && !empty && (
+        <div className="pointer-events-none sticky top-0 z-10 flex justify-center">
+          <span className="flex items-center gap-1.5 rounded-full border border-border bg-background/90 px-3 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+            <Loader2 className="size-3 animate-spin text-primary" />
+            Catching up…
+          </span>
+        </div>
+      )}
       {!empty && (
         <Row>
           <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
             <Sparkles className="size-3 text-primary" />
-            {loading ? "Loading transcript…" : "Start of thread"}
+            {loading ? "Loading transcript…" : catchingUp ? "Catching up…" : "Start of thread"}
           </div>
         </Row>
       )}
 
-      {loading && empty ? (
+      {(loading || catchingUp) && empty ? (
         <p className="py-12 text-center text-[13px] text-muted-foreground/70">
           Replaying session history…
         </p>

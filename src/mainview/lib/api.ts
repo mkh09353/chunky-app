@@ -20,9 +20,12 @@ import {
   type ReposResponse,
   type SendBlockedResponse,
   type ServerInfoResponse,
+  type SessionDelta,
   type SessionSummary,
+  type ShellSessionsResponse,
   type ForkResponse, type GoalRequest, type GoalSnapshot, type RewindPoint,
 } from "@chunky/protocol"
+import { readNamedSSE } from "./sse"
 
 export type {
   MessageDelivery,
@@ -231,6 +234,53 @@ export async function listSessions(
   const data = (await res.json()) as ListSessionsResponse
   const sessions = data.sessions ?? []
   return sessions.slice().sort((a, b) => b.lastActivity - a.lastActivity)
+}
+
+export interface SessionStreamHandlers {
+  /** The full cross-repository session list; sent once, first. */
+  onSnapshot: (sessions: SessionSummary[]) => void
+  /** Debounced (~250ms server-side) upserts/removals after the snapshot. */
+  onDelta: (delta: SessionDelta) => void
+  /** Fires once the stream is accepted — the snapshot follows immediately. */
+  onOpen?: () => void
+}
+
+/**
+ * Subscribe to server-pushed session summaries (ROUTES.sessionStream).
+ *
+ * This replaces polling `listSessions` on a timer: the server debounces state
+ * changes at 250ms, so a background session finishing is visible in the sidebar
+ * (and to the unread/horn rules) within a quarter second instead of up to five.
+ *
+ * Its rows are shell-shaped — `running` but never `busy` — so callers must fold
+ * them onto known state with lib/sessionSummaries and confirm a settled `busy`
+ * with a targeted poll. Resolves when the server closes the stream; throws when
+ * the route is missing (older server) so the caller can fall back to polling.
+ */
+export async function openSessionStream(
+  baseUrl: string,
+  handlers: SessionStreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!baseUrl) throw new Error("Chunky server is unavailable")
+  const res = await fetch(baseUrl + ROUTES.sessionStream, { signal })
+  if (!res.ok) throw new Error(`session stream failed (${res.status})`)
+  handlers.onOpen?.()
+  for await (const frame of readNamedSSE(res, signal)) {
+    if (signal?.aborted) break
+    let payload: unknown
+    try {
+      payload = JSON.parse(frame.data)
+    } catch {
+      continue
+    }
+    if (frame.event === "snapshot") {
+      handlers.onSnapshot((payload as ShellSessionsResponse).sessions ?? [])
+    } else if (frame.event === "delta") {
+      const delta = payload as SessionDelta
+      handlers.onDelta({ upsert: delta.upsert ?? [], remove: delta.remove ?? [] })
+    }
+  }
 }
 
 // ---- Repos (workspaces) ---------------------------------------------------

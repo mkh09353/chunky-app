@@ -57,6 +57,7 @@ import {
   listSessions,
   loadConfig,
   openEventStream,
+  openSessionStream,
   prettyModel,
   QueueFullError,
   removeRepo,
@@ -131,16 +132,50 @@ import {
   streamingMessageId,
 } from "./lib/mapTranscript"
 import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
-import type { MessageDelivery } from "@chunky/protocol"
+import type { AgentEvent, MessageDelivery, SessionDelta } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
-import { initialState, isStreaming, isTreeIdle, reduce, type TranscriptState } from "./lib/transcript"
+import { initialState, isStreaming, isTreeIdle, type TranscriptState } from "./lib/transcript"
 import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "./lib/sessionCache"
+import { TranscriptCoalescer } from "./lib/replayCoalescer"
+import { ReplayReconciler } from "./lib/replayReconciler"
+import {
+  absorbAuthoritative,
+  applySessionDelta,
+  applySessionSnapshot,
+  createCompletionTracker,
+  forgetRepoTracking,
+  isSessionBusy,
+  mergeSummaryLists,
+  sameSummaryList,
+  sessionsInWorkspace,
+  trackCompletions,
+  unionSummaries,
+  type SummaryMap,
+} from "./lib/sessionSummaries"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
 type AppMode = "live" | "demo"
 
 const REPLAY_SETTLE_MS = 120
+/** Hard cap on the "catching up…" state. A session that is still RUNNING never
+ *  goes quiet, so quiet alone must never be the only way out of it. */
+const CATCH_UP_MAX_MS = 1_500
+/** Safety poll while the session stream is healthy: it only has to catch what
+ *  shell rows cannot express (a detached spawn settling with the root idle). */
+const SAFETY_POLL_MS = 20_000
+/** Poll cadence when the session stream is unavailable (older server, or it
+ *  dropped) — the behaviour this app had before the stream existed. */
+const FALLBACK_POLL_MS = 5_000
+/** Debounce on the targeted poll that confirms a `busy` the stream can't state. */
+const BUSY_CONFIRM_MS = 300
+/** Floor between two such polls, so a long-running delegate cannot turn every
+ *  streamed delta into a request. */
+const BUSY_CONFIRM_GAP_MS = 2_000
+const SESSION_STREAM_RETRY_MS = 5_000
+/** The retirement check keeps its own cadence: handover latency must not follow
+ *  the session-summary cadence. */
+const RETIREMENT_POLL_MS = 5_000
 /** Recent agent-activity lines kept for the clone popover's progress log. */
 const CLONE_LOG_LINES = 8
 
@@ -236,15 +271,18 @@ export function App() {
   // Sessions whose run finished while they weren't being viewed: their rows
   // show "Done" with an unread dot until selected.
   const [unreadDone, setUnreadDone] = useState<Set<string>>(new Set())
-  const wasRunning = useRef<Map<string, boolean>>(new Map())
-  const runningSince = useRef<Map<string, number>>(new Map())
+  const selectedTracker = useRef(createCompletionTracker())
   // Sessions outside the selected repo are not in `sessions`, so their
-  // transition bookkeeping is deliberately separate from the sidebar's list.
-  const backgroundWasRunning = useRef<Map<string, boolean>>(new Map())
-  const backgroundRunningSince = useRef<Map<string, number>>(new Map())
+  // transition bookkeeping is deliberately separate from the sidebar's list
+  // (and keyed by `${repoId}:${sessionId}`).
+  const backgroundTracker = useRef(createCompletionTracker())
   const [unreadRepoIds, setUnreadRepoIds] = useState<Set<string>>(new Set())
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
+  // Replay is in flight: the projection on screen is last-seen state, not live
+  // state. Everything that would otherwise claim "running" from the transcript
+  // defers to the server's own summary while this is true.
+  const [catchingUp, setCatchingUp] = useState(false)
   const [modelSel, setModelSel] = useState<ModelSelection | null>(null)
   // Session-pinned executor selections: POST /api/model/select with a sessionId
   // pins that session only, so its display must survive global refreshes/SSE.
@@ -364,6 +402,14 @@ export function App() {
   // lengthy history can be much larger than a sidebar row.
   const repoSessionCache = useRef(new Map<string | null, SessionSummary[]>())
   const sessionCache = useRef(new SessionCache(20))
+  // Publishes the attached session's projection on a cadence instead of once
+  // per event (see lib/replayCoalescer). Owned by the current attachment.
+  const coalescer = useRef<TranscriptCoalescer | null>(null)
+  // Timers belonging to the current attachment's catch-up bookkeeping.
+  const attachTimers = useRef<(() => void) | null>(null)
+  // Every session the server knows about, folded from the session stream and
+  // from authoritative polls (see lib/sessionSummaries).
+  const shellSummaries = useRef<SummaryMap>(new Map())
   const onboardingChecked = useRef(false)
   // Seeded from the synchronous snapshot, then replaced with the durable
   // desktop.json state once the connection boots (see the live-connect effect).
@@ -449,7 +495,9 @@ export function App() {
       // Each row labels itself with ITS OWN pinned model when it has one.
       const rowSel = sessionModelSel[s.sessionId] ?? modelSel
       const t = sessionToThread(s, {
-        liveBusy: s.sessionId === sessionId ? !isTreeIdle(transcript) : undefined,
+        // `undefined` hands the row back to its own summary — which is what a
+        // transcript still catching up cannot speak for.
+        liveBusy: s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : undefined,
         isActive: s.sessionId === sessionId,
         modelName: modelSelectionToUi(rowSel, modelRows).name,
         unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
@@ -464,6 +512,7 @@ export function App() {
     sessions,
     sessionId,
     transcript.status,
+    catchingUp,
     sessionModelSel,
     modelSel,
     modelRows,
@@ -568,12 +617,26 @@ export function App() {
     })
   }, [])
 
+  /** Drop the attached session's stream AND everything scheduled around it, so
+   *  no in-flight commit can land on top of whatever replaces it. */
+  const stopStream = useCallback(() => {
+    streamAbort.current?.abort()
+    streamAbort.current = null
+    coalescer.current?.dispose()
+    coalescer.current = null
+    attachTimers.current?.()
+    attachTimers.current = null
+  }, [])
+
   // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
   const refreshSessions = useCallback(
     async (baseUrl: string, repoId: string | null = activeRepoIdRef.current) => {
       const gen = ++repoListGen.current
       const list = await listSessions(baseUrl, repoId)
       if (gen !== repoListGen.current) return list
+      // Authoritative rows (they carry `busy`) — fold them into the shared map
+      // so a later streamed row can inherit what only a poll can know.
+      shellSummaries.current = absorbAuthoritative(shellSummaries.current, list)
       repoSessionCache.current.set(repoId, list)
       sessionCache.current.reconcileRepo(repoId, new Set(list.map((session) => session.sessionId)))
       // Only apply if still viewing this repo (or boot with matching ref).
@@ -589,13 +652,16 @@ export function App() {
     const previousId = sessionIdRef.current
     if (previousId) {
       sessionCache.current.set(previousId, {
-        transcript: transcriptRef.current,
+        // The coalescer's working state is the reduction of EVERY event seen so
+        // far; `transcript` may still be a cadence behind it when the reader
+        // switches away mid-burst.
+        transcript: coalescer.current?.state ?? transcriptRef.current,
         goal: goalRef.current,
         repoId: activeRepoIdRef.current,
         events: sessionCache.current.get(previousId)?.events ?? [],
       })
     }
-    streamAbort.current?.abort()
+    stopStream()
     const ac = new AbortController()
     streamAbort.current = ac
     const gen = ++attachGen.current
@@ -614,35 +680,56 @@ export function App() {
       lastSessionByRepo.current[repoForSession] = id
       rememberLastSession(repoForSession, id)
     }
-    const cached = sessionCache.current.get(id)
-    let replayIndex = 0
-    let replayMatched = !cached
-    let shadowEvents: Parameters<typeof reduce>[1][] | null = null
-    let shadowSettleTimer: number | null = null
-    const clearShadowSettle = () => {
-      if (shadowSettleTimer != null) window.clearTimeout(shadowSettleTimer)
-      shadowSettleTimer = null
+    // Re-read on every (re)connection: a rebuild replaces the entry, and
+    // remember() extends whichever one is current.
+    let cached = sessionCache.current.get(id)
+    const replay = new ReplayReconciler(cached?.events)
+
+    // The projection is published on a cadence, NOT once per event: the server
+    // replays the whole history on every attach, and committing that per event
+    // is what left a backgrounded session stale on screen for seconds.
+    const live = new TranscriptCoalescer(cached?.transcript ?? initialState, (next) => {
+      if (gen !== attachGen.current) return
+      setTranscript(next)
+    })
+    coalescer.current = live
+
+    // ---- catch-up (replay in flight) ----
+    let catchUpActive = !opts?.fresh
+    let catchUpQuiet: number | null = null
+    let catchUpCap: number | null = null
+    const clearCatchUpTimers = () => {
+      if (catchUpQuiet != null) window.clearTimeout(catchUpQuiet)
+      if (catchUpCap != null) window.clearTimeout(catchUpCap)
+      catchUpQuiet = null
+      catchUpCap = null
+      if (settleTimer.current != null) {
+        clearTimeout(settleTimer.current)
+        settleTimer.current = null
+      }
     }
-    const finishShadowReplay = () => {
-      clearShadowSettle()
-      if (!shadowEvents || gen !== attachGen.current) return
-      const rebuilt = rebuildTranscript(shadowEvents)
-      const rebuiltEvents = shadowEvents.filter(isPersistedSessionEvent)
-      shadowEvents = null
-      replayMatched = true
-      setTranscript(rebuilt)
-      sessionCache.current.set(id, {
-        transcript: rebuilt,
-        goal: goalRef.current,
-        repoId: activeRepoIdRef.current,
-        events: rebuiltEvents,
-      })
+    attachTimers.current = clearCatchUpTimers
+    /** Replay is over: publish everything held back and stop deferring to the
+     *  session summary for this session's busy state. */
+    const finishCatchUp = () => {
+      clearCatchUpTimers()
+      catchUpActive = false
+      if (gen !== attachGen.current) return
+      live.flush()
+      setCatchingUp(false)
+      setTranscriptLoading(false)
     }
-    const scheduleShadowSettle = () => {
-      clearShadowSettle()
-      shadowSettleTimer = window.setTimeout(finishShadowReplay, REPLAY_SETTLE_MS)
+    /** Each replayed event pushes the settle out; the cap is what stops a
+     *  session that keeps streaming from claiming to replay forever. */
+    const noteReplayProgress = () => {
+      if (!catchUpActive || gen !== attachGen.current) return
+      if (catchUpQuiet != null) window.clearTimeout(catchUpQuiet)
+      catchUpQuiet = window.setTimeout(finishCatchUp, REPLAY_SETTLE_MS)
+      settleTimer.current = catchUpQuiet
+      if (catchUpCap == null) catchUpCap = window.setTimeout(finishCatchUp, CATCH_UP_MAX_MS)
     }
-    const rememberEvent = (event: Parameters<typeof reduce>[1], nextTranscript = transcriptRef.current) => {
+
+    const rememberEvent = (event: AgentEvent, nextTranscript = live.state) => {
       sessionCache.current.remember(id, nextTranscript, goalRef.current, activeRepoIdRef.current, event)
     }
     setTranscript(cached?.transcript ?? initialState)
@@ -651,6 +738,9 @@ export function App() {
     // A just-created session has no history to replay — don't flash the
     // "Replaying session history…" state while its stream connects.
     setTranscriptLoading(!opts?.fresh && !cached)
+    // A cache hit shows LAST-SEEN state until the replay passes it, which is
+    // exactly when the reader must not be told this is the live picture.
+    setCatchingUp(catchUpActive)
     setSendError(null)
     setConnError(null)
 
@@ -658,66 +748,65 @@ export function App() {
       if (gen !== attachGen.current) return
       setConnectionState("connected")
       setAppMode("live")
-      if (settleTimer.current != null) clearTimeout(settleTimer.current)
-      settleTimer.current = window.setTimeout(() => {
-        settleTimer.current = null
-        if (!ac.signal.aborted && gen === attachGen.current) setTranscriptLoading(false)
-      }, REPLAY_SETTLE_MS)
+      // Arms the settle even for a session with NO history, whose stream sends
+      // nothing at all until its first turn.
+      noteReplayProgress()
     }
 
     let attempt = 0
-    const onEvent = (ev: Parameters<typeof reduce>[1]) => {
+    const onEvent = (ev: AgentEvent) => {
       if (gen !== attachGen.current) return
       attempt = 0
+      noteReplayProgress()
       // The server always sends history from event zero and exposes no replay
       // boundary/cursor. Silently discard the cached persisted prefix; the
       // first new event is reduced onto the projection already on screen.
-      if (cached && replayIndex < cached.events.length && JSON.stringify(ev) === JSON.stringify(cached.events[replayIndex])) {
-        replayIndex += 1
-        if (replayIndex === cached.events.length) replayMatched = true
+      const decision = replay.next(ev)
+      if (decision.kind === "skip") {
+        // Everything the cache knew is accounted for: from here on this is
+        // news, and the screen is live again as soon as it is reduced.
+        if (decision.complete) finishCatchUp()
         return
       }
-      // Any prefix disagreement means the cache cannot safely be extended. Do
-      // a complete projection rebuild off-screen, retaining the old transcript
-      // until the replay burst settles, then swap once without duplicates.
-      if (cached && !replayMatched && !shadowEvents) shadowEvents = cached.events.slice(0, replayIndex)
-      if (shadowEvents) {
-        shadowEvents.push(ev)
-        scheduleShadowSettle()
-        return
+      // Any prefix disagreement means the cache cannot safely be extended, so
+      // the projection is rebuilt from event zero in the WORKING state while
+      // the previous one stays on screen. The hold ends on burst-quiet or at
+      // its cap, so a still-running session can no longer freeze the view.
+      if (decision.kind === "rebuild") {
+        live.replaceState(rebuildTranscript(decision.prefix))
+        live.hold()
+        sessionCache.current.set(id, {
+          transcript: live.state,
+          goal: goalRef.current,
+          repoId: activeRepoIdRef.current,
+          events: decision.prefix,
+        })
       }
       // These arrive only on the live stream, never in Store.history. They
-      // must update the visible/cache projection but must not contaminate a
-      // shadow rebuild of persisted history.
+      // must update the visible/cache projection but must never be replayed
+      // into it as history — hence the side effects firing here, in stream
+      // order, exactly as they did when every event committed on its own.
       if (!isPersistedSessionEvent(ev)) {
         if (ev.type === "session.rewound") {
           sessionCache.current.delete(id)
           void attachSession(baseUrl, id)
           return
         }
+        // Live-only broadcast (never persisted, never a transcript item):
+        // another window/the TUI applied a mode, so re-read model + alias state.
         if (ev.type === "mode.applied") {
           rememberEvent(ev)
           modeAppliedRef.current(ev.name, ev.spec)
           return
         }
+        // The agent asking for our browser pane. Also live-only: claimed here
+        // and never reduced, so it cannot become a rendered transcript item.
+        // Only http(s) actually opens the pane — openInAppBrowser owns that rule.
         if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
-        setTranscript((s) => {
-          const next = reduce(s, ev)
-          rememberEvent(ev, next)
-          return next
-        })
+        rememberEvent(ev, live.push(ev))
         return
       }
-      // Live-only broadcast (never persisted, never a transcript item): another
-      // window/the TUI applied a mode, so re-read the model + alias state here.
-      // The agent asking for our browser pane. Also live-only: claimed here and
-      // never reduced, so it cannot become a rendered transcript item. Only
-      // http(s) actually opens the pane — openInAppBrowser owns that rule.
-      setTranscript((s) => {
-        const next = reduce(s, ev)
-        rememberEvent(ev, next)
-        return next
-      })
+      rememberEvent(ev, live.push(ev))
       if (ev.type === "goal.update") {
         goalRef.current = ev.goal
         setGoalState(ev.goal)
@@ -752,7 +841,7 @@ export function App() {
         setConnectionState(attempt === 0 ? "connecting" : "reconnecting")
         await openEventStream(baseUrl, id, onEvent, ac.signal, onOpen)
         if (ac.signal.aborted || gen !== attachGen.current) return
-        finishShadowReplay()
+        finishCatchUp()
         setConnectionState("reconnecting")
         attempt += 1
         await sleep(reconnectDelay(attempt - 1), ac.signal)
@@ -761,7 +850,9 @@ export function App() {
         if (isIntentionalAbort(err, ac.signal) || gen !== attachGen.current) return
         attempt += 1
         setConnectionState("reconnecting")
-        setTranscriptLoading(false)
+        // Publish whatever the working state holds: the stream is gone, so
+        // nothing else is going to arrive to trigger a cadence flush.
+        finishCatchUp()
         try {
           await sleep(reconnectDelay(attempt), ac.signal)
         } catch {
@@ -774,11 +865,12 @@ export function App() {
       // history event zero. Keep the current cached projection visible and
       // discard its matching persisted prefix on the next connection.
       setTranscriptLoading(false)
-      replayIndex = 0
-      replayMatched = !cached
-      shadowEvents = null
+      cached = sessionCache.current.get(id)
+      replay.reset(cached?.events)
+      catchUpActive = true
+      setCatchingUp(true)
     }
-  }, [refreshSessions, hydrateSessionModel])
+  }, [refreshSessions, hydrateSessionModel, stopStream])
 
   /** Load sessions for a repo and attach last/newest/created session. */
   const openRepoThreads = useCallback(
@@ -888,10 +980,10 @@ export function App() {
     })()
     return () => {
       cancelled = true
-      streamAbort.current?.abort()
+      stopStream()
       if (settleTimer.current != null) clearTimeout(settleTimer.current)
     }
-  }, [openRepoThreads])
+  }, [openRepoThreads, stopStream])
 
   /**
    * Tell the server how to drive our browser pane. The endpoint lives in the
@@ -922,73 +1014,201 @@ export function App() {
     return () => clearInterval(t)
   }, [config, appMode])
 
-  // Poll the selected repo for the sidebar, and the others for completion
-  // badges. Only the attached session has an SSE stream of its own.
+  /**
+   * Session summaries for the sidebar, the repo-tab badges and the completion
+   * (unread + horn) rules.
+   *
+   * Server-PUSHED (ROUTES.sessionStream, ~250ms debounced) rather than polled,
+   * so a session finishing in another repo is visible in a quarter second
+   * instead of up to five. Its rows are shell-shaped though — `running` (root
+   * run) but never `busy` (root OR delegate OR detached spawn) — and the
+   * completion rules are defined on `busy`. So a streamed row that cannot speak
+   * for `busy` inherits the last authoritative value (lib/sessionSummaries) and
+   * asks for ONE targeted poll to settle it; a slow safety poll covers what no
+   * `running` transition can express, and a 5s poll takes over completely if
+   * the stream is unavailable.
+   */
   useEffect(() => {
     if (!config || appMode !== "live" || connectionState !== "connected") return
-    const refreshAllRepos = () => {
-      void refreshSessions(config.baseUrl).catch(() => {})
+    const baseUrl = config.baseUrl
+    let stopped = false
+    const ac = new AbortController()
+    let pollMs = FALLBACK_POLL_MS
+    let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let confirmTimer: ReturnType<typeof setTimeout> | null = null
+    let lastConfirmAt = 0
+
+    /** Fold one repo's rows into the caches and report a qualifying completion.
+     *  The SELECTED repo's transitions belong to the `sessions` effect below,
+     *  which is the only place that knows about the attached session.
+     *
+     *  Only an AUTHORITATIVE list may shorten a repo: the stream is scoped by
+     *  workspace path and debounced, so "absent from this batch" is not
+     *  evidence a session is gone — and a row blinking out of the sidebar (or a
+     *  cached transcript being evicted) is a far worse error than a stale row. */
+    const applyRepoRows = (
+      repo: Repo,
+      rows: SessionSummary[],
+      authoritative: boolean,
+    ): string | null => {
+      const previous = repoSessionCache.current.get(repo.id) ?? []
+      const merged = authoritative
+        ? mergeSummaryLists(previous, rows)
+        : mergeSummaryLists(previous, unionSummaries(previous, rows))
+      repoSessionCache.current.set(repo.id, merged)
+      if (authoritative) {
+        sessionCache.current.reconcileRepo(repo.id, new Set(merged.map((s) => s.sessionId)))
+      }
+      if (repo.id === activeRepoIdRef.current) return null
+      const { completed } = trackCompletions(
+        backgroundTracker.current,
+        merged.map((s) => ({
+          key: `${repo.id}:${s.sessionId}`,
+          sessionId: s.sessionId,
+          running: isSessionBusy(s),
+        })),
+        Date.now(),
+        MIN_COMPLETION_NOTIFY_MS,
+      )
+      return completed ? repo.id : null
+    }
+
+    const flagCompletedRepos = (ids: (string | null)[]) => {
+      const completed = ids.filter((id): id is string => id != null)
+      if (completed.length === 0) return
+      setUnreadRepoIds((prev) => {
+        const next = new Set(prev)
+        for (const id of completed) next.add(id)
+        return next
+      })
+      // A batch may contain several completed sessions/repos, but gets one horn.
+      playCompletionHorn()
+    }
+
+    /** Authoritative refresh: the only source of a settled `busy`. */
+    const refreshAllRepos = async () => {
+      const active = await refreshSessions(baseUrl).catch(() => null)
+      if (stopped) return
+      if (active) shellSummaries.current = absorbAuthoritative(shellSummaries.current, active)
       const otherRepos = repos.filter((repo) => repo.id !== activeRepoIdRef.current)
-      void Promise.all(
+      const completed = await Promise.all(
         otherRepos.map(async (repo) => {
           try {
-            const list = await listSessions(config.baseUrl, repo.id)
-            if (appMode !== "live" || connectionState !== "connected") return null
-            repoSessionCache.current.set(repo.id, list)
-            sessionCache.current.reconcileRepo(repo.id, new Set(list.map((session) => session.sessionId)))
-
-            const now = Date.now()
-            let completed = false
-            const next = new Map(backgroundWasRunning.current)
-            for (const session of list) {
-              const key = `${repo.id}:${session.sessionId}`
-              const wasRunning = backgroundWasRunning.current.get(key)
-              if (session.busy ?? session.running) {
-                if (!wasRunning) backgroundRunningSince.current.set(key, now)
-              } else if (wasRunning) {
-                const since = backgroundRunningSince.current.get(key)
-                backgroundRunningSince.current.delete(key)
-                if (since != null && now - since >= MIN_COMPLETION_NOTIFY_MS) completed = true
-              }
-              next.set(key, !!(session.busy ?? session.running))
-            }
-            backgroundWasRunning.current = next
-            return completed ? repo.id : null
+            const list = await listSessions(baseUrl, repo.id)
+            if (stopped) return null
+            shellSummaries.current = absorbAuthoritative(shellSummaries.current, list)
+            return applyRepoRows(repo, list, true)
           } catch {
             // A stale/unavailable repo must not block the remaining polls.
             return null
           }
         }),
-      ).then((completedRepoIds) => {
-        const ids = completedRepoIds.filter((id): id is string => id != null)
-        if (ids.length === 0) return
-        setUnreadRepoIds((prev) => {
-          const next = new Set(prev)
-          for (const id of ids) next.add(id)
-          return next
-        })
-        // A batch may contain several completed sessions/repos, but gets one horn.
-        playCompletionHorn()
-      })
+      )
+      if (!stopped) flagCompletedRepos(completed)
     }
+
+    /** One debounced authoritative poll, for rows whose `busy` the stream could
+     *  not state (root run stopped, delegates unknown).
+     *
+     *  Rate-limited: a session whose root is idle while a delegate keeps
+     *  working reports "can't say" on EVERY delta, and that must not turn into
+     *  a poll every 250ms. */
+    const confirmBusy = () => {
+      if (confirmTimer != null || stopped) return
+      const wait = Math.max(BUSY_CONFIRM_MS, BUSY_CONFIRM_GAP_MS - (Date.now() - lastConfirmAt))
+      confirmTimer = setTimeout(() => {
+        confirmTimer = null
+        lastConfirmAt = Date.now()
+        void refreshAllRepos()
+      }, wait)
+    }
+
+    /** Publish the folded map: sidebar rows for the selected repo, cached rows
+     *  (and completion transitions) for the rest. */
+    const publishSummaries = (stale: string[]) => {
+      if (stopped) return
+      const completed: (string | null)[] = []
+      for (const repo of repos) {
+        const rows = sessionsInWorkspace(shellSummaries.current, repo.path)
+        completed.push(applyRepoRows(repo, rows, false))
+        if (repo.id === activeRepoIdRef.current) {
+          const merged = repoSessionCache.current.get(repo.id) ?? rows
+          setSessions((prev) => (sameSummaryList(prev, merged) ? prev : merged))
+        }
+      }
+      flagCompletedRepos(completed)
+      if (stale.length > 0) confirmBusy()
+    }
+
     /** Proactive handover: a server that is draining after an update will stop
      *  serving shortly, so move to its replacement BEFORE the stream drops
      *  rather than after. Advisory — a failure just leaves the reconnect loop
      *  to notice the hard way. */
     const checkRetirement = () => {
-      void fetchServerRetiring(config.baseUrl).then(async (retiring) => {
-        if (!retiring || appMode !== "live") return
+      void fetchServerRetiring(baseUrl).then(async (retiring) => {
+        if (!retiring || stopped || appMode !== "live") return
         await moveToResolvedServer()
       }).catch(() => {})
     }
 
-    refreshAllRepos()
+    const schedulePoll = () => {
+      if (stopped) return
+      pollTimer = setTimeout(() => {
+        void refreshAllRepos().finally(schedulePoll)
+      }, pollMs)
+    }
+
+    void refreshAllRepos()
+    schedulePoll()
     checkRetirement()
-    const t = setInterval(() => {
-      refreshAllRepos()
-      checkRetirement()
-    }, 5_000)
-    return () => clearInterval(t)
+    const retirement = setInterval(checkRetirement, RETIREMENT_POLL_MS)
+
+    void (async () => {
+      for (;;) {
+        try {
+          await openSessionStream(
+            baseUrl,
+            {
+              onOpen: () => {
+                // The stream is the fast path now; polling drops back to a
+                // safety net for what shell rows cannot express.
+                pollMs = SAFETY_POLL_MS
+              },
+              onSnapshot: (rows) => {
+                const { map, stale } = applySessionSnapshot(shellSummaries.current, rows)
+                shellSummaries.current = map
+                publishSummaries(stale)
+              },
+              onDelta: (delta: SessionDelta) => {
+                const { map, stale } = applySessionDelta(shellSummaries.current, delta)
+                shellSummaries.current = map
+                publishSummaries(stale)
+              },
+            },
+            ac.signal,
+          )
+        } catch (err) {
+          if (isIntentionalAbort(err, ac.signal)) return
+        }
+        if (stopped || ac.signal.aborted) return
+        // No stream (older server, or it dropped): poll like before until one
+        // of the retries gets through.
+        pollMs = FALLBACK_POLL_MS
+        try {
+          await sleep(SESSION_STREAM_RETRY_MS, ac.signal)
+        } catch {
+          return
+        }
+      }
+    })()
+
+    return () => {
+      stopped = true
+      ac.abort()
+      clearInterval(retirement)
+      if (pollTimer != null) clearTimeout(pollTimer)
+      if (confirmTimer != null) clearTimeout(confirmTimer)
+    }
   }, [config, appMode, connectionState, refreshSessions, repos, moveToResolvedServer])
 
   // Bun replaced the installed Chunky server and resolved a new one; reattach
@@ -1004,32 +1224,35 @@ export function App() {
   // running state. That avoids replay/initial-load notifications and dots.
   useEffect(() => {
     if (appMode !== "live" || connectionState !== "connected") {
-      wasRunning.current.clear()
-      runningSince.current.clear()
-      backgroundWasRunning.current.clear()
-      backgroundRunningSince.current.clear()
+      selectedTracker.current = createCompletionTracker()
+      backgroundTracker.current = createCompletionTracker()
       return
     }
-    const next = new Map<string, boolean>()
-    const newlyDone: string[] = []
-    let completed = false
-    const now = Date.now()
-    for (const s of sessions) {
-      const isRunning =
-        s.sessionId === sessionId ? !isTreeIdle(transcript) : !!(s.busy ?? s.running)
-      const previous = wasRunning.current.get(s.sessionId)
-      if (isRunning && !previous) runningSince.current.set(s.sessionId, now)
-      if (previous && !isRunning) {
-        const since = runningSince.current.get(s.sessionId)
-        runningSince.current.delete(s.sessionId)
-        const qualifies = since != null && now - since >= MIN_COMPLETION_NOTIFY_MS
-        if (qualifies) completed = true
-        if (qualifies && s.sessionId !== sessionId) newlyDone.push(s.sessionId)
+    const { completed, done } = trackCompletions(
+      selectedTracker.current,
+      sessions.map((s) => ({
+        key: s.sessionId,
+        sessionId: s.sessionId,
+        // The attached session's live transcript is authoritative — EXCEPT
+        // while replay is in flight, when it is last-seen state and the
+        // server's own summary is the only honest answer.
+        running:
+          s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : isSessionBusy(s),
+      })),
+      Date.now(),
+      MIN_COMPLETION_NOTIFY_MS,
+    )
+    // Rows that left the list keep no bookkeeping: a session returning later
+    // must be observed running again before it can complete.
+    const present = new Set(sessions.map((s) => s.sessionId))
+    for (const key of [...selectedTracker.current.was.keys()]) {
+      if (!present.has(key)) {
+        selectedTracker.current.was.delete(key)
+        selectedTracker.current.since.delete(key)
       }
-      next.set(s.sessionId, isRunning)
     }
-    wasRunning.current = next
     if (completed) playCompletionHorn()
+    const newlyDone = done.filter((id) => id !== sessionId)
     setUnreadDone((prev) => {
       let changed = false
       const out = new Set(prev)
@@ -1037,7 +1260,7 @@ export function App() {
       if (sessionId && out.has(sessionId)) { out.delete(sessionId); changed = true }
       return changed ? out : prev
     })
-  }, [sessions, sessionId, transcript.status, appMode, connectionState])
+  }, [sessions, sessionId, transcript.status, appMode, connectionState, catchingUp])
 
   // Only ask a reachable live server once per app lifetime. Demo/offline mode
   // never touches onboarding endpoints.
@@ -1180,18 +1403,14 @@ export function App() {
         next.delete(id)
         return next
       })
-      const prefix = `${id}:`
-      for (const key of backgroundWasRunning.current.keys()) {
-        if (key.startsWith(prefix)) backgroundWasRunning.current.delete(key)
-      }
-      for (const key of backgroundRunningSince.current.keys()) {
-        if (key.startsWith(prefix)) backgroundRunningSince.current.delete(key)
-      }
+      // The repo becomes the selected one: its transitions move to the
+      // sidebar's own tracker, so its background bookkeeping is dropped.
+      forgetRepoTracking(backgroundTracker.current, id)
       setActiveRepoId(id)
       activeRepoIdRef.current = id
       rememberActiveRepo(id)
       // Drop current stream before loading the other repo's threads.
-      streamAbort.current?.abort()
+      stopStream()
       const cached = repoSessionCache.current.get(id)
       setSessions(cached ?? [])
       setSessionId(null)
@@ -1221,7 +1440,7 @@ export function App() {
         setActiveRepoId(openId)
         activeRepoIdRef.current = openId
         rememberActiveRepo(openId)
-        streamAbort.current?.abort()
+        stopStream()
         setSessions([])
         setSessionId(null)
         setTranscript(initialState)
@@ -1353,7 +1572,7 @@ export function App() {
           setActiveRepoId(openId)
           activeRepoIdRef.current = openId
           rememberActiveRepo(openId)
-          streamAbort.current?.abort()
+          stopStream()
           setSessions([])
           setSessionId(null)
           setTranscript(initialState)
@@ -1430,11 +1649,11 @@ export function App() {
    *  live transcript is authoritative; everything else uses the polled summary. */
   const isPrSessionBusy = useCallback(
     (id: string) => {
-      if (id === sessionId) return !isTreeIdle(transcript)
+      if (id === sessionId && !catchingUp) return !isTreeIdle(transcript)
       const summary = sessions.find((s) => s.sessionId === id)
-      return !!(summary?.busy ?? summary?.running)
+      return isSessionBusy(summary)
     },
-    [sessionId, transcript, sessions],
+    [sessionId, transcript, sessions, catchingUp],
   )
 
   /** Jump to the session a PR action started, switching repo tab if needed. */
@@ -1964,10 +2183,10 @@ export function App() {
   )
 
   const enterDemo = useCallback(() => {
-    streamAbort.current?.abort()
+    stopStream()
     setAppMode("demo")
     setConnectionState("offline")
-  }, [])
+  }, [stopStream])
 
   const retryLive = useCallback(async () => {
     if (!config) return
@@ -2290,6 +2509,7 @@ export function App() {
                 thread={activeThread}
                 streamingId={liveStreamingId}
                 loading={live && transcriptLoading}
+                catchingUp={live && catchingUp}
                 transcript={live ? transcript : undefined}
                 modelName={uiModel.name}
                 foldAll={foldThreads}
