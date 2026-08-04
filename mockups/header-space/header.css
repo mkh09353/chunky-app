@@ -1,0 +1,538 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Chunky — header strip mockups (light theme).
+   Tokens lifted verbatim from src/mainview/index.css (:root / light theme).
+   Geometry mirrors src/mainview/components/ChatView.tsx (ChatTopBar) and
+   src/mainview/components/RepoTabs.tsx.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: light;
+  --radius: 0.7rem;
+
+  --background: oklch(0.991 0.003 300);
+  --foreground: oklch(0.26 0.02 296);
+  --card: oklch(1 0 0);
+  --popover: oklch(1 0 0);
+
+  --primary: oklch(0.53 0.208 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+
+  --secondary: oklch(0.965 0.006 300);
+  --muted: oklch(0.968 0.005 300);
+  --muted-foreground: oklch(0.53 0.02 296);
+  --accent: oklch(0.955 0.012 298);
+  --accent-foreground: oklch(0.28 0.03 296);
+
+  --destructive: oklch(0.58 0.22 25);
+  --success: oklch(0.62 0.15 155);
+  --warning: oklch(0.7 0.16 70);
+  --info: oklch(0.6 0.16 250);
+
+  --border: oklch(0.92 0.008 298);
+  --input: oklch(0.9 0.01 298);
+  --ring: oklch(0.53 0.208 293);
+
+  --sidebar: oklch(0.972 0.005 300);
+  --sidebar-foreground: oklch(0.26 0.02 296);
+  --sidebar-border: oklch(0.92 0.008 298);
+  --sidebar-accent: oklch(0.94 0.014 298);
+
+  --shadow-color: 296 40% 30%;
+
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace;
+
+  /* Real app measurements. */
+  --sidebar-w: 288px; /* Sidebar: w-72 */
+  --strip-h: 52px; /* ChatTopBar: h-[52px] */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv01", "cv02", "ss01";
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── page scaffolding (mockup chrome, not app UI) ─────────────────────────── */
+
+.page {
+  padding: 44px 32px 80px;
+}
+
+.page-head {
+  max-width: 78ch;
+  margin: 0 0 40px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-size: 13px;
+}
+.brand .mark {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  background: var(--primary);
+}
+
+h1 {
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 18px 0 10px;
+}
+
+.lede {
+  color: var(--muted-foreground);
+  margin: 0 0 6px;
+}
+
+.meta {
+  color: var(--muted-foreground);
+  opacity: 0.75;
+  font-size: 12px;
+  margin: 10px 0 0;
+}
+
+.specimen {
+  margin: 0 0 44px;
+}
+
+.specimen-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  background: var(--muted);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.tag.now {
+  color: var(--muted-foreground);
+}
+.tag.pick {
+  color: var(--primary);
+  border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+}
+
+.specimen-head h2 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.caption {
+  color: var(--muted-foreground);
+  margin: 0 0 14px;
+  max-width: 96ch;
+  font-size: 12.5px;
+}
+.caption b {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+/* ── the window: L-shaped chrome (sidebar + top strip) over the content panel ─ */
+
+.window {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--sidebar);
+  color: var(--sidebar-foreground);
+  box-shadow:
+    0 1px 2px -1px hsl(var(--shadow-color) / 0.18),
+    0 8px 24px -12px hsl(var(--shadow-color) / 0.28);
+}
+
+/* .chunky-aurora from index.css */
+.window::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(60% 55% at 50% 0%, color-mix(in oklch, var(--primary) 22%, transparent), transparent 70%),
+    radial-gradient(40% 40% at 85% 20%, color-mix(in oklch, var(--info) 10%, transparent), transparent 60%);
+}
+
+.window-row {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+/* Stand-in for the real Sidebar (w-72). Present so "centered relative to the
+   window" in variant 4 is measured honestly. */
+.sidebar-stub {
+  position: relative;
+  width: var(--sidebar-w);
+  flex: none;
+  height: var(--strip-h);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+}
+.sidebar-stub .logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--primary) 20%, transparent);
+  background: color-mix(in oklab, var(--primary) 10%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.sidebar-stub .logo span {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, var(--primary), oklch(0.58 0.2 320));
+}
+.sidebar-stub .name {
+  font-weight: 600;
+  font-size: 13.5px;
+  letter-spacing: -0.01em;
+}
+.sidebar-stub .sub {
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+}
+
+/* The strip itself — ChatTopBar: h-[52px] items-center gap-3 px-4 */
+.strip {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--strip-h);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+}
+
+/* Sliver of the inset chat workspace under the chrome (content-panel). */
+.panel-sliver {
+  position: relative;
+  height: 34px;
+  margin-left: var(--sidebar-w);
+  background: var(--background);
+  border-top-left-radius: 24px;
+  box-shadow:
+    inset 1px 1px 0 0 color-mix(in oklch, var(--foreground) 7%, transparent),
+    -10px -6px 28px -14px hsl(var(--shadow-color) / 0.22),
+    0 0 0 1px color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+/* ── repo tabs (RepoTabs.tsx) ─────────────────────────────────────────────── */
+
+.repo-tabs {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px; /* gap-1.5 between tablist and + */
+}
+
+.tablist {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px; /* gap-0.5 */
+  overflow: hidden;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 28px; /* h-7 */
+  max-width: 176px; /* max-w-[11rem] */
+  padding: 0 28px 0 8px; /* px-2 + pr-7 (close affordance) */
+  border: 0;
+  border-radius: 6px; /* rounded-md */
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  white-space: nowrap;
+}
+.tab .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tab svg {
+  flex: none;
+  opacity: 0.8;
+}
+.tab.active {
+  background: color-mix(in oklch, var(--background) 80%, transparent);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px 0 hsl(var(--shadow-color) / 0.12);
+}
+.tab .dot-unread {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--primary);
+}
+.tab .close {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: inherit;
+  opacity: 0;
+}
+.tab.active .close {
+  opacity: 0.7;
+}
+
+/* Variant 2: no tab clamp — long names show in full. */
+.tabs-breathe .tab {
+  max-width: none;
+}
+
+/* ghost icon button — Button variant="ghost" size="icon-sm" (size-7) */
+.icon-btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: default;
+}
+.icon-btn.hovered {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+/* ── branch pill (GitToolbar in GitPanel.tsx) ─────────────────────────────── */
+
+.branch {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  max-width: 208px; /* max-w-[13rem] */
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-family: inherit;
+  font-weight: 400;
+  cursor: default;
+}
+.branch .name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch .ahead {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── drag spacer + right cluster ──────────────────────────────────────────── */
+
+.drag-spacer {
+  position: relative;
+  height: 100%;
+  min-width: 48px; /* min-w-12 */
+  flex: 1 1 auto;
+}
+
+.cluster {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px; /* gap-1.5 */
+}
+
+/* ── variant 4: centered session title ────────────────────────────────────── */
+
+/* Spans the whole window row, so the title centers on the WINDOW, exactly like
+   a macOS document window title — not on the leftover space. */
+.title-layer {
+  position: absolute;
+  inset: 0;
+  height: var(--strip-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* Collision fallback: when the tab row already reaches window centre, the title
+   yields and centres inside the leftover band instead (it lives in the drag
+   spacer, so it can never sit under a tab). */
+.drag-spacer .title-layer {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}
+
+.session-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 34ch;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  pointer-events: auto;
+}
+.session-title .text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-title .status {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 14%, transparent);
+}
+.session-title.hovered {
+  background: color-mix(in oklch, var(--background) 60%, transparent);
+  color: var(--foreground);
+}
+
+/* ── mockup annotations ───────────────────────────────────────────────────── */
+
+.free-space {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  border-radius: 6px;
+  border: 1px dashed color-mix(in oklch, var(--foreground) 16%, transparent);
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: color-mix(in oklch, var(--foreground) 45%, transparent);
+  pointer-events: none;
+}
+
+.center-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: color-mix(in oklch, var(--primary) 30%, transparent);
+  pointer-events: none;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--muted-foreground);
+}
+.legend .swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend .swatch i {
+  width: 22px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px dashed color-mix(in oklch, var(--foreground) 20%, transparent);
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+}
+.legend .swatch i.line {
+  width: 2px;
+  height: 12px;
+  border: 0;
+  border-radius: 0;
+  background: color-mix(in oklch, var(--primary) 40%, transparent);
+}
+
+.annot-off .free-space,
+.annot-off .center-mark {
+  display: none;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 26px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+  cursor: pointer;
+}
+.toolbar a {
+  color: var(--primary);
+  text-decoration: none;
+}
+.toolbar a:hover {
+  text-decoration: underline;
+}

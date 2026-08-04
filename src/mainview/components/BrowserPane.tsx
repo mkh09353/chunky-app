@@ -1,9 +1,18 @@
 import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { FormEvent } from "react"
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
+import {
+  clampPaneWidth,
+  MIN_PANE_WIDTH,
+  maxPaneWidth,
+  persistPaneWidth,
+  readPaneWidth,
+  readPreferredPaneWidth,
+} from "~/lib/browserPaneWidth"
 import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browserNav"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { Button } from "./ui/button"
 
 const LAST_URL_KEY = "chunky.browser.lastUrl"
@@ -275,6 +284,119 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
   // cannot be told anything useful before that.
   const [paneLive, setPaneLive] = useState(false)
 
+  // ── Pane width ───────────────────────────────────────────────────────────
+  const [paneWidth, setPaneWidth] = useState(() => readPaneWidth(window.innerWidth))
+  const [maxWidth, setMaxWidth] = useState(() => maxPaneWidth(window.innerWidth))
+  const [resizing, setResizing] = useState(false)
+  const widthRef = useRef(paneWidth)
+  // The width the user actually asked for, which may be wider than what fits
+  // right now. Resizing the window clamps the pane against this, so a spell in
+  // a small window does not quietly shrink the preference.
+  const preferredRef = useRef(readPreferredPaneWidth(window.innerWidth))
+  const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
+  const syncFrameRef = useRef(0)
+
+  /**
+   * Push the pane's current geometry to the native side.
+   *
+   * Electrobun already keeps the overlay in step on its own — its
+   * OverlaySyncController watches the `<electrobun-webview>` element with a
+   * ResizeObserver and re-syncs on a 100ms poll — so this is not what makes
+   * resizing *work*; it is what makes it look attached. Forcing a sync per
+   * animation frame while dragging replaces the poll's visible lag with the
+   * native view tracking the divider.
+   */
+  const scheduleOverlaySync = useCallback(() => {
+    if (syncFrameRef.current) return
+    syncFrameRef.current = requestAnimationFrame(() => {
+      syncFrameRef.current = 0
+      webviewRef.current?.syncDimensions(true)
+    })
+  }, [])
+
+  const applyWidth = useCallback((next: number) => {
+    setPaneWidth((current) => {
+      const clamped = clampPaneWidth(next, window.innerWidth)
+      return clamped === current ? current : clamped
+    })
+  }, [])
+
+  // One place that reacts to the width actually changing, whatever moved it —
+  // drag, arrow key, or the window getting smaller.
+  useEffect(() => {
+    widthRef.current = paneWidth
+    scheduleOverlaySync()
+  }, [paneWidth, scheduleOverlaySync])
+
+  useEffect(() => () => {
+    if (syncFrameRef.current) cancelAnimationFrame(syncFrameRef.current)
+  }, [])
+
+  // A window that shrank must not leave the pane owning more than its share —
+  // and growing it again gives the chosen width back. Deliberately not
+  // persisted: only the user picks a new preference.
+  useEffect(() => {
+    const onResize = () => {
+      setMaxWidth(maxPaneWidth(window.innerWidth))
+      applyWidth(preferredRef.current)
+    }
+    window.addEventListener("resize", onResize)
+    return () => window.removeEventListener("resize", onResize)
+  }, [applyWidth])
+
+  /**
+   * The native child webview is composited ABOVE the host DOM and is a plain
+   * NSView, so while the cursor is over it the renderer sees no mouse events at
+   * all — no DOM shield at any z-index can catch them. Passthrough is the only
+   * thing that keeps a drag alive across the pane: it makes the native view
+   * ignore hit tests, so events reach the host webview (and, via pointer
+   * capture, the divider). It is a hit-testing change only — the page keeps
+   * painting, so nothing flickers.
+   */
+  const setDragCaptureMode = useCallback((dragging: boolean) => {
+    webviewRef.current?.togglePassthrough(dragging)
+  }, [])
+
+  const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: widthRef.current }
+    setResizing(true)
+    setDragCaptureMode(true)
+  }
+
+  const moveResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    // The divider is on the pane's left edge, so dragging left widens it.
+    applyWidth(drag.startWidth - (event.clientX - drag.startX))
+  }
+
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    dragRef.current = null
+    setResizing(false)
+    setDragCaptureMode(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    preferredRef.current = widthRef.current
+    persistPaneWidth(widthRef.current)
+    webviewRef.current?.syncDimensions(true)
+  }
+
+  const onDividerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+    event.preventDefault()
+    const step = (event.shiftKey ? 64 : 16) * (event.key === "ArrowLeft" ? 1 : -1)
+    const next = clampPaneWidth(widthRef.current + step, window.innerWidth)
+    applyWidth(next)
+    preferredRef.current = next
+    persistPaneWidth(next)
+  }
+
   const syncHistory = useCallback((webview: ElectrobunWebviewElement) => {
     void Promise.all([webview.canGoBack(), webview.canGoForward()])
       .then(([back, forward]) => {
@@ -431,9 +553,41 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
 
   return (
     <aside
-      className="flex min-h-0 min-w-[20rem] basis-[44%] flex-col border-border/70 border-l bg-background/70"
+      className="relative flex min-h-0 min-w-[20rem] flex-none flex-col border-border/70 border-l bg-background/70"
+      style={{ width: paneWidth }}
       aria-label="Browser pane"
     >
+      {/* Resize handle. It reaches further OUT than in on purpose: the half
+          lying over the pane is dead once the native webview is composited on
+          top of it, so the grabbable strip is the half over the chat side. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize browser pane"
+        aria-valuenow={Math.round(paneWidth)}
+        aria-valuemin={MIN_PANE_WIDTH}
+        aria-valuemax={maxWidth}
+        tabIndex={0}
+        onPointerDown={beginResize}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+        onKeyDown={onDividerKeyDown}
+        className={cn(
+          NO_DRAG_REGION,
+          "group absolute inset-y-0 -left-2 z-30 w-4 cursor-col-resize touch-none outline-none",
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-y-0 left-2 w-px transition-colors",
+            resizing
+              ? "bg-primary"
+              : "bg-transparent group-hover:bg-primary/60 group-focus-visible:bg-primary/60",
+          )}
+        />
+      </div>
       <form className="no-drag flex h-[52px] shrink-0 items-center gap-1 border-border/70 border-b px-2" onSubmit={submit}>
         <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoBack} onClick={() => { setLoading(true); webviewRef.current?.goBack() }} aria-label="Back">
           <ArrowLeft />
@@ -464,8 +618,16 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-muted/30">
         {available ? (
-          // The native webview is composited over this box; it must stay empty.
-          <div ref={hostRef} className="absolute inset-0" />
+          // The native webview is composited over this box; it must stay empty
+          // of anything meant to be SEEN (the native view paints over it).
+          <div ref={hostRef} className="absolute inset-0">
+            {/* Drag shield. It has to live inside the host, not beside it:
+                `paneCovered` treats any element it does not contain as an
+                overlay and hides the native view, which would blank the page
+                for the whole drag. Inside, `host.contains(...)` is true, so the
+                page keeps painting while the cursor stays col-resize. */}
+            {resizing ? <div className="absolute inset-0 z-10 cursor-col-resize" /> : null}
+          </div>
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-7 text-center">
             <div className="flex size-10 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary"><Globe2 className="size-5" /></div>

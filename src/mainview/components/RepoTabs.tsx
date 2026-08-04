@@ -541,7 +541,13 @@ export function RepoTabs({
                 disabled={disabled || busy}
                 onClick={() => onSelect(r.id)}
                 className={cn(
-                  "inline-flex h-7 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-[12px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                  // No tight clamp: at fullscreen width the strip has hundreds
+                  // of px of slack, so a long repo name should simply read in
+                  // full. The ceiling only stops one absurd name from eating
+                  // the row; when the row does outgrow the space it scrolls
+                  // (the tablist is `min-w-0 overflow-x-auto`) rather than
+                  // pushing the branch pill or the action cluster out.
+                  "inline-flex h-7 max-w-[22rem] cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-[12px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                   repos.length > 1 && "pr-7",
                   active
                     ? "bg-background/80 text-foreground shadow-xs"
