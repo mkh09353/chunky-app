@@ -21,10 +21,12 @@ export interface DesktopUiState {
   lastSessionByRepo: Record<string, string>
   /** Composer quick keys. Durable config: never mirrored to localStorage. */
   quickKeys: QuickKey[]
-  sessionShelves: Record<string, ShelfPin>
   /** Sidebar display-name override, or "" for none (use the git name).
    *  Durable config, like the quick keys: desktop.json is its only home. */
   displayName: string
+  /** Session id -> the user's explicit sidebar shelf choice. Durable, because
+   *  the protocol has no settled lifecycle and this is the only record of it. */
+  sessionShelves: Record<string, ShelfPin>
 }
 
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
@@ -121,6 +123,8 @@ function parseState(value: unknown): DesktopUiState | null {
   }
   const state = emptyState()
   state.quickKeys = cleanQuickKeys(raw.quickKeys)
+  // Bun bounds and validates these too; re-parsing here keeps the renderer
+  // honest about a shape it is about to classify threads with.
   state.sessionShelves = shelfPinsToRecord(
     shelfPinsFromRecord(raw.sessionShelves as Record<string, ShelfPin> | undefined),
   )
@@ -189,8 +193,8 @@ let pending: {
   activeRepoId?: string | null
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
-  sessionShelves?: Record<string, ShelfPin>
   displayName?: string
+  sessionShelves?: Record<string, ShelfPin>
 } = {}
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let hideHooked = false
@@ -207,8 +211,8 @@ function queue(patch: {
   activeRepoId?: string | null
   lastSessionByRepo?: Record<string, string>
   quickKeys?: QuickKey[]
-  sessionShelves?: Record<string, ShelfPin>
   displayName?: string
+  sessionShelves?: Record<string, ShelfPin>
 }): void {
   pending = { ...pending, ...patch }
   if (!nativeRpcAvailable()) {
@@ -299,12 +303,25 @@ export function displayNameSnapshot(): string {
 }
 
 /** Persist the display-name override. "" (or whitespace) clears it, which Bun
- *  publishes by deleting the key: the sidebar falls back to the git name. */
+ *  publishes by deleting the key — the sidebar falls back to the git name. */
 export function saveDisplayName(name: string): void {
   const state = ensureSeed()
   const next = name.trim()
   state.displayName = next
   queue({ displayName: next })
+}
+
+/** The shelf pins last read from (or written to) desktop.json. */
+export function sessionShelvesSnapshot(): Record<string, ShelfPin> {
+  return ensureSeed().sessionShelves
+}
+
+/** Persist the whole pin map; the Bun writer merges it into the file. An empty
+ *  map is stored as absence, which is what "nothing is pinned" means. */
+export function saveSessionShelves(pins: ReadonlyMap<string, ShelfPin>): void {
+  const state = ensureSeed()
+  state.sessionShelves = shelfPinsToRecord(pins)
+  queue({ sessionShelves: state.sessionShelves })
 }
 
 /** Test-only: forget the process cache and any queued write. */
@@ -317,16 +334,4 @@ export function resetDesktopUiStateForTest(): void {
     clearTimeout(flushTimer)
     flushTimer = null
   }
-}
-
-/** The shelf pins last read from (or written to) desktop.json. */
-export function sessionShelvesSnapshot(): Record<string, ShelfPin> {
-  return ensureSeed().sessionShelves
-}
-
-/** Persist the complete shelf-pin map. */
-export function saveSessionShelves(pins: ReadonlyMap<string, ShelfPin>): void {
-  const state = ensureSeed()
-  state.sessionShelves = shelfPinsToRecord(pins)
-  queue({ sessionShelves: state.sessionShelves })
 }

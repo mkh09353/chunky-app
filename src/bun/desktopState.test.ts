@@ -188,10 +188,10 @@ describe("merge-on-write", () => {
       expect(readDesktopState(env).displayName?.length).toBe(40)
 
       // 40 ZWJ families: a UTF-16 cap would slice one into replacement glyphs.
-      mergeDesktopState({ displayName: "👩\u200d👩\u200d👧\u200d👦".repeat(50) }, env)
+      mergeDesktopState({ displayName: "\u{1F469}‍\u{1F469}‍\u{1F467}‍\u{1F466}".repeat(50) }, env)
       const emoji = readDesktopState(env).displayName ?? ""
       expect(emoji).not.toContain("�")
-      expect(emoji.endsWith("👦")).toBe(true)
+      expect(emoji.endsWith("\u{1F466}")).toBe(true)
 
       // A non-string is not an override.
       mergeDesktopState({ displayName: 42 as unknown as string }, env)

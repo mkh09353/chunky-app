@@ -395,8 +395,8 @@ export function App() {
     void loadDesktopUiState().then((ui) => {
       if (cancelled) return
       setQuickKeys(ui.quickKeys)
-      setShelfPins(shelfPinsFromRecord(ui.sessionShelves))
       setNameOverride(ui.displayName)
+      setShelfPins(shelfPinsFromRecord(ui.sessionShelves))
     })
     return () => {
       cancelled = true
@@ -658,7 +658,7 @@ export function App() {
     return sessionWorkspace || activeRepo?.path || workspace || config?.workspace || undefined
   }, [live, sessions, sessionId, activeRepo, workspace, config])
 
-  // Sidebar identity: the user's git display name (name only, never the email),
+  // Sidebar identity: the user's git display name (name only — never the email),
   // read from whichever git directory the window is pointed at so a per-repo
   // override wins. "" everywhere it can't be read; Sidebar turns that into the
   // neutral "Chunky" fallback.
@@ -1733,6 +1733,9 @@ export function App() {
     (id: string, settled: boolean) => {
       if (!live) return
       const summary = sessions.find((s) => s.sessionId === id)
+      // A running thread is handed straight back by the busy rule, so filing
+      // one away would be a no-op the user could not explain. The row disables
+      // the action; this is the guard behind it.
       if (settled && summary && isSessionBusy(summary)) return
       const next = new Map(shelfPins)
       next.set(id, { shelf: settled ? "settled" : "active", at: summary?.lastActivity ?? 0 })

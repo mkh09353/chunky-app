@@ -33,6 +33,9 @@ export interface DesktopQuickKey {
   hotkey: string
 }
 
+/** An explicit sidebar shelf choice for one session: the working list, or
+ *  history. Watermarked with the session's `lastActivity` at the moment the
+ *  choice was made, so the renderer can retire it once real work happens. */
 export interface DesktopShelfPin {
   shelf: "settled" | "active"
   at: number
@@ -47,11 +50,13 @@ export interface DesktopState {
   lastSessionByRepo?: Record<string, string>
   /** User-configured composer quick keys, in display order. */
   quickKeys?: DesktopQuickKey[]
-  /** Explicit per-device sidebar shelf choices. */
-  sessionShelves?: Record<string, DesktopShelfPin>
   /** Optional sidebar display name, overriding the git-derived one. Absent
-   *  means "no override" - an empty value is deleted, never stored as "". */
+   *  means "no override" — an empty value is deleted, never stored as "". */
   displayName?: string
+  /** Session id -> the user's explicit shelf choice. Absent means the sidebar
+   *  decides for itself. There is no server-side settled lifecycle, so this
+   *  per-device pin is the only record of the choice. */
+  sessionShelves?: Record<string, DesktopShelfPin>
 }
 
 /** Bounds so a malformed or hostile renderer can't grow the file without end. */
@@ -65,7 +70,7 @@ const MAX_QUICK_KEY_LABEL = 40
 const MAX_QUICK_KEY_PROMPT = 4000
 /** Absurdity guard applied before the (more expensive) grapheme pass. */
 const MAX_QUICK_KEY_UNITS = 16_000
-/** A sidebar name, bounded like a quick-key label: the same kind of short,
+/** A sidebar name, bounded like a quick-key label — the same kind of short,
  *  human-facing string in a narrow row. Graphemes, so an emoji stays whole. */
 const MAX_DISPLAY_NAME = 40
 
@@ -91,6 +96,8 @@ function cleanSessionMap(value: unknown): Record<string, string> | undefined {
   return out
 }
 
+/** Keep the well-formed shelf pins, drop the rest. Bounded like the session
+ *  map: a pin is one small row per session the user has filed by hand. */
 function cleanShelfPins(value: unknown): Record<string, DesktopShelfPin> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
   const out: Record<string, DesktopShelfPin> = {}
@@ -101,9 +108,9 @@ function cleanShelfPins(value: unknown): Record<string, DesktopShelfPin> | undef
     if (!sessionId || !raw || typeof raw !== "object" || Array.isArray(raw)) continue
     const pin = raw as Record<string, unknown>
     if (pin.shelf !== "settled" && pin.shelf !== "active") continue
-    const at = typeof pin.at === "number" && Number.isFinite(pin.at)
-      ? Math.max(0, Math.floor(pin.at))
-      : 0
+    // A missing/rubbish watermark reads as 0, which makes the pin retire on the
+    // session's next observed activity rather than sticking forever.
+    const at = typeof pin.at === "number" && Number.isFinite(pin.at) ? Math.max(0, Math.floor(pin.at)) : 0
     out[sessionId] = { shelf: pin.shelf, at }
     count++
   }
@@ -178,10 +185,10 @@ export function readDesktopState(env: NodeJS.ProcessEnv = process.env): DesktopS
     if (sessions) state.lastSessionByRepo = sessions
     const quickKeys = cleanQuickKeys(raw.quickKeys)
     if (quickKeys && quickKeys.length > 0) state.quickKeys = quickKeys
-    const shelves = cleanShelfPins(raw.sessionShelves)
-    if (shelves && Object.keys(shelves).length > 0) state.sessionShelves = shelves
     const displayName = cleanDisplayName(raw.displayName)
     if (displayName) state.displayName = displayName
+    const sessionShelves = cleanShelfPins(raw.sessionShelves)
+    if (sessionShelves && Object.keys(sessionShelves).length > 0) state.sessionShelves = sessionShelves
     return state
   } catch {
     return {}
@@ -219,16 +226,18 @@ export function mergeDesktopState(
     if (quickKeys && quickKeys.length > 0) next.quickKeys = quickKeys
     else delete next.quickKeys
   }
-  if (patch.sessionShelves !== undefined) {
-    const shelves = cleanShelfPins(patch.sessionShelves)
-    if (shelves && Object.keys(shelves).length > 0) next.sessionShelves = shelves
-    else delete next.sessionShelves
-  }
   if (patch.displayName !== undefined) {
     // Empty (or whitespace-only) clears the override, restoring the git name.
     const displayName = cleanDisplayName(patch.displayName)
     if (displayName) next.displayName = displayName
     else delete next.displayName
+  }
+  if (patch.sessionShelves !== undefined) {
+    // The renderer owns the whole map, so a patch replaces it wholesale; an
+    // empty map means "nothing is pinned" and is stored as absence.
+    const shelves = cleanShelfPins(patch.sessionShelves)
+    if (shelves && Object.keys(shelves).length > 0) next.sessionShelves = shelves
+    else delete next.sessionShelves
   }
 
   const path = desktopStatePath(env)

@@ -93,6 +93,8 @@ function ThreadRow({
   showProject?: boolean
 }) {
   const unread = unreadMarked ?? (thread.status.kind === "done" && thread.status.unread === true)
+  // A running thread has no shelf actions and no read state to set: it is busy,
+  // and the lifecycle rules would hand it straight back anyway.
   const canMarkUnread = thread.status.kind !== "working"
   const canChangeShelf = thread.status.kind !== "working"
   const dotStatus: ThreadStatus = unread ? { kind: "done", unread: true } : thread.status
@@ -126,6 +128,8 @@ function ThreadRow({
         onDoubleClick={() => onRename?.()}
         className={cn(
           "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          // History is read at a glance, so it gives back a little height and
+          // contrast. The working list stays at full presentation.
           settled ? "py-1" : "py-1.5",
           active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
         )}
@@ -267,7 +271,7 @@ export function Sidebar({
   onOpenPalette: () => void
   /** Optional live/demo connection badge in the footer. */
   connectionLabel?: string
-  /** The user's git display name, resolved by App. Absent/empty means "Chunky".
+  /** The user's git display name, resolved by App. Absent/empty → "Chunky".
    *  This row never fetches it itself. */
   displayName?: string
   onRenameThread?: (id: string) => void
@@ -275,7 +279,8 @@ export function Sidebar({
   onThreadUnreadChange?: (id: string, unread: boolean) => void
   /** Canonical markers can outlive the row's presentation status (active settled/idle). */
   unreadThreadIds?: Set<string>
-  /** Threads on the history shelf, decided by lifecycle rather than status. */
+  /** Threads on the history shelf, decided by the lifecycle classifier rather
+   *  than by presentation status. Absent (demo) → fall back to "done". */
   settledThreadIds?: Set<string>
   /** File a thread into history, or pull it back into the working list. */
   onThreadSettledChange?: (id: string, settled: boolean) => void
@@ -291,10 +296,19 @@ export function Sidebar({
     [projects],
   )
 
-  // Settled recedes into history but remains listed; archived stays hidden.
+  // Two different things, deliberately kept apart: SETTLED recedes into the
+  // history shelf but is still listed, ARCHIVED disappears from the sidebar
+  // until its section is opened. Archiving is a local view filter that composes
+  // with search: the archived section shows only archived threads that also
+  // match the query.
+  //
+  // Shelf membership comes from the lifecycle classifier (App), never from the
+  // row's presentation status — a finished-but-unread run is presented as done
+  // and still belongs in the working list. Demo mode has no classifier, so it
+  // keeps the old status-shaped split.
   const isSettled = useCallback(
-    (thread: Thread) =>
-      settledThreadIds ? settledThreadIds.has(thread.id) : thread.status.kind === "done",
+    (t: Thread) =>
+      settledThreadIds ? settledThreadIds.has(t.id) : t.status.kind === "done",
     [settledThreadIds],
   )
 
@@ -523,7 +537,7 @@ export function Sidebar({
           <span className="truncate font-medium text-[13px]">
             {resolveDisplayName(displayName)}
           </span>
-          {/* Only a real status line here: with no connection to report the row
+          {/* Only a real status line here — with no connection to report the row
               is just the name, never an invented plan or tier. */}
           {connectionLabel && (
             <span className="truncate text-[11px] text-muted-foreground">

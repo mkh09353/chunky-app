@@ -61,8 +61,8 @@ describe("legacy localStorage values", () => {
       activeRepoId: "r1",
       lastSessionByRepo: { r1: "s1", r2: "s2" },
       quickKeys: [],
-      sessionShelves: {},
       displayName: "",
+      sessionShelves: {},
     })
     expect(desktopUiSnapshot().activeRepoId).toBe("r1")
   })
@@ -73,8 +73,8 @@ describe("legacy localStorage values", () => {
       activeRepoId: null,
       lastSessionByRepo: {},
       quickKeys: [],
-      sessionShelves: {},
       displayName: "",
+      sessionShelves: {},
     })
     reset({ [LAST_SESSION_KEY]: JSON.stringify({ r1: 7, r2: "s2" }) })
     expect(readLegacyUiState().lastSessionByRepo).toEqual({ r2: "s2" })
@@ -88,8 +88,8 @@ describe("without the native bridge", () => {
       activeRepoId: "r9",
       lastSessionByRepo: {},
       quickKeys: [],
-      sessionShelves: {},
       displayName: "",
+      sessionShelves: {},
     })
   })
 
@@ -155,6 +155,36 @@ describe("quick keys", () => {
   })
 })
 
+describe("display name override", () => {
+  test("starts empty and reads back what was saved", () => {
+    expect(displayNameSnapshot()).toBe("")
+    saveDisplayName("Ada Lovelace")
+    expect(displayNameSnapshot()).toBe("Ada Lovelace")
+    expect(desktopUiSnapshot().displayName).toBe("Ada Lovelace")
+  })
+
+  test("is trimmed, and whitespace-only clears the override", () => {
+    saveDisplayName("  Ada Lovelace ")
+    expect(displayNameSnapshot()).toBe("Ada Lovelace")
+    saveDisplayName("   ")
+    expect(displayNameSnapshot()).toBe("")
+  })
+
+  test("an empty save clears it", () => {
+    saveDisplayName("Ada Lovelace")
+    saveDisplayName("")
+    expect(displayNameSnapshot()).toBe("")
+    expect(desktopUiSnapshot().displayName).toBe("")
+  })
+
+  test("is never mirrored into localStorage — desktop.json owns it", () => {
+    saveDisplayName("Ada Lovelace")
+    rememberActiveRepo("r1")
+    rememberLastSession("r1", "s1")
+    expect(JSON.stringify(store.data)).not.toContain("Ada")
+  })
+})
+
 describe("session shelf pins", () => {
   test("start empty and read back what was saved", () => {
     expect(sessionShelvesSnapshot()).toEqual({})
@@ -185,35 +215,5 @@ describe("session shelf pins", () => {
     rememberActiveRepo("r1")
     rememberLastSession("r1", "s1")
     expect(JSON.stringify(store.data)).not.toContain("session-abc")
-  })
-})
-
-describe("display name override", () => {
-  test("starts empty and reads back what was saved", () => {
-    expect(displayNameSnapshot()).toBe("")
-    saveDisplayName("Ada Lovelace")
-    expect(displayNameSnapshot()).toBe("Ada Lovelace")
-    expect(desktopUiSnapshot().displayName).toBe("Ada Lovelace")
-  })
-
-  test("is trimmed, and whitespace-only clears the override", () => {
-    saveDisplayName("  Ada Lovelace ")
-    expect(displayNameSnapshot()).toBe("Ada Lovelace")
-    saveDisplayName("   ")
-    expect(displayNameSnapshot()).toBe("")
-  })
-
-  test("an empty save clears it", () => {
-    saveDisplayName("Ada Lovelace")
-    saveDisplayName("")
-    expect(displayNameSnapshot()).toBe("")
-    expect(desktopUiSnapshot().displayName).toBe("")
-  })
-
-  test("is never mirrored into localStorage, desktop.json owns it", () => {
-    saveDisplayName("Ada Lovelace")
-    rememberActiveRepo("r1")
-    rememberLastSession("r1", "s1")
-    expect(JSON.stringify(store.data)).not.toContain("Ada")
   })
 })
