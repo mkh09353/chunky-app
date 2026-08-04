@@ -268,8 +268,9 @@ export function App() {
   const [appMode, setAppMode] = useState<AppMode>("live")
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
-  // Sessions whose run finished while they weren't being viewed: their rows
-  // show "Done" with an unread dot until selected.
+  // Sessions to revisit: completion adds unselected rows automatically, and a
+  // row context menu can add/remove the same marker manually. Clicking a row
+  // acknowledges and clears its marker, including the already-active row.
   const [unreadDone, setUnreadDone] = useState<Set<string>>(new Set())
   const selectedTracker = useRef(createCompletionTracker())
   // Sessions outside the selected repo are not in `sessions`, so their
@@ -1257,7 +1258,6 @@ export function App() {
       let changed = false
       const out = new Set(prev)
       for (const id of newlyDone) if (!out.has(id)) { out.add(id); changed = true }
-      if (sessionId && out.has(sessionId)) { out.delete(sessionId); changed = true }
       return changed ? out : prev
     })
   }, [sessions, sessionId, transcript.status, appMode, connectionState, catchingUp])
@@ -1588,8 +1588,23 @@ export function App() {
 
   const handleSelectThread = useCallback(
     (id: string) => {
+      // Selecting a row is an explicit acknowledgement, including when the
+      // already-open row was manually marked unread from its context menu.
+      setUnreadDone((prev) => {
+        if (!prev.has(id)) return prev
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
       if (!live) {
         stopDemoStream()
+        setDemoThreads((prev) =>
+          prev.map((thread) =>
+            thread.id === id && thread.status.kind === "done" && thread.status.unread
+              ? { ...thread, status: { ...thread.status, unread: false } }
+              : thread,
+          ),
+        )
         setDemoActiveId(id)
         return
       }
@@ -1597,6 +1612,30 @@ export function App() {
       void attachSession(config.baseUrl, id)
     },
     [live, stopDemoStream, config, sessionId, attachSession],
+  )
+
+  const handleThreadUnreadChange = useCallback(
+    (id: string, unread: boolean) => {
+      if (!live) {
+        setDemoThreads((prev) =>
+          prev.map((thread) =>
+            thread.id === id && thread.status.kind === "done"
+              ? { ...thread, status: { ...thread.status, unread } }
+              : thread,
+          ),
+        )
+        return
+      }
+      setUnreadDone((prev) => {
+        const alreadyUnread = prev.has(id)
+        if (alreadyUnread === unread) return prev
+        const next = new Set(prev)
+        if (unread) next.add(id)
+        else next.delete(id)
+        return next
+      })
+    },
+    [live],
   )
 
   // ---- PR reviews ---------------------------------------------------------
@@ -2451,6 +2490,8 @@ export function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
+          onThreadUnreadChange={handleThreadUnreadChange}
+          unreadThreadIds={live ? unreadDone : undefined}
           prWidget={
             live && !prUnsupported ? (
               <PrWidget

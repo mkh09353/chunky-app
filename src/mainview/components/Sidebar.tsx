@@ -2,11 +2,19 @@ import {
   Archive,
   ArchiveRestore,
   ChevronDown,
+  Mail,
+  MailOpen,
   PenSquare,
   Search,
   Settings,
 } from "lucide-react"
-import { useMemo, useState, type ReactNode } from "react"
+import {
+  useCallback,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { collapseList } from "~/lib/sessionList"
@@ -15,12 +23,18 @@ import { DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "./ui/dropdown-menu"
 
 /** The row's whole status, in six pixels.
  *
  *  A running session pulses; a finished one the reader hasn't looked at yet
  *  keeps a solid dot until they select it (the unread rule lives in App: set on
- *  running→idle while unselected, cleared on select — this only paints it).
+ *  running→idle while unselected or manually from this row's context menu,
+ *  then acknowledged by clicking the row — this only paints it).
  *  Everything settled and seen shows nothing at all, which is what lets a long
  *  list read as titles instead of badges.
  *
@@ -49,6 +63,8 @@ function ThreadRow({
   active,
   onSelect,
   onRename,
+  onUnreadChange,
+  unreadMarked,
   onToggleArchive,
   archived = false,
   showProject = false,
@@ -58,77 +74,126 @@ function ThreadRow({
   active: boolean
   onSelect: () => void
   onRename?: () => void
+  onUnreadChange?: (unread: boolean) => void
+  /** Source-of-truth marker, including an active settled thread presented as idle. */
+  unreadMarked?: boolean
   /** Local-only archive toggle; omitted → no archive affordance on the row. */
   onToggleArchive?: () => void
   archived?: boolean
   /** Only when the list can span repos: name the one this row belongs to. */
   showProject?: boolean
 }) {
+  const unread = unreadMarked ?? (thread.status.kind === "done" && thread.status.unread === true)
+  const canMarkUnread = thread.status.kind !== "working"
+  const dotStatus: ThreadStatus = unread ? { kind: "done", unread: true } : thread.status
+  const [menuPoint, setMenuPoint] = useState<{ x: number; y: number } | null>(null)
+  const menuX = menuPoint?.x ?? 0
+  const menuY = menuPoint?.y ?? 0
+  const menuAnchor = useMemo(
+    () => ({
+      getBoundingClientRect: () => DOMRect.fromRect({ x: menuX, y: menuY, width: 0, height: 0 }),
+    }),
+    [menuX, menuY],
+  )
+  const openMenu = useCallback((event: ReactMouseEvent) => {
+    if (!onUnreadChange || !canMarkUnread) return
+    event.preventDefault()
+    event.stopPropagation()
+    setMenuPoint({ x: event.clientX, y: event.clientY })
+  }, [canMarkUnread, onUnreadChange])
+
   return (
-    <div className="group relative">
-    <button
-      type="button"
-      onClick={onSelect}
-      onDoubleClick={() => onRename?.()}
-      className={cn(
-        "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-        active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
-      )}
-    >
-      {active && (
-        <span className="-translate-y-1/2 absolute top-1/2 left-0 h-6 w-[3px] rounded-r-full bg-primary" />
-      )}
-      {/* One line: what it is, and when it last moved. The repo it belongs to
-          is the tab overhead, and "Done" is the absence of a dot. */}
-      <div className="flex w-full items-center gap-2">
-        <StatusDot status={thread.status} />
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate text-[13px] leading-tight",
-            active ? "font-medium text-foreground" : "text-foreground/85",
-          )}
-        >
-          {thread.title}
-        </span>
-        <span
-          className={cn(
-            "shrink-0 text-[10.5px] text-muted-foreground/55 tabular-nums transition-opacity",
-            onToggleArchive && "group-hover:opacity-0",
-          )}
-        >
-          {thread.updated}
-        </span>
-      </div>
-      {showProject && (
-        <span className="flex min-w-0 items-center gap-1.5 ps-[14px] text-[11px] text-muted-foreground/60">
-          <RepoMark mark={project?.mark ?? "?"} />
-          <span className="min-w-0 truncate">
-            {project ? `${project.owner}/${project.name}` : "unknown"}
+    <div className="group relative" onContextMenu={openMenu}>
+      <button
+        type="button"
+        onClick={onSelect}
+        onDoubleClick={() => onRename?.()}
+        className={cn(
+          "relative flex w-full cursor-pointer flex-col gap-0.5 rounded-lg px-2.5 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+          active ? "bg-sidebar-accent shadow-xs" : "hover:bg-sidebar-accent/50",
+        )}
+      >
+        {active && (
+          <span className="-translate-y-1/2 absolute top-1/2 left-0 h-6 w-[3px] rounded-r-full bg-primary" />
+        )}
+        {/* One line: what it is, and when it last moved. The repo it belongs to
+            is the tab overhead, and "Done" is the absence of a dot. */}
+        <div className="flex w-full items-center gap-2">
+          <StatusDot status={dotStatus} />
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate text-[13px] leading-tight",
+              active ? "font-medium text-foreground" : "text-foreground/85",
+            )}
+          >
+            {thread.title}
           </span>
-        </span>
+          <span
+            className={cn(
+              "shrink-0 text-[10.5px] text-muted-foreground/55 tabular-nums transition-opacity",
+              onToggleArchive && "group-hover:opacity-0",
+            )}
+          >
+            {thread.updated}
+          </span>
+        </div>
+        {showProject && (
+          <span className="flex min-w-0 items-center gap-1.5 ps-[14px] text-[11px] text-muted-foreground/60">
+            <RepoMark mark={project?.mark ?? "?"} />
+            <span className="min-w-0 truncate">
+              {project ? `${project.owner}/${project.name}` : "unknown"}
+            </span>
+          </span>
+        )}
+      </button>
+      {onToggleArchive && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                aria-label={archived ? `Unarchive ${thread.title}` : `Archive ${thread.title}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onToggleArchive()
+                }}
+                // Takes the timestamp's place on hover, so the row never grows.
+                className="-translate-y-1/2 pointer-events-none absolute top-[15px] right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
+              />
+            }
+          >
+            {archived ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
+          </TooltipTrigger>
+          <TooltipPopup>{archived ? "Unarchive" : "Archive (this device only)"}</TooltipPopup>
+        </Tooltip>
       )}
-    </button>
-    {onToggleArchive && (
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              type="button"
-              aria-label={archived ? `Unarchive ${thread.title}` : `Archive ${thread.title}`}
-              onClick={(event) => {
-                event.stopPropagation()
-                onToggleArchive()
-              }}
-              // Takes the timestamp's place on hover, so the row never grows.
-              className="-translate-y-1/2 pointer-events-none absolute top-[15px] right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-accent hover:text-foreground focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/40 group-hover:pointer-events-auto group-hover:opacity-100"
-            />
-          }
+      {menuPoint && onUnreadChange && canMarkUnread && (
+        <DropdownMenu
+          open
+          modal={false}
+          onOpenChange={(open) => {
+            if (!open) setMenuPoint(null)
+          }}
         >
-          {archived ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
-        </TooltipTrigger>
-        <TooltipPopup>{archived ? "Unarchive" : "Archive (this device only)"}</TooltipPopup>
-      </Tooltip>
-    )}
+          <DropdownMenuContent
+            anchor={menuAnchor}
+            side="bottom"
+            align="start"
+            sideOffset={2}
+            className="min-w-44"
+          >
+            <DropdownMenuItem
+              onClick={() => {
+                onUnreadChange(!unread)
+                setMenuPoint(null)
+              }}
+            >
+              {unread ? <MailOpen /> : <Mail />}
+              {unread ? "Mark as read" : "Mark as unread"}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
     </div>
   )
 }
@@ -143,6 +208,8 @@ export function Sidebar({
   onOpenPalette,
   connectionLabel,
   onRenameThread,
+  onThreadUnreadChange,
+  unreadThreadIds,
   prWidget,
   showProjects = false,
 }: {
@@ -160,6 +227,10 @@ export function Sidebar({
   /** Optional live/demo connection badge in the footer. */
   connectionLabel?: string
   onRenameThread?: (id: string) => void
+  /** Manual revisit marker. Right-click/two-finger-click any non-running row. */
+  onThreadUnreadChange?: (id: string, unread: boolean) => void
+  /** Canonical markers can outlive the row's presentation status (active settled/idle). */
+  unreadThreadIds?: Set<string>
   /** Pinned above the footer, outside the scroll area (the PR reviews widget). */
   prWidget?: ReactNode
 }) {
@@ -274,6 +345,8 @@ export function Sidebar({
               active={t.id === activeThreadId}
               onSelect={() => onSelectThread(t.id)}
               onRename={() => onRenameThread?.(t.id)}
+              onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
+              unreadMarked={unreadThreadIds?.has(t.id)}
               onToggleArchive={() => toggleArchived(t.id)}
               showProject={showProjects}
             />
@@ -300,6 +373,8 @@ export function Sidebar({
                   active={t.id === activeThreadId}
                   onSelect={() => onSelectThread(t.id)}
                   onRename={() => onRenameThread?.(t.id)}
+                  onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
+                  unreadMarked={unreadThreadIds?.has(t.id)}
                   onToggleArchive={() => toggleArchived(t.id)}
                   showProject={showProjects}
                 />
@@ -361,6 +436,8 @@ export function Sidebar({
                     active={t.id === activeThreadId}
                     onSelect={() => onSelectThread(t.id)}
                     onRename={() => onRenameThread?.(t.id)}
+                    onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
+                    unreadMarked={unreadThreadIds?.has(t.id)}
                     onToggleArchive={() => toggleArchived(t.id)}
                     archived
                   />
