@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — PR Reviews — Variant 3: third pane</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* Tokens lifted from src/mainview/index.css (.dark theme). */
+:root {
+  --background: oklch(0.176 0.014 292);
+  --foreground: oklch(0.965 0.004 300);
+  --card: oklch(0.205 0.016 292);
+  --popover: oklch(0.216 0.018 292);
+  --sidebar: oklch(0.158 0.013 292);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-accent: oklch(1 0 0 / 8%);
+  --primary: oklch(0.635 0.204 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(1 0 0 / 5%);
+  --muted: oklch(1 0 0 / 4.5%);
+  --muted-foreground: oklch(0.72 0.02 296);
+  --accent: oklch(1 0 0 / 7%);
+  --border: oklch(1 0 0 / 8%);
+  --destructive: oklch(0.66 0.2 25);
+  --success: oklch(0.72 0.15 158);
+  --warning: oklch(0.78 0.15 74);
+  --info: oklch(0.7 0.14 250);
+  --radius: 0.7rem;
+  --shadow-color: 292 60% 4%;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: -0.01em; }
+
+/* ── shared PR card vocabulary (identical across all 3 variants) ── */
+.dot { width: 7px; height: 7px; border-radius: 999px; flex: none; display: inline-block; }
+.dot-ok { background: var(--success); }
+.dot-fail { background: var(--destructive); }
+.dot-pend { background: var(--warning); }
+.dot-info { background: var(--info); }
+.pr-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.pr-title { font-size: 13px; font-weight: 500; line-height: 1.35; margin: 0; }
+.pr-meta { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); flex-wrap: wrap; }
+.pr-meta .sep { opacity: 0.4; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--muted);
+  font-size: 11px; color: var(--muted-foreground); white-space: nowrap;
+}
+.badge-ok { color: var(--success); border-color: color-mix(in oklab, var(--success) 30%, transparent); background: color-mix(in oklab, var(--success) 12%, transparent); }
+.badge-warn { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 30%, transparent); background: color-mix(in oklab, var(--warning) 12%, transparent); }
+.badge-late { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 34%, transparent); background: color-mix(in oklab, var(--destructive) 14%, transparent); }
+.stat { display: flex; align-items: baseline; gap: 6px; }
+.stat-n { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
+.stat-n.zero { color: var(--muted-foreground); font-weight: 500; }
+.stat-label { font-size: 11px; color: var(--muted-foreground); }
+.btn {
+  font-family: inherit; font-size: 11.5px; font-weight: 500; padding: 5px 10px;
+  border-radius: 7px; border: 1px solid var(--border); background: var(--secondary);
+  color: var(--foreground); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--accent); }
+.btn-primary { background: var(--primary); border-color: transparent; color: var(--primary-foreground); }
+.btn-primary:hover { filter: brightness(1.08); }
+.session {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 7px;
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 26%, transparent);
+  font-size: 11.5px; color: color-mix(in oklab, var(--primary) 55%, var(--foreground));
+}
+.pulse { width: 7px; height: 7px; border-radius: 999px; background: var(--primary); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.82); } }
+
+/* ── variant 3: three panes ────────────────────────────────────────── */
+.shell { display: flex; height: 100%; overflow: hidden; }
+
+/* 1. left sidebar */
+.sidebar {
+  width: 230px; flex: none; background: var(--sidebar);
+  border-right: 1px solid var(--sidebar-border);
+  display: flex; flex-direction: column;
+}
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 14px 12px; font-weight: 600; letter-spacing: -0.01em;
+}
+.brand .mark { width: 14px; height: 14px; border-radius: 4px; background: var(--primary); flex: none; }
+.side-scroll { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+.side-group { margin-bottom: 14px; }
+.side-group-h { padding: 4px 6px; color: var(--muted-foreground); opacity: 0.7; }
+.side-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 7px; color: var(--muted-foreground);
+  font-size: 12.5px; cursor: default; white-space: nowrap; overflow: hidden;
+}
+.side-item:hover { background: var(--sidebar-accent); }
+.side-item.active { background: var(--sidebar-accent); color: var(--foreground); }
+.side-item .label { overflow: hidden; text-overflow: ellipsis; }
+
+/* 2. center transcript */
+.center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.center-chrome {
+  flex: none; height: 44px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; padding: 0 18px;
+  color: var(--muted-foreground); font-size: 12px;
+}
+.center-chrome .title { color: var(--foreground); font-weight: 500; font-size: 13px; }
+.transcript { flex: 1; min-height: 0; overflow-y: auto; padding: 22px 18px 8px; }
+.transcript-inner { max-width: 52rem; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+.turn { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.turn .who {
+  font-size: 11px; color: var(--muted-foreground);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.turn p { margin: 0; white-space: pre-wrap; overflow-wrap: break-word; }
+.turn.user .body {
+  background: var(--muted); border-left: 2px solid color-mix(in oklab, var(--primary) 60%, transparent);
+  border-radius: 0 8px 8px 0; padding: 9px 12px; color: var(--foreground);
+}
+.turn.assistant .body { color: color-mix(in oklab, var(--foreground) 88%, var(--muted-foreground)); }
+.tool-row {
+  display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
+  padding: 4px 9px; border-radius: 7px; background: var(--muted);
+  border: 1px solid var(--border); color: var(--muted-foreground); font-size: 11.5px;
+}
+.composer { flex: none; padding: 10px 18px 16px; }
+.composer-inner {
+  max-width: 52rem; margin: 0 auto;
+  border: 1px solid var(--input); border-radius: var(--radius);
+  background: var(--card); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.composer .placeholder { color: var(--muted-foreground); }
+.composer .status {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden;
+}
+.composer .status .push { margin-left: auto; }
+
+/* 3. right PR pane */
+.pr-pane {
+  width: 340px; flex: none; border-left: 1px solid var(--border);
+  background: color-mix(in oklab, var(--sidebar) 60%, var(--background));
+  display: flex; flex-direction: column; min-width: 0;
+}
+.pane-h {
+  flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.pane-h .h-title { font-size: 12.5px; font-weight: 600; letter-spacing: -0.005em; }
+select.org {
+  font-family: inherit; font-size: 11px; color: var(--foreground);
+  background: var(--secondary); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 5px; cursor: pointer; max-width: 100px;
+}
+.pane-h .spacer { margin-left: auto; }
+.icon-btn {
+  width: 22px; height: 22px; flex: none; display: grid; place-items: center;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--secondary);
+  color: var(--muted-foreground); cursor: pointer; font-family: inherit;
+  font-size: 12px; line-height: 1; padding: 0;
+}
+.icon-btn:hover { background: var(--accent); color: var(--foreground); }
+
+.pane-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 10px 14px; }
+.sec-h {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 7px;
+  padding: 10px 2px 7px;
+  background: color-mix(in oklab, var(--sidebar) 60%, var(--background));
+  font-size: 11px; color: var(--muted-foreground);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.sec-h .count {
+  text-transform: none; letter-spacing: 0;
+  background: var(--muted); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0 5px; font-size: 10.5px;
+}
+.sec-h .hint { margin-left: auto; text-transform: none; letter-spacing: 0; opacity: 0.8; }
+.pane-list { display: flex; flex-direction: column; gap: 7px; }
+
+/* compact card variant for the narrow pane */
+.pr-pane .pr-card { position: relative; padding: 9px 10px 9px 12px; gap: 7px; }
+.pr-pane .pr-card.unread { border-color: color-mix(in oklab, var(--info) 34%, var(--border)); }
+.unread-dot {
+  position: absolute; top: 11px; left: -4px;
+  width: 7px; height: 7px; border-radius: 999px; background: var(--info);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--info) 18%, transparent);
+}
+.pr-pane .pr-title {
+  font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.pr-pane .pr-meta { gap: 6px; font-size: 11px; flex-wrap: nowrap; min-width: 0; }
+.pr-pane .pr-meta .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pr-pane .pr-meta .num { flex: none; }
+.pr-pane .pr-meta .ci { flex: none; display: inline-flex; align-items: center; gap: 5px; }
+.row {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+}
+.row .push { margin-left: auto; }
+.inline-stat { font-size: 11.5px; color: var(--foreground); white-space: nowrap; }
+.inline-stat .n { font-weight: 600; }
+.inline-stat.zero { color: var(--muted-foreground); }
+.pr-pane .btn { padding: 4px 9px; font-size: 11px; }
+.pr-pane .session { padding: 5px 7px; font-size: 11px; gap: 6px; min-width: 0; }
+.pr-pane .session span.txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note { font-size: 11px; color: var(--muted-foreground); }
+.who-name { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- 1. left sidebar -->
+  <aside class="sidebar">
+    <div class="brand"><span class="mark"></span><span>Chunky</span></div>
+    <div class="side-scroll">
+      <div class="side-group">
+        <div class="side-group-h mono">acme/api-gateway</div>
+        <div class="side-item active"><span class="dot dot-info"></span><span class="label">relay reconnect audit</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">502 retry backoff</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">oauth rotation notes</span></div>
+      </div>
+      <div class="side-group">
+        <div class="side-group-h mono">acme/web-console</div>
+        <div class="side-item"><span class="dot dot-ok"></span><span class="label">composer status polish</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">transcript reducer split</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">unread session dots</span></div>
+      </div>
+      <div class="side-group">
+        <div class="side-group-h mono">acme/desktop-shell</div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">window button position</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 2. center transcript -->
+  <main class="center">
+    <div class="center-chrome">
+      <span class="title">relay reconnect audit</span>
+      <span class="mono">acme/api-gateway</span>
+      <span class="sep">·</span>
+      <span>idle</span>
+    </div>
+
+    <div class="transcript">
+      <div class="transcript-inner">
+
+        <div class="turn user">
+          <span class="who">You</span>
+          <div class="body"><p>Where does the relay client decide to give up reconnecting? I want to know if a transient 502 from the edge is treated as fatal.</p></div>
+        </div>
+
+        <div class="turn assistant">
+          <span class="who">Assistant</span>
+          <div class="body"><p>The decision lives in the relay transport's backoff loop, not in the session layer. It classifies the close reason first, then either schedules another attempt or surfaces a disconnect to the session. A 502 arrives as a transport-level failure with no close frame, so it currently falls into the same bucket as an auth rejection and stops the loop.</p></div>
+          <div class="tool-row"><span class="dot dot-ok"></span>read 4 files · ran typecheck</div>
+        </div>
+
+        <div class="turn user">
+          <span class="who">You</span>
+          <div class="body"><p>That is the bug then. Transient status codes should keep retrying with backoff.</p></div>
+        </div>
+
+        <div class="turn assistant">
+          <span class="who">Assistant</span>
+          <div class="body"><p>Agreed. The cleanest fix is to split the classifier into fatal and retryable outcomes, and treat 502, 503 and 504 as retryable with the existing jittered backoff, capped at the current ceiling. Auth failures stay fatal so a bad token still fails fast instead of hammering the edge.</p></div>
+          <div class="tool-row"><span class="dot dot-info"></span>drafted patch · 2 files</div>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="composer-inner">
+        <span class="placeholder">Message Chunky...</span>
+        <div class="status">
+          <span class="dot dot-ok"></span>
+          <span>build</span>
+          <span class="sep">·</span>
+          <span>sonnet</span>
+          <span class="sep">·</span>
+          <span>high</span>
+          <span class="push"></span>
+          <span>2 seats</span>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- 3. right PR pane -->
+  <aside class="pr-pane" aria-label="Pull requests">
+    <header class="pane-h">
+      <span class="h-title">Pull requests</span>
+      <select class="org" aria-label="Organization">
+        <option>acme</option>
+        <option>acme-labs</option>
+        <option>personal</option>
+      </select>
+      <span class="spacer"></span>
+      <button class="icon-btn" aria-label="Refresh" title="Refresh">&#8635;</button>
+    </header>
+
+    <div class="pane-body">
+
+      <div class="sec-h">
+        <span>My PRs</span>
+        <span class="count">4</span>
+        <span class="hint">8 unresolved</span>
+      </div>
+      <div class="pane-list">
+
+        <article class="pr-card unread">
+          <span class="unread-dot" title="new activity"></span>
+          <p class="pr-title">Retry relay handshake on transient 502</p>
+          <div class="pr-meta">
+            <span class="mono">acme/api-gateway</span>
+            <span class="mono num">#1482</span>
+            <span class="ci"><span class="dot dot-fail"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge badge-late">changes requested</span>
+            <span class="push"></span>
+            <span class="inline-stat"><span class="n">5</span> unresolved</span>
+          </div>
+          <div class="session"><span class="pulse"></span><span class="txt">resolving 3 comments...</span></div>
+          <div class="row">
+            <span class="push"></span>
+            <button class="btn btn-primary">Resolve Comments</button>
+          </div>
+        </article>
+
+        <article class="pr-card unread">
+          <span class="unread-dot" title="new activity"></span>
+          <p class="pr-title">Split transcript reducer from presentation</p>
+          <div class="pr-meta">
+            <span class="mono">acme/web-console</span>
+            <span class="mono num">#918</span>
+            <span class="ci"><span class="dot dot-pend"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge">awaiting review</span>
+            <span class="push"></span>
+            <span class="inline-stat"><span class="n">2</span> unresolved</span>
+          </div>
+          <div class="row">
+            <span class="note">opened 1d ago</span>
+            <span class="push"></span>
+            <button class="btn btn-primary">Resolve Comments</button>
+          </div>
+        </article>
+
+        <article class="pr-card">
+          <p class="pr-title">Bump protocol to 0.14, add seat capabilities</p>
+          <div class="pr-meta">
+            <span class="mono">acme/protocol</span>
+            <span class="mono num">#233</span>
+            <span class="ci"><span class="dot dot-ok"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge">awaiting review</span>
+            <span class="push"></span>
+            <span class="inline-stat"><span class="n">1</span> unresolved</span>
+          </div>
+          <div class="row">
+            <span class="note">opened 9h ago</span>
+            <span class="push"></span>
+            <button class="btn btn-primary">Resolve Comments</button>
+          </div>
+        </article>
+
+        <article class="pr-card">
+          <p class="pr-title">Stream session usage into composer status</p>
+          <div class="pr-meta">
+            <span class="mono">acme/web-console</span>
+            <span class="mono num">#904</span>
+            <span class="ci"><span class="dot dot-ok"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge badge-ok">approved</span>
+            <span class="push"></span>
+            <span class="inline-stat zero"><span class="n">0</span> unresolved</span>
+          </div>
+          <div class="row">
+            <span class="note">ready to merge</span>
+          </div>
+        </article>
+
+      </div>
+
+      <div class="sec-h">
+        <span>Ready for Review</span>
+        <span class="count">5</span>
+        <span class="hint">oldest first</span>
+      </div>
+      <div class="pane-list">
+
+        <article class="pr-card">
+          <p class="pr-title">Harden OAuth refresh token rotation</p>
+          <div class="pr-meta">
+            <span class="mono">acme/api-gateway</span>
+            <span class="mono num">#1477</span>
+            <span class="ci"><span class="dot dot-ok"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge badge-late">waiting 4d</span>
+            <span class="who-name">dana.k</span>
+            <span class="push"></span>
+            <button class="btn">Review PR</button>
+          </div>
+        </article>
+
+        <article class="pr-card">
+          <p class="pr-title">Add repository registry migrations</p>
+          <div class="pr-meta">
+            <span class="mono">acme/core-db</span>
+            <span class="mono num">#612</span>
+            <span class="ci"><span class="dot dot-ok"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge badge-warn">waiting 2d</span>
+            <span class="who-name">miguel.s</span>
+            <span class="push"></span>
+            <button class="btn">Review PR</button>
+          </div>
+        </article>
+
+        <article class="pr-card unread">
+          <span class="unread-dot" title="new activity"></span>
+          <p class="pr-title">Voice: short-lived client secrets</p>
+          <div class="pr-meta">
+            <span class="mono">acme/web-console</span>
+            <span class="mono num">#921</span>
+            <span class="ci"><span class="dot dot-fail"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge badge-warn">waiting 1d 4h</span>
+            <span class="who-name">priya.r</span>
+          </div>
+          <div class="session"><span class="pulse"></span><span class="txt">review session: reading 12 files...</span></div>
+          <div class="row">
+            <span class="push"></span>
+            <button class="btn">Review PR</button>
+          </div>
+        </article>
+
+        <article class="pr-card">
+          <p class="pr-title">Fix window button position after fullscreen</p>
+          <div class="pr-meta">
+            <span class="mono">acme/desktop-shell</span>
+            <span class="mono num">#88</span>
+            <span class="ci"><span class="dot dot-ok"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge">waiting 6h</span>
+            <span class="who-name">leo.t</span>
+            <span class="push"></span>
+            <button class="btn">Review PR</button>
+          </div>
+        </article>
+
+        <article class="pr-card">
+          <p class="pr-title">Docs: workflows mode and seat routing</p>
+          <div class="pr-meta">
+            <span class="mono">acme/docs</span>
+            <span class="mono num">#341</span>
+            <span class="ci"><span class="dot dot-pend"></span>CI</span>
+          </div>
+          <div class="row">
+            <span class="badge">waiting 3h</span>
+            <span class="who-name">sam.w</span>
+            <span class="push"></span>
+            <button class="btn">Review PR</button>
+          </div>
+        </article>
+
+      </div>
+    </div>
+  </aside>
+</div>
+</body>
+</html>

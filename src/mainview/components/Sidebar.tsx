@@ -6,7 +6,7 @@ import {
   Search,
   Settings,
 } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { collapseList } from "~/lib/sessionList"
@@ -143,6 +143,7 @@ export function Sidebar({
   onOpenPalette,
   connectionLabel,
   onRenameThread,
+  prWidget,
   showProjects = false,
 }: {
   projects: Project[]
@@ -159,6 +160,8 @@ export function Sidebar({
   /** Optional live/demo connection badge in the footer. */
   connectionLabel?: string
   onRenameThread?: (id: string) => void
+  /** Pinned above the footer, outside the scroll area (the PR reviews widget). */
+  prWidget?: ReactNode
 }) {
   const [query, setQuery] = useState("")
   const [archivedOpen, setArchivedOpen] = useState(false)
@@ -367,6 +370,8 @@ export function Sidebar({
           </>
         )}
       </ScrollArea>
+
+      {prWidget}
 
       {/* Footer */}
       <div className="relative z-10 flex items-center gap-2 border-border/70 border-t px-3 py-2.5">

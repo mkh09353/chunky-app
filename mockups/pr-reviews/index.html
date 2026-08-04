@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — PR Reviews mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* Tokens lifted from src/mainview/index.css (.dark theme). */
+:root {
+  --background: oklch(0.176 0.014 292);
+  --foreground: oklch(0.965 0.004 300);
+  --card: oklch(0.205 0.016 292);
+  --popover: oklch(0.216 0.018 292);
+  --sidebar: oklch(0.158 0.013 292);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --primary: oklch(0.635 0.204 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(1 0 0 / 5%);
+  --muted: oklch(1 0 0 / 4.5%);
+  --muted-foreground: oklch(0.72 0.02 296);
+  --accent: oklch(1 0 0 / 7%);
+  --border: oklch(1 0 0 / 8%);
+  --destructive: oklch(0.66 0.2 25);
+  --success: oklch(0.72 0.15 158);
+  --warning: oklch(0.78 0.15 74);
+  --info: oklch(0.7 0.14 250);
+  --radius: 0.7rem;
+  --shadow-color: 292 60% 4%;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100%; background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: -0.01em; }
+
+.wrap { max-width: 860px; margin: 0 auto; padding: 56px 24px 72px; }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -0.01em; }
+.brand .mark { width: 15px; height: 15px; border-radius: 4px; background: var(--primary); }
+h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 20px 0 8px; }
+.lede { color: var(--muted-foreground); margin: 0 0 6px; max-width: 60ch; }
+.meta { color: var(--muted-foreground); opacity: 0.8; font-size: 12px; margin: 0; }
+
+.grid { display: flex; flex-direction: column; gap: 12px; margin-top: 28px; }
+a.card {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 18px; transition: background 140ms ease, border-color 140ms ease;
+}
+a.card:hover { background: var(--accent); border-color: color-mix(in oklab, var(--primary) 32%, var(--border)); }
+.card-h { display: flex; align-items: baseline; gap: 10px; }
+.num {
+  font-size: 11px; color: var(--muted-foreground);
+  border: 1px solid var(--border); background: var(--muted);
+  border-radius: 999px; padding: 1px 7px; flex: none;
+}
+.card-h h2 { margin: 0; font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
+.card-h .arrow { margin-left: auto; color: var(--muted-foreground); }
+.card p { margin: 7px 0 0; color: var(--muted-foreground); max-width: 66ch; }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 11px; }
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted-foreground);
+  border: 1px solid var(--border); background: var(--muted);
+  border-radius: 999px; padding: 2px 8px;
+}
+.dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: none; }
+.dot-ok { background: var(--success); }
+.dot-fail { background: var(--destructive); }
+.dot-pend { background: var(--warning); }
+.dot-info { background: var(--info); }
+.dot-primary { background: var(--primary); }
+
+.notes {
+  margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+.notes h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--foreground); text-transform: uppercase; letter-spacing: 0.06em; }
+.notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.notes li { max-width: 70ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand"><span class="mark"></span><span>Chunky</span></div>
+
+  <h1>PR Reviews — layout mockups</h1>
+  <p class="lede">
+    Three static explorations of a GitHub PR review surface: open PRs you authored, plus PRs
+    from others waiting on your review, with Chunky sessions linked to both.
+  </p>
+  <p class="meta">Static HTML and CSS. Same data and same card vocabulary in all three, so only the layout differs.</p>
+
+  <div class="grid">
+
+    <a class="card" href="variant-1.html">
+      <div class="card-h">
+        <span class="num">1</span>
+        <h2>Sidebar rail + slide-over</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        Ambient by default: a compact summary widget pinned in the app sidebar keeps the counts
+        in peripheral vision, and clicking a row slides a detail panel over the main content.
+        Cheapest in screen real estate, one click away from the full lists.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-info"></span>always-visible counts</span>
+        <span class="tag"><span class="dot dot-primary"></span>slide-over panel</span>
+        <span class="tag">zero layout cost</span>
+      </div>
+    </a>
+
+    <a class="card" href="variant-2.html">
+      <div class="card-h">
+        <span class="num">2</span>
+        <h2>Dedicated PR board</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        A top-level tab beside sessions and zoo. Two columns, Mine and Ready for Review, with
+        the org selector and refresh timestamp in the page header. The most room per card and
+        the best triage view, but it is a place you have to navigate to.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-ok"></span>two columns</span>
+        <span class="tag">org dropdown + refresh</span>
+        <span class="tag">roomiest cards</span>
+      </div>
+    </a>
+
+    <a class="card" href="variant-3.html">
+      <div class="card-h">
+        <span class="num">3</span>
+        <h2>Third pane</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        A persistent 340px column to the right of the transcript, My PRs stacked over Ready for
+        Review, with unread dots for new activity. Always present while you work, at the cost of
+        permanent horizontal space and the tightest card density.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-info"></span>unread activity dots</span>
+        <span class="tag">persistent alongside chat</span>
+        <span class="tag">compact cards</span>
+      </div>
+    </a>
+
+  </div>
+
+  <div class="notes">
+    <h3>Shared conventions</h3>
+    <ul>
+      <li>Status dots: <span class="dot dot-ok"></span> CI passing, <span class="dot dot-fail"></span> CI failing, <span class="dot dot-pend"></span> CI pending, <span class="dot dot-info"></span> informational or unread.</li>
+      <li>Headline stat on your own PRs is the unresolved comment count; a <span class="mono">Resolve Comments</span> action appears whenever it is above zero.</li>
+      <li>Ready-for-review cards sort oldest-waiting first and carry an age badge, amber past a day and red past three.</li>
+      <li>Linked sessions render as a pulsing strip in the accent colour on the card they belong to.</li>
+      <li>Tokens are lifted from <span class="mono">src/mainview/index.css</span> (dark theme); DM Sans for UI, JetBrains Mono for repo and branch names.</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

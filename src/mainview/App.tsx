@@ -20,6 +20,8 @@ import { TodosPanel } from "./components/TodosPanel"
 import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
 import { GitToolbar } from "./components/GitPanel"
 import { Sidebar } from "./components/Sidebar"
+import { PrWidget } from "./components/PrWidget"
+import { PrPanel } from "./components/PrPanel"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
 import { FactoryPane } from "./components/FactoryPane"
@@ -29,6 +31,14 @@ import { confirm } from "./lib/confirm"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
+import { getPrReviews, refreshPrReviews } from "./lib/prApi"
+import {
+  hasNewActivity,
+  loadPrLastSeen,
+  savePrLastSeen,
+  summarize,
+} from "./lib/prReviews"
+import type { PrReviewsState } from "@chunky/protocol"
 import { Button } from "./components/ui/button"
 import { TooltipProvider } from "./components/ui/tooltip"
 import {
@@ -288,6 +298,14 @@ export function App() {
   const [browserOpen, setBrowserOpen] = useState(false)
   // The factory shares the content-panel side region with the browser pane.
   const [factoryOpen, setFactoryOpen] = useState(false)
+  // PR reviews: the board is polled here (the sidebar widget needs it whether or
+  // not the panel is open); the slide-over owns actions and setup.
+  const [prOpen, setPrOpen] = useState(false)
+  const [prState, setPrState] = useState<PrReviewsState | null>(null)
+  const [prUnsupported, setPrUnsupported] = useState(false)
+  const [prError, setPrError] = useState<string | null>(null)
+  const [prLoading, setPrLoading] = useState(false)
+  const [prLastSeen, setPrLastSeen] = useState<number | null>(() => loadPrLastSeen())
   // The link context menu's "Open in Chunky browser" mounts the pane; the pane
   // itself picks the URL up from the same store.
   useEffect(() => subscribeBrowserNavigation(() => setBrowserOpen(true)), [])
@@ -1342,6 +1360,91 @@ export function App() {
     [live, stopDemoStream, config, sessionId, attachSession],
   )
 
+  // ---- PR reviews ---------------------------------------------------------
+
+  /** Read the server's cached board, or force it to poll GitHub again. */
+  const loadPrReviews = useCallback(async (force = false) => {
+    setPrLoading(true)
+    const result = force ? await refreshPrReviews() : await getPrReviews()
+    setPrLoading(false)
+    if (result.ok) {
+      setPrState(result.state)
+      setPrUnsupported(false)
+      setPrError(null)
+      return
+    }
+    setPrUnsupported(result.unsupported)
+    setPrError(result.error)
+    // An unsupported server has no board at all; a transient failure keeps the
+    // last good one on screen rather than blanking the widget.
+    if (result.unsupported) setPrState(null)
+  }, [])
+
+  /** Poll the board while connected. Paused when the window is hidden: the
+   *  counts are ambient, and a backgrounded app should not keep hitting GitHub. */
+  useEffect(() => {
+    if (!live || connectionState !== "connected" || prUnsupported) return
+    const tick = () => {
+      if (typeof document !== "undefined" && document.hidden) return
+      void loadPrReviews()
+    }
+    tick()
+    const timer = setInterval(tick, 90_000)
+    const onVisible = () => {
+      if (typeof document !== "undefined" && !document.hidden) tick()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener("visibilitychange", onVisible)
+    }
+  }, [live, connectionState, prUnsupported, loadPrReviews])
+
+  /** A different server may well have the routes this one lacks: moving to a
+   *  replacement (or reconnecting) re-arms the poll rather than staying dark. */
+  useEffect(() => {
+    setPrUnsupported(false)
+  }, [config?.baseUrl])
+
+  /** Is the session linked to a PR card still working? The attached session's
+   *  live transcript is authoritative; everything else uses the polled summary. */
+  const isPrSessionBusy = useCallback(
+    (id: string) => {
+      if (id === sessionId) return !isTreeIdle(transcript)
+      const summary = sessions.find((s) => s.sessionId === id)
+      return !!(summary?.busy ?? summary?.running)
+    },
+    [sessionId, transcript, sessions],
+  )
+
+  /** Jump to the session a PR action started, switching repo tab if needed. */
+  const handleOpenPrSession = useCallback(
+    async (id: string, repoId: string) => {
+      setPrOpen(false)
+      if (!config) return
+      if (repoId && repoId !== activeRepoIdRef.current) {
+        await handleSelectRepo(repoId)
+      }
+      void attachSession(config.baseUrl, id)
+    },
+    [config, handleSelectRepo, attachSession],
+  )
+
+  const prSummary = useMemo(() => summarize(prState, Date.now()), [prState])
+  const prUnread = hasNewActivity(prState?.fetchedAt ?? null, prLastSeen)
+
+  /** Opening the panel is what "seeing" the board means — clears the dot. */
+  const handlePrOpenChange = useCallback(
+    (open: boolean) => {
+      setPrOpen(open)
+      if (!open) return
+      const fetchedAt = prState?.fetchedAt ?? Date.now()
+      setPrLastSeen(fetchedAt)
+      savePrLastSeen(fetchedAt)
+    },
+    [prState],
+  )
+
   const handleSend = useCallback(
     async (
       text: string,
@@ -2055,6 +2158,17 @@ export function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
+          prWidget={
+            live && !prUnsupported ? (
+              <PrWidget
+                summary={prSummary}
+                configured={prState?.configured === true && !!prState?.org}
+                unread={prUnread}
+                org={prState?.org ?? null}
+                onOpen={() => handlePrOpenChange(true)}
+              />
+            ) : null
+          }
           connectionLabel={
             live
               ? connectionState === "connected"
@@ -2221,6 +2335,18 @@ export function App() {
             sessionCount: sessions.length,
             mode: appMode,
           }}
+        />
+        <PrPanel
+          open={prOpen}
+          onOpenChange={handlePrOpenChange}
+          state={prState}
+          unsupported={prUnsupported}
+          error={prError}
+          loading={prLoading}
+          onRefresh={() => loadPrReviews(true)}
+          onReload={() => loadPrReviews()}
+          isSessionBusy={isPrSessionBusy}
+          onOpenSession={(id, repoId) => void handleOpenPrSession(id, repoId)}
         />
         <OnboardingWizard
           open={onboardingOpen}

@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — PR Reviews — Variant 1: sidebar rail + slide-over</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* Tokens lifted from src/mainview/index.css (.dark theme). */
+:root {
+  --background: oklch(0.176 0.014 292);
+  --foreground: oklch(0.965 0.004 300);
+  --card: oklch(0.205 0.016 292);
+  --popover: oklch(0.216 0.018 292);
+  --sidebar: oklch(0.158 0.013 292);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-accent: oklch(1 0 0 / 8%);
+  --primary: oklch(0.635 0.204 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(1 0 0 / 5%);
+  --muted: oklch(1 0 0 / 4.5%);
+  --muted-foreground: oklch(0.72 0.02 296);
+  --accent: oklch(1 0 0 / 7%);
+  --border: oklch(1 0 0 / 8%);
+  --destructive: oklch(0.66 0.2 25);
+  --success: oklch(0.72 0.15 158);
+  --warning: oklch(0.78 0.15 74);
+  --info: oklch(0.7 0.14 250);
+  --radius: 0.7rem;
+  --shadow-color: 292 60% 4%;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: -0.01em; }
+
+/* ── shared PR card vocabulary (identical across all 3 variants) ── */
+.dot { width: 7px; height: 7px; border-radius: 999px; flex: none; display: inline-block; }
+.dot-ok { background: var(--success); }
+.dot-fail { background: var(--destructive); }
+.dot-pend { background: var(--warning); }
+.dot-info { background: var(--info); }
+.pr-card {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.pr-title { font-size: 13px; font-weight: 500; line-height: 1.35; margin: 0; }
+.pr-meta { display: flex; align-items: center; gap: 8px; color: var(--muted-foreground); flex-wrap: wrap; }
+.pr-meta .sep { opacity: 0.4; }
+.badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--muted);
+  font-size: 11px; color: var(--muted-foreground); white-space: nowrap;
+}
+.badge-ok { color: var(--success); border-color: color-mix(in oklab, var(--success) 30%, transparent); background: color-mix(in oklab, var(--success) 12%, transparent); }
+.badge-warn { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 30%, transparent); background: color-mix(in oklab, var(--warning) 12%, transparent); }
+.badge-late { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 34%, transparent); background: color-mix(in oklab, var(--destructive) 14%, transparent); }
+.stat { display: flex; align-items: baseline; gap: 6px; }
+.stat-n { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; }
+.stat-n.zero { color: var(--muted-foreground); font-weight: 500; }
+.stat-label { font-size: 11px; color: var(--muted-foreground); }
+.btn {
+  font-family: inherit; font-size: 11.5px; font-weight: 500; padding: 5px 10px;
+  border-radius: 7px; border: 1px solid var(--border); background: var(--secondary);
+  color: var(--foreground); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { background: var(--accent); }
+.btn-primary { background: var(--primary); border-color: transparent; color: var(--primary-foreground); }
+.btn-primary:hover { filter: brightness(1.08); }
+.session {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 7px;
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 26%, transparent);
+  font-size: 11.5px; color: color-mix(in oklab, var(--primary) 55%, var(--foreground));
+}
+.pulse { width: 7px; height: 7px; border-radius: 999px; background: var(--primary); flex: none; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.82); } }
+
+/* ── variant 1: app shell + slide-over ─────────────────────────────── */
+.shell { display: flex; height: 100%; overflow: hidden; }
+
+.sidebar {
+  width: 240px; flex: none; background: var(--sidebar);
+  border-right: 1px solid var(--sidebar-border);
+  display: flex; flex-direction: column;
+}
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  padding: 14px 14px 12px; font-weight: 600; letter-spacing: -0.01em;
+}
+.brand .mark { width: 14px; height: 14px; border-radius: 4px; background: var(--primary); flex: none; }
+.brand .repo-sel { margin-left: auto; font-size: 11px; color: var(--muted-foreground); }
+
+.side-scroll { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+.side-group { margin-bottom: 14px; }
+.side-group-h {
+  padding: 4px 6px; color: var(--muted-foreground); opacity: 0.75;
+}
+.side-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 7px; color: var(--muted-foreground);
+  font-size: 12.5px; cursor: default;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.side-item:hover { background: var(--sidebar-accent); }
+.side-item.active { background: var(--sidebar-accent); color: var(--foreground); }
+.side-item .label { overflow: hidden; text-overflow: ellipsis; }
+
+/* pinned PR summary widget */
+.pr-widget {
+  border-top: 1px solid var(--sidebar-border);
+  padding: 10px 8px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.pr-widget-h {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 6px 2px; font-size: 11px; color: var(--muted-foreground);
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.pr-widget-h .org { text-transform: none; letter-spacing: 0; opacity: 0.8; }
+.summary-row {
+  width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 7px 8px; border-radius: 8px;
+  border: 1px solid transparent; background: transparent; color: var(--foreground);
+}
+.summary-row:hover { background: var(--sidebar-accent); border-color: var(--border); }
+.summary-row .top { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; }
+.summary-row .top .n { margin-left: auto; color: var(--muted-foreground); font-weight: 400; font-size: 11.5px; }
+.summary-row .facts { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.fact {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; color: var(--muted-foreground);
+  padding: 1px 6px; border-radius: 999px; background: var(--muted);
+  border: 1px solid var(--border);
+}
+.fact.warn { color: var(--warning); border-color: color-mix(in oklab, var(--warning) 28%, transparent); }
+.fact.bad { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 30%, transparent); }
+
+/* main content behind the panel */
+.main { flex: 1; position: relative; min-width: 0; overflow: hidden; }
+.main-chrome {
+  height: 44px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px; padding: 0 16px;
+  color: var(--muted-foreground); font-size: 12px;
+}
+.main-chrome .title { color: var(--foreground); font-weight: 500; font-size: 13px; }
+.main-body {
+  height: calc(100% - 44px); padding: 28px 32px;
+  display: flex; flex-direction: column; gap: 16px;
+  max-width: 52rem; opacity: 0.5;
+}
+.ghost-line { height: 9px; border-radius: 999px; background: var(--muted); }
+.ghost-block { display: flex; flex-direction: column; gap: 8px; }
+
+/* slide-over */
+.scrim {
+  position: absolute; inset: 0; background: color-mix(in oklab, black 46%, transparent);
+  opacity: 0; pointer-events: none; transition: opacity 180ms ease;
+}
+.panel {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 548px; max-width: 100%;
+  background: var(--popover); border-left: 1px solid var(--border);
+  box-shadow: -24px 0 48px -12px hsl(var(--shadow-color) / 0.5);
+  display: flex; flex-direction: column;
+  transform: translateX(100%); opacity: 0; pointer-events: none;
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms ease;
+}
+.shell.open .scrim { opacity: 1; pointer-events: auto; }
+.shell.open .panel { transform: translateX(0); opacity: 1; pointer-events: auto; }
+
+.panel-h {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border); flex: none;
+}
+.panel-h .h-title { font-weight: 600; font-size: 13.5px; letter-spacing: -0.01em; }
+select.org {
+  font-family: inherit; font-size: 11.5px; color: var(--foreground);
+  background: var(--secondary); border: 1px solid var(--border);
+  border-radius: 7px; padding: 4px 6px; cursor: pointer;
+}
+.panel-h .spacer { margin-left: auto; }
+.stamp { font-size: 11px; color: var(--muted-foreground); }
+.icon-btn {
+  width: 24px; height: 24px; display: grid; place-items: center;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--secondary);
+  color: var(--muted-foreground); cursor: pointer; font-family: inherit; font-size: 13px; line-height: 1;
+  padding: 0;
+}
+.icon-btn:hover { background: var(--accent); color: var(--foreground); }
+
+.panel-body { flex: 1; overflow-y: auto; padding: 14px; }
+.section-h {
+  display: flex; align-items: center; gap: 8px; margin: 0 2px 9px;
+}
+.section-h h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.02em; }
+.section-h .count {
+  font-size: 11px; color: var(--muted-foreground);
+  background: var(--muted); border: 1px solid var(--border);
+  border-radius: 999px; padding: 0 6px;
+}
+.section-h .hint { margin-left: auto; font-size: 11px; color: var(--muted-foreground); }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.section + .section { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+
+.card-top { display: flex; align-items: flex-start; gap: 10px; }
+.card-top .grow { min-width: 0; flex: 1; }
+.card-foot { display: flex; align-items: center; gap: 8px; }
+.card-foot .push { margin-left: auto; }
+.who { color: var(--muted-foreground); }
+.note { font-size: 11.5px; color: var(--muted-foreground); }
+</style>
+</head>
+<body>
+<div class="shell open" id="shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="mark"></span>
+      <span>Chunky</span>
+      <span class="repo-sel mono">acme/web-console</span>
+    </div>
+
+    <div class="side-scroll">
+      <div class="side-group">
+        <div class="side-group-h mono">acme/api-gateway</div>
+        <div class="side-item"><span class="dot dot-info"></span><span class="label">relay reconnect audit</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">502 retry backoff</span></div>
+      </div>
+      <div class="side-group">
+        <div class="side-group-h mono">acme/web-console</div>
+        <div class="side-item active"><span class="dot dot-ok"></span><span class="label">composer status polish</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">transcript reducer split</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">unread session dots</span></div>
+      </div>
+      <div class="side-group">
+        <div class="side-group-h mono">acme/desktop-shell</div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">window button position</span></div>
+        <div class="side-item"><span class="dot" style="background: var(--muted-foreground); opacity: 0.5;"></span><span class="label">runtime recovery notes</span></div>
+      </div>
+    </div>
+
+    <div class="pr-widget">
+      <div class="pr-widget-h"><span>Pull requests</span><span class="org mono">acme</span></div>
+
+      <button class="summary-row" onclick="openPanel('mine')">
+        <span class="top">My PRs <span class="n">4 open</span></span>
+        <span class="facts">
+          <span class="fact"><span class="dot dot-info"></span>8 unresolved</span>
+          <span class="fact bad"><span class="dot dot-fail"></span>1 CI failing</span>
+        </span>
+      </button>
+
+      <button class="summary-row" onclick="openPanel('review')">
+        <span class="top">Review <span class="n">5 ready</span></span>
+        <span class="facts">
+          <span class="fact warn"><span class="dot dot-pend"></span>3 waiting &gt;1d</span>
+          <span class="fact"><span class="dot dot-ok"></span>2 fresh</span>
+        </span>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main-chrome">
+      <span class="title">composer status polish</span>
+      <span class="mono">acme/web-console</span>
+      <span class="sep">·</span>
+      <span>idle</span>
+    </div>
+    <div class="main-body">
+      <div class="ghost-block">
+        <div class="ghost-line" style="width: 42%;"></div>
+        <div class="ghost-line" style="width: 88%;"></div>
+        <div class="ghost-line" style="width: 76%;"></div>
+      </div>
+      <div class="ghost-block">
+        <div class="ghost-line" style="width: 34%;"></div>
+        <div class="ghost-line" style="width: 92%;"></div>
+        <div class="ghost-line" style="width: 61%;"></div>
+        <div class="ghost-line" style="width: 80%;"></div>
+      </div>
+      <div class="ghost-block">
+        <div class="ghost-line" style="width: 55%;"></div>
+        <div class="ghost-line" style="width: 70%;"></div>
+      </div>
+    </div>
+
+    <div class="scrim" onclick="closePanel()"></div>
+
+    <section class="panel" aria-label="PR reviews">
+      <header class="panel-h">
+        <span class="h-title">PR Reviews</span>
+        <select class="org" aria-label="Organization">
+          <option>acme</option>
+          <option>acme-labs</option>
+          <option>personal</option>
+        </select>
+        <span class="spacer"></span>
+        <span class="stamp">updated 2 min ago</span>
+        <button class="icon-btn" onclick="closePanel()" aria-label="Close">&times;</button>
+      </header>
+
+      <div class="panel-body">
+
+        <div class="section" id="sec-mine">
+          <div class="section-h">
+            <h2>My PRs</h2>
+            <span class="count">4</span>
+            <span class="hint">8 unresolved comments</span>
+          </div>
+          <div class="list">
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Retry relay handshake on transient 502</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/api-gateway</span>
+                    <span class="mono">#1482</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-fail"></span><span>CI failing</span>
+                    <span class="sep">·</span>
+                    <span class="badge badge-late">changes requested</span>
+                  </div>
+                </div>
+                <div class="stat">
+                  <span class="stat-n">5</span>
+                  <span class="stat-label">unresolved</span>
+                </div>
+              </div>
+              <div class="session"><span class="pulse"></span>session running: resolving 3 comments...</div>
+              <div class="card-foot">
+                <span class="note">opened 3d ago</span>
+                <span class="push"></span>
+                <button class="btn btn-primary">Resolve Comments</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Split transcript reducer from presentation</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/web-console</span>
+                    <span class="mono">#918</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-pend"></span><span>CI pending</span>
+                    <span class="sep">·</span>
+                    <span class="badge">awaiting review</span>
+                  </div>
+                </div>
+                <div class="stat">
+                  <span class="stat-n">2</span>
+                  <span class="stat-label">unresolved</span>
+                </div>
+              </div>
+              <div class="card-foot">
+                <span class="note">opened 1d ago</span>
+                <span class="push"></span>
+                <button class="btn btn-primary">Resolve Comments</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Bump protocol to 0.14, add seat capabilities</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/protocol</span>
+                    <span class="mono">#233</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-ok"></span><span>CI passing</span>
+                    <span class="sep">·</span>
+                    <span class="badge">awaiting review</span>
+                  </div>
+                </div>
+                <div class="stat">
+                  <span class="stat-n">1</span>
+                  <span class="stat-label">unresolved</span>
+                </div>
+              </div>
+              <div class="card-foot">
+                <span class="note">opened 9h ago</span>
+                <span class="push"></span>
+                <button class="btn btn-primary">Resolve Comments</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Stream session usage into composer status</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/web-console</span>
+                    <span class="mono">#904</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-ok"></span><span>CI passing</span>
+                    <span class="sep">·</span>
+                    <span class="badge badge-ok">approved</span>
+                  </div>
+                </div>
+                <div class="stat">
+                  <span class="stat-n zero">0</span>
+                  <span class="stat-label">unresolved</span>
+                </div>
+              </div>
+              <div class="card-foot">
+                <span class="note">ready to merge</span>
+              </div>
+            </article>
+
+          </div>
+        </div>
+
+        <div class="section" id="sec-review">
+          <div class="section-h">
+            <h2>Ready for Review</h2>
+            <span class="count">5</span>
+            <span class="hint">oldest waiting first</span>
+          </div>
+          <div class="list">
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Harden OAuth refresh token rotation</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/api-gateway</span>
+                    <span class="mono">#1477</span>
+                    <span class="sep">·</span>
+                    <span class="who">dana.k</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-ok"></span><span>CI passing</span>
+                  </div>
+                </div>
+                <span class="badge badge-late">waiting 4d</span>
+              </div>
+              <div class="card-foot">
+                <span class="note">2 reviewers requested</span>
+                <span class="push"></span>
+                <button class="btn">Review PR</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Add repository registry migrations</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/core-db</span>
+                    <span class="mono">#612</span>
+                    <span class="sep">·</span>
+                    <span class="who">miguel.s</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-ok"></span><span>CI passing</span>
+                  </div>
+                </div>
+                <span class="badge badge-warn">waiting 2d</span>
+              </div>
+              <div class="card-foot">
+                <span class="note">+412 / -88 across 9 files</span>
+                <span class="push"></span>
+                <button class="btn">Review PR</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Voice: short-lived client secrets</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/web-console</span>
+                    <span class="mono">#921</span>
+                    <span class="sep">·</span>
+                    <span class="who">priya.r</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-fail"></span><span>CI failing</span>
+                  </div>
+                </div>
+                <span class="badge badge-warn">waiting 1d 4h</span>
+              </div>
+              <div class="session"><span class="pulse"></span>review session running: reading 12 files...</div>
+              <div class="card-foot">
+                <span class="note">+188 / -41 across 6 files</span>
+                <span class="push"></span>
+                <button class="btn">Review PR</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Fix window button position after fullscreen</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/desktop-shell</span>
+                    <span class="mono">#88</span>
+                    <span class="sep">·</span>
+                    <span class="who">leo.t</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-ok"></span><span>CI passing</span>
+                  </div>
+                </div>
+                <span class="badge">waiting 6h</span>
+              </div>
+              <div class="card-foot">
+                <span class="note">+37 / -12 across 2 files</span>
+                <span class="push"></span>
+                <button class="btn">Review PR</button>
+              </div>
+            </article>
+
+            <article class="pr-card">
+              <div class="card-top">
+                <div class="grow">
+                  <p class="pr-title">Docs: workflows mode and seat routing</p>
+                  <div class="pr-meta">
+                    <span class="mono">acme/docs</span>
+                    <span class="mono">#341</span>
+                    <span class="sep">·</span>
+                    <span class="who">sam.w</span>
+                    <span class="sep">·</span>
+                    <span class="dot dot-pend"></span><span>CI pending</span>
+                  </div>
+                </div>
+                <span class="badge">waiting 3h</span>
+              </div>
+              <div class="card-foot">
+                <span class="note">docs only</span>
+                <span class="push"></span>
+                <button class="btn">Review PR</button>
+              </div>
+            </article>
+
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  var shell = document.getElementById("shell");
+  function openPanel(which) {
+    shell.classList.add("open");
+    var target = document.getElementById(which === "review" ? "sec-review" : "sec-mine");
+    if (target) target.scrollIntoView({ block: "start" });
+  }
+  function closePanel() {
+    shell.classList.remove("open");
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closePanel();
+  });
+</script>
+</body>
+</html>
