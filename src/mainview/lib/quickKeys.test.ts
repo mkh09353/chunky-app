@@ -10,6 +10,7 @@ import { mergeDesktopState, readDesktopState } from "../../bun/desktopState"
 import { QuickKeys } from "../components/QuickKeys"
 import {
   cleanQuickKeys,
+  EMOJI_CHOICES,
   emptyQuickKeyDraft,
   graphemeLength,
   hasQuickKeyErrors,
@@ -269,6 +270,35 @@ describe("the rendered chip", () => {
     const html = markup([])
     expect(html).toContain("Quick")
     expect(html).toContain('aria-label="Add a quick key"')
+  })
+
+  test("centres the row over the composer without losing the overflow scroller", () => {
+    const html = markup([{ id: "qk-1", emoji: "", label: "Review", prompt: "review", hotkey: "" }])
+    // Same column as the composer below.
+    expect(html).toContain("mx-auto flex w-full max-w-5xl")
+    // The scroller is still there …
+    expect(html).toContain("overflow-x-auto")
+    // … with the chips in one auto-margined group inside it, so a short row
+    // centres and a full one collapses the margins and scrolls from the left.
+    expect(html).toContain("mx-auto flex items-center gap-1.5 whitespace-nowrap")
+  })
+})
+
+describe("EMOJI_CHOICES", () => {
+  test("is a curated palette, not a dataset", () => {
+    expect(EMOJI_CHOICES.length).toBeGreaterThanOrEqual(40)
+    expect(EMOJI_CHOICES.length).toBeLessThanOrEqual(60)
+    expect(new Set(EMOJI_CHOICES).size).toBe(EMOJI_CHOICES.length)
+  })
+
+  test("every choice is one grapheme, so a pick can never fail validation", () => {
+    for (const emoji of EMOJI_CHOICES) {
+      expect(graphemeLength(emoji)).toBe(1)
+      // The picker only sets draft.emoji; the rest of the draft still governs.
+      const draft = { ...emptyQuickKeyDraft(), emoji, label: "Ship it!", prompt: "ship" }
+      expect(validateQuickKey(draft)).toEqual({})
+      expect(quickKeyFromDraft(draft, "qk-1").emoji).toBe(emoji)
+    }
   })
 })
 

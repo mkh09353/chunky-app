@@ -69,6 +69,80 @@ export const RESERVED_HOTKEYS: Record<string, string> = {
   t: "⌘T folds threads",
 }
 
+/**
+ * The editor's emoji palette: a small curated set, not a dataset. The macOS
+ * system palette is unreliable inside WKWebView, so the dialog offers these
+ * inline; the text field still accepts anything typed or pasted.
+ *
+ * Every entry must be one grapheme, so picking one can never author a draft
+ * that validateQuickKey would then reject (see the test that asserts it).
+ */
+export const EMOJI_CHOICES: readonly string[] = [
+  // Ship / build
+  "🚀",
+  "🛠️",
+  "🔧",
+  "🔨",
+  "⚙️",
+  "📦",
+  "🏗️",
+  "🧱",
+  // Verdicts
+  "✅",
+  "☑️",
+  "✔️",
+  "❌",
+  "⚠️",
+  "⛔",
+  "❓",
+  "❗",
+  // Work
+  "🐛",
+  "🧪",
+  "🧹",
+  "♻️",
+  "🔍",
+  "🧭",
+  "🩺",
+  "🚦",
+  // Docs & data
+  "📝",
+  "📄",
+  "📋",
+  "📊",
+  "📈",
+  "🗂️",
+  "🔗",
+  "📌",
+  // Energy
+  "🔥",
+  "✨",
+  "⚡",
+  "💡",
+  "💥",
+  "🎯",
+  "🎨",
+  "🧩",
+  // People & tone
+  "🤖",
+  "🧠",
+  "👀",
+  "👍",
+  "🙏",
+  "🥳",
+  "💬",
+  "☕",
+  // Odds and ends
+  "🔒",
+  "🔑",
+  "⏱️",
+  "📅",
+  "🌱",
+  "🧊",
+  "🖥️",
+  "🪄",
+]
+
 /** A quick key as the editor holds it before validation. */
 export interface QuickKeyDraft {
   emoji: string

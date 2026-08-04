@@ -8,13 +8,14 @@
 //
 // Config is owned by the caller (App holds the list and persists it through the
 // Bun desktop settings); this component only edits and reports.
-import { Pencil, Plus } from "lucide-react"
+import { Pencil, Plus, Smile } from "lucide-react"
 import type * as React from "react"
 import { useEffect, useState } from "react"
 import { cn } from "~/lib/cn"
 import {
   draftFromQuickKey,
   emptyQuickKeyDraft,
+  EMOJI_CHOICES,
   hasQuickKeyErrors,
   hotkeyLabel,
   MAX_QUICK_KEYS,
@@ -31,6 +32,7 @@ import { Button } from "./ui/button"
 import { Dialog, DialogPopup, DialogTitle, DialogDescription, DialogHeader } from "./ui/dialog"
 import { Input } from "./ui/input"
 import { Kbd } from "./ui/kbd"
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover"
 import { Textarea } from "./ui/textarea"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
@@ -96,36 +98,41 @@ export function QuickKeys({
   const full = keys.length >= MAX_QUICK_KEYS && !editing
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl items-center gap-2 px-4">
-      <span className="shrink-0 select-none font-medium text-[10px] text-muted-foreground/70 uppercase tracking-[0.14em]">
-        Quick
-      </span>
-      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto whitespace-nowrap pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        {keys.map((key) => (
-          <QuickKeyChip
-            key={key.id}
-            entry={key}
-            disabled={disabled}
-            onRun={() => onRun(key)}
-            onEdit={() => openEditor(key)}
-          />
-        ))}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <button
-                aria-label="Add a quick key"
-                className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/70 border-dashed text-muted-foreground outline-none transition-colors hover:border-border hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-default disabled:opacity-50"
-                disabled={full}
-                onClick={() => openEditor(null)}
-                type="button"
-              />
-            }
-          >
-            <Plus className="size-3" />
-          </TooltipTrigger>
-          <TooltipPopup>{full ? `Limit is ${MAX_QUICK_KEYS} quick keys` : "New quick key"}</TooltipPopup>
-        </Tooltip>
+    <div className="mx-auto flex w-full max-w-5xl items-center px-4">
+      {/* One scroller holding one auto-margined group: with room to spare the
+          margins centre the chips over the composer below; once the row is full
+          they collapse to zero, so it still scrolls from the left edge. */}
+      <div className="flex min-w-0 flex-1 items-center overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div className="mx-auto flex items-center gap-1.5 whitespace-nowrap">
+          <span className="mr-0.5 shrink-0 select-none font-medium text-[10px] text-muted-foreground/70 uppercase tracking-[0.14em]">
+            Quick
+          </span>
+          {keys.map((key) => (
+            <QuickKeyChip
+              key={key.id}
+              entry={key}
+              disabled={disabled}
+              onRun={() => onRun(key)}
+              onEdit={() => openEditor(key)}
+            />
+          ))}
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  aria-label="Add a quick key"
+                  className="inline-flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-full border border-border/70 border-dashed text-muted-foreground outline-none transition-colors hover:border-border hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-default disabled:opacity-50"
+                  disabled={full}
+                  onClick={() => openEditor(null)}
+                  type="button"
+                />
+              }
+            >
+              <Plus className="size-3" />
+            </TooltipTrigger>
+            <TooltipPopup>{full ? `Limit is ${MAX_QUICK_KEYS} quick keys` : "New quick key"}</TooltipPopup>
+          </Tooltip>
+        </div>
       </div>
 
       <Dialog onOpenChange={onEditorOpenChange} open={editorOpen}>
@@ -142,14 +149,22 @@ export function QuickKeys({
               {/* No emoji placeholder: a ghosted 🚢 in an empty field reads as an icon
                   that is already chosen. The live preview below is the only place
                   an emoji ever appears, so what you see is what the chip gets. */}
-              <Field className="w-24 shrink-0" error={errors.emoji} label="Icon">
-                <Input
-                  aria-label="Icon (optional emoji)"
-                  className="text-center text-base"
-                  onChange={(event) => setDraft((d) => ({ ...d, emoji: event.target.value }))}
-                  onKeyDown={submitOnEnter}
-                  value={draft.emoji}
-                />
+              <Field className="w-28 shrink-0" error={errors.emoji} label="Icon">
+                <div className="flex items-center gap-1.5">
+                  <Input
+                    aria-label="Icon (optional emoji)"
+                    className="min-w-0 flex-1 text-center text-base"
+                    onChange={(event) => setDraft((d) => ({ ...d, emoji: event.target.value }))}
+                    onKeyDown={submitOnEnter}
+                    value={draft.emoji}
+                  />
+                  {/* Typing or pasting still works; this is just a reliable way
+                      in, since the macOS palette is flaky inside WKWebView. */}
+                  <EmojiPicker
+                    onPick={(emoji) => setDraft((d) => ({ ...d, emoji }))}
+                    value={draft.emoji.trim()}
+                  />
+                </div>
               </Field>
               <Field className="min-w-0 flex-1" error={errors.label} label="Label">
                 <Input
@@ -257,6 +272,58 @@ function ChipContent({
       <span className="truncate">{label}</span>
       {badge ? <Kbd className="h-4 shrink-0 px-1 text-[10px]">{badge}</Kbd> : null}
     </>
+  )
+}
+
+/**
+ * The Icon field's way in: a curated grid, not a dataset. Clicking a face
+ * replaces whatever the field holds and closes the popover — the draft is the
+ * only state it touches, so validateQuickKey still has the last word.
+ *
+ * Non-modal (Base UI's default), so it nests inside the editor Dialog without
+ * two focus traps arguing; the popup portals out, so the dialog never clips it.
+ */
+function EmojiPicker({ value, onPick }: { value: string; onPick: (emoji: string) => void }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover onOpenChange={setOpen} open={open}>
+      <PopoverTrigger
+        render={
+          <button
+            aria-label="Choose an emoji"
+            className="inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-input text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/25 data-[popup-open]:bg-accent data-[popup-open]:text-foreground"
+            type="button"
+          />
+        }
+      >
+        <Smile className="size-4" />
+      </PopoverTrigger>
+      <PopoverPopup align="start" className="w-[19rem]" side="bottom">
+        <div className="grid grid-cols-8 gap-0.5">
+          {EMOJI_CHOICES.map((emoji) => (
+            <button
+              aria-label={`Use ${emoji}`}
+              aria-pressed={value === emoji}
+              className={cn(
+                "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-[17px] leading-none outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50",
+                value === emoji && "bg-accent",
+              )}
+              key={emoji}
+              onClick={() => {
+                onPick(emoji)
+                setOpen(false)
+              }}
+              type="button"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+        <p className="px-1 pt-2 text-[11px] text-muted-foreground/70">
+          Or type any emoji in the field.
+        </p>
+      </PopoverPopup>
+    </Popover>
   )
 }
 
