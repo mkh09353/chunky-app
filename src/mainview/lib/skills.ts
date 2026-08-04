@@ -4,8 +4,8 @@
 // component; everything here is a function of the server's repo rows, so the
 // summary line, the optimistic toggle and the older-server check can be
 // asserted without React or a server.
-import type { SkillRepoStatus } from "@chunky/protocol"
-import { HttpError } from "./configApi"
+import type { SkillModelBinding, SkillRepoStatus } from "@chunky/protocol"
+import { EFFORTS, HttpError } from "./configApi"
 import { relativeTime } from "./format"
 
 export interface SkillsSummary {
@@ -69,4 +69,95 @@ export function setSkillEnabledIn(
  */
 export function isUnsupportedSkillRepos(err: unknown): boolean {
   return err instanceof HttpError && (err.status === 404 || err.status === 501)
+}
+
+// ---- Model bindings -------------------------------------------------------
+
+/** How the two lock strengths read on a badge. */
+const LOCK_LABEL: Record<SkillModelBinding["lock"], string> = {
+  prefer: "semi",
+  require: "locked",
+}
+
+/**
+ * The badge text for a bound skill: "→ codex/gpt-5.2 · semi", with the effort
+ * folded in when the binding pins one. Returns "" for an unbound skill so the
+ * caller can render nothing at all.
+ */
+export function formatBinding(binding: SkillModelBinding | undefined | null): string {
+  if (!binding || !binding.provider || !binding.model) return ""
+  const parts = [`→ ${binding.provider}/${binding.model}`]
+  if (binding.effort) parts.push(binding.effort)
+  parts.push(LOCK_LABEL[binding.lock] ?? String(binding.lock))
+  return parts.join(" · ")
+}
+
+/** The `provider/model` key the shared ModelSelect speaks, or "" when unbound. */
+export function bindingModelKey(binding: SkillModelBinding | undefined | null): string {
+  if (!binding || !binding.provider || !binding.model) return ""
+  return `${binding.provider}/${binding.model}`
+}
+
+export type BindingDraft = {
+  /** "provider/model", as produced by ModelSelect or typed by hand. */
+  modelKey: string
+  effort: string
+  lock: SkillModelBinding["lock"]
+}
+
+export type BindingValidation =
+  | { ok: true; binding: SkillModelBinding }
+  | { ok: false; error: string }
+
+/**
+ * Turn an editor draft into a binding the server will accept. Provider AND
+ * model are required (a bare provider cannot pin anything), and an effort is
+ * only sent when it is one the server knows.
+ */
+export function parseBindingDraft(draft: BindingDraft): BindingValidation {
+  const key = (draft.modelKey ?? "").trim()
+  if (!key) return { ok: false, error: "Pick a provider and model first." }
+  const slash = key.indexOf("/")
+  if (slash <= 0 || slash === key.length - 1) {
+    return { ok: false, error: "Use the form provider/model, e.g. codex/gpt-5.2." }
+  }
+  const provider = key.slice(0, slash).trim()
+  const model = key.slice(slash + 1).trim()
+  if (!provider || !model) {
+    return { ok: false, error: "Use the form provider/model, e.g. codex/gpt-5.2." }
+  }
+  const effort = (draft.effort ?? "").trim()
+  if (effort && !(EFFORTS as readonly string[]).includes(effort)) {
+    return { ok: false, error: `Unknown effort "${effort}".` }
+  }
+  const lock = draft.lock === "require" ? "require" : "prefer"
+  return { ok: true, binding: { provider, model, lock, ...(effort ? { effort } : {}) } }
+}
+
+/**
+ * Set or clear one skill's binding, returning a new list. Like
+ * setSkillEnabledIn, this doubles as its own revert: keep the previous binding
+ * and pass it back to undo an optimistic write.
+ */
+export function setSkillBindingIn(
+  repos: readonly SkillRepoStatus[],
+  repoId: string,
+  skillName: string,
+  binding: SkillModelBinding | null,
+): SkillRepoStatus[] {
+  return repos.map((repo) =>
+    repo.id === repoId
+      ? {
+          ...repo,
+          skills: repo.skills.map((skill) => {
+            if (skill.name !== skillName) return skill
+            if (!binding) {
+              const { binding: _dropped, ...rest } = skill
+              return rest
+            }
+            return { ...skill, binding }
+          }),
+        }
+      : repo,
+  )
 }

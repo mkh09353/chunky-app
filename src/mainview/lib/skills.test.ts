@@ -2,11 +2,15 @@
 // clock, the optimistic toggle, and "this server is too old". Run with:
 //   bun test src/mainview/lib/skills.test.ts
 import { describe, expect, test } from "bun:test"
-import type { ManagedSkill, SkillRepoStatus } from "@chunky/protocol"
+import type { ManagedSkill, SkillModelBinding, SkillRepoStatus } from "@chunky/protocol"
 import { HttpError } from "./configApi"
 import {
+  bindingModelKey,
+  formatBinding,
   formatLastSync,
   isUnsupportedSkillRepos,
+  parseBindingDraft,
+  setSkillBindingIn,
   setSkillEnabledIn,
   summarizeSkills,
 } from "./skills"
@@ -14,11 +18,14 @@ import {
 const NOW = Date.parse("2026-03-10T12:00:00.000Z")
 const HOUR = 3_600_000
 
-const skill = (name: string, enabled: boolean): ManagedSkill => ({
+const skill = (name: string, enabled: boolean, binding?: SkillModelBinding): ManagedSkill => ({
   name,
   description: `${name} does something`,
   enabled,
+  ...(binding ? { binding } : {}),
 })
+
+const BOUND: SkillModelBinding = { provider: "codex", model: "gpt-5.2", lock: "prefer" }
 
 function repo(over: Partial<SkillRepoStatus> = {}): SkillRepoStatus {
   return {
@@ -104,6 +111,125 @@ describe("setSkillEnabledIn", () => {
   test("an unknown repo or skill changes nothing", () => {
     expect(setSkillEnabledIn(repos, "nope", "alpha", true)).toEqual(repos as SkillRepoStatus[])
     expect(setSkillEnabledIn(repos, "one", "nope", true)).toEqual(repos as SkillRepoStatus[])
+  })
+})
+
+describe("formatBinding", () => {
+  test("names the model and how hard the lock is", () => {
+    expect(formatBinding({ provider: "codex", model: "gpt-5.2", lock: "prefer" })).toBe(
+      "→ codex/gpt-5.2 · semi",
+    )
+    expect(formatBinding({ provider: "codex", model: "gpt-5.2", lock: "require" })).toBe(
+      "→ codex/gpt-5.2 · locked",
+    )
+  })
+
+  test("folds in a pinned effort", () => {
+    expect(
+      formatBinding({ provider: "zen", model: "claude-4", effort: "high", lock: "require" }),
+    ).toBe("→ zen/claude-4 · high · locked")
+  })
+
+  test("an unbound or half-formed binding renders nothing", () => {
+    expect(formatBinding(undefined)).toBe("")
+    expect(formatBinding(null)).toBe("")
+    expect(formatBinding({ provider: "codex", model: "", lock: "prefer" })).toBe("")
+  })
+})
+
+describe("bindingModelKey", () => {
+  test("is the provider/model key the picker speaks", () => {
+    expect(bindingModelKey(BOUND)).toBe("codex/gpt-5.2")
+    expect(bindingModelKey(undefined)).toBe("")
+  })
+})
+
+describe("parseBindingDraft", () => {
+  test("splits provider from model and defaults the lock to prefer", () => {
+    const result = parseBindingDraft({ modelKey: "codex/gpt-5.2", effort: "", lock: "prefer" })
+    expect(result).toEqual({
+      ok: true,
+      binding: { provider: "codex", model: "gpt-5.2", lock: "prefer" },
+    })
+  })
+
+  test("keeps a model id containing slashes intact", () => {
+    const result = parseBindingDraft({
+      modelKey: "openrouter/meta/llama-3.1",
+      effort: "",
+      lock: "require",
+    })
+    expect(result).toEqual({
+      ok: true,
+      binding: { provider: "openrouter", model: "meta/llama-3.1", lock: "require" },
+    })
+  })
+
+  test("carries a known effort and omits an empty one", () => {
+    const withEffort = parseBindingDraft({
+      modelKey: "codex/gpt-5.2",
+      effort: "xhigh",
+      lock: "prefer",
+    })
+    expect(withEffort.ok && withEffort.binding.effort).toBe("xhigh")
+    const without = parseBindingDraft({ modelKey: "codex/gpt-5.2", effort: "", lock: "prefer" })
+    expect(without.ok && "effort" in without.binding).toBe(false)
+  })
+
+  test("provider and model are both required", () => {
+    expect(parseBindingDraft({ modelKey: "", effort: "", lock: "prefer" }).ok).toBe(false)
+    expect(parseBindingDraft({ modelKey: "codex", effort: "", lock: "prefer" }).ok).toBe(false)
+    expect(parseBindingDraft({ modelKey: "codex/", effort: "", lock: "prefer" }).ok).toBe(false)
+    expect(parseBindingDraft({ modelKey: "/gpt-5.2", effort: "", lock: "prefer" }).ok).toBe(false)
+  })
+
+  test("an effort the server does not know is refused by name", () => {
+    const result = parseBindingDraft({ modelKey: "codex/gpt-5.2", effort: "turbo", lock: "prefer" })
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.error).toContain("turbo")
+  })
+
+  test("whitespace around a hand-typed key is trimmed", () => {
+    const result = parseBindingDraft({ modelKey: "  codex / gpt-5.2 ", effort: "", lock: "prefer" })
+    expect(result).toEqual({
+      ok: true,
+      binding: { provider: "codex", model: "gpt-5.2", lock: "prefer" },
+    })
+  })
+})
+
+describe("setSkillBindingIn", () => {
+  const repos = [
+    repo({ id: "one", skills: [skill("alpha", true), skill("beta", true, BOUND)] }),
+    repo({ id: "two", skills: [skill("alpha", true)] }),
+  ]
+
+  test("binds only the named skill in the named repo", () => {
+    const next = setSkillBindingIn(repos, "one", "alpha", BOUND)
+    expect(next[0]!.skills[0]!.binding).toEqual(BOUND)
+    expect(next[1]!.skills[0]!.binding).toBeUndefined()
+  })
+
+  test("null removes the binding entirely", () => {
+    const next = setSkillBindingIn(repos, "one", "beta", null)
+    expect(next[0]!.skills[1]!.binding).toBeUndefined()
+    expect("binding" in next[0]!.skills[1]!).toBe(false)
+  })
+
+  test("the previous value passed back is the revert", () => {
+    const optimistic = setSkillBindingIn(repos, "one", "beta", null)
+    const reverted = setSkillBindingIn(optimistic, "one", "beta", BOUND)
+    expect(reverted[0]!.skills[1]!.binding).toEqual(BOUND)
+  })
+
+  test("does not mutate the input", () => {
+    setSkillBindingIn(repos, "one", "alpha", BOUND)
+    expect(repos[0]!.skills[0]!.binding).toBeUndefined()
+  })
+
+  test("an unknown repo or skill changes nothing", () => {
+    expect(setSkillBindingIn(repos, "nope", "alpha", BOUND)).toEqual(repos as SkillRepoStatus[])
+    expect(setSkillBindingIn(repos, "one", "nope", BOUND)).toEqual(repos as SkillRepoStatus[])
   })
 })
 
