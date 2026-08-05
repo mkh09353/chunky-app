@@ -10,12 +10,12 @@
 // Bun desktop settings); this component only edits and reports.
 import { Pencil, Plus, Smile } from "lucide-react"
 import type * as React from "react"
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { cn } from "~/lib/cn"
+import { searchEmoji } from "~/lib/emojiSearch"
 import {
   draftFromQuickKey,
   emptyQuickKeyDraft,
-  EMOJI_CHOICES,
   hasQuickKeyErrors,
   hotkeyLabel,
   MAX_QUICK_KEYS,
@@ -285,8 +285,23 @@ function ChipContent({
  */
 function EmojiPicker({ value, onPick }: { value: string; onPick: (emoji: string) => void }) {
   const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState("")
+  const results = useMemo(() => searchEmoji(query), [query])
+
+  const choose = (emoji: string) => {
+    onPick(emoji)
+    setOpen(false)
+  }
+
   return (
-    <Popover onOpenChange={setOpen} open={open}>
+    <Popover
+      onOpenChange={(next) => {
+        setOpen(next)
+        // Each visit starts from the curated grid rather than the last search.
+        if (!next) setQuery("")
+      }}
+      open={open}
+    >
       <PopoverTrigger
         render={
           <button
@@ -299,26 +314,59 @@ function EmojiPicker({ value, onPick }: { value: string; onPick: (emoji: string)
         <Smile className="size-4" />
       </PopoverTrigger>
       <PopoverPopup align="start" className="w-[19rem]" side="bottom">
-        <div className="grid grid-cols-8 gap-0.5">
-          {EMOJI_CHOICES.map((emoji) => (
-            <button
-              aria-label={`Use ${emoji}`}
-              aria-pressed={value === emoji}
-              className={cn(
-                "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-[17px] leading-none outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50",
-                value === emoji && "bg-accent",
-              )}
-              key={emoji}
-              onClick={() => {
-                onPick(emoji)
-                setOpen(false)
-              }}
-              type="button"
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+        <input
+          aria-label="Search emojis"
+          // The popover is why the user is here; typing should just work.
+          // eslint-disable-next-line jsx-a11y/no-autofocus
+          autoFocus
+          className="mb-1.5 h-8 w-full rounded-lg border border-input bg-background px-2.5 text-[13px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/25"
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              // Enter takes the obvious answer; with no results it does nothing
+              // rather than closing on an empty pick.
+              const first = results[0]
+              if (!first) return
+              event.preventDefault()
+              choose(first.char)
+              return
+            }
+            if (event.key === "Escape" && query) {
+              // Clear the search first; a second Escape closes the popover.
+              event.preventDefault()
+              event.stopPropagation()
+              setQuery("")
+            }
+          }}
+          placeholder="Search emojis"
+          spellCheck={false}
+          type="text"
+          value={query}
+        />
+        {results.length > 0 ? (
+          <div className="grid max-h-[13.5rem] grid-cols-8 gap-0.5 overflow-y-auto">
+            {results.map((entry) => (
+              <button
+                aria-label={`Use ${entry.char}`}
+                aria-pressed={value === entry.char}
+                className={cn(
+                  "inline-flex size-8 cursor-pointer items-center justify-center rounded-md text-[17px] leading-none outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50",
+                  value === entry.char && "bg-accent",
+                )}
+                key={entry.char}
+                onClick={() => choose(entry.char)}
+                title={entry.name}
+                type="button"
+              >
+                {entry.char}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="px-1 py-6 text-center text-[12px] text-muted-foreground/70">
+            No emoji matches “{query.trim()}”.
+          </p>
+        )}
         <p className="px-1 pt-2 text-[11px] text-muted-foreground/70">
           Or type any emoji in the field.
         </p>
