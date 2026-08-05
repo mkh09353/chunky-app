@@ -12,28 +12,24 @@ import type { ModelRow, SkillCatalogEntry, SkillRepoStatus } from "~/lib/configA
 import { cn } from "~/lib/cn"
 import { confirm } from "~/lib/confirm"
 import {
-  bindingModelKey,
   formatBinding,
   formatLastSync,
   isUnsupportedSkillRepos,
-  parseBindingDraft,
   setSkillBindingIn,
   setSkillEnabledIn,
   summarizeSkills,
 } from "~/lib/skills"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
+import { BindingEditor } from "./BindingEditor"
 import {
   Badge,
   Card,
-  EffortSelect,
   EmptyNote,
   ErrorNote,
   InlineError,
   Loading,
-  ModelSelect,
   SectionShell,
-  Select,
   Spinner,
   SubLabel,
   TextInput,
@@ -192,97 +188,6 @@ function SkillList({
           </div>
         </div>
       ))}
-    </div>
-  )
-}
-
-/**
- * The compact per-skill binding editor: which model this skill's delegates
- * should run on, how hard the pin is, and (optionally) at what effort.
- *
- * The picker is the shared ModelSelect, so it keeps a server-confirmed model
- * selectable even when the catalog is incomplete; with no catalog at all it
- * degrades to a typed `provider/model`.
- */
-function BindingEditor({
-  rows,
-  binding,
-  busy,
-  onSave,
-  onRemove,
-  onCancel,
-}: {
-  rows: ModelRow[]
-  binding: SkillModelBinding | undefined
-  busy: boolean
-  onSave: (binding: SkillModelBinding) => void
-  onRemove: () => void
-  onCancel: () => void
-}) {
-  const [modelKey, setModelKey] = useState(bindingModelKey(binding))
-  const [effort, setEffort] = useState(binding?.effort ?? "")
-  const [lock, setLock] = useState<SkillModelBinding["lock"]>(binding?.lock ?? "prefer")
-  const [invalid, setInvalid] = useState<string | null>(null)
-
-  const save = () => {
-    const result = parseBindingDraft({ modelKey, effort, lock })
-    if (!result.ok) {
-      setInvalid(result.error)
-      return
-    }
-    setInvalid(null)
-    onSave(result.binding)
-  }
-
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-muted/30 p-2">
-      <div className="flex flex-wrap items-center gap-2">
-        {rows.length > 0 ? (
-          <ModelSelect rows={rows} value={modelKey} onChange={setModelKey} disabled={busy} />
-        ) : (
-          <TextInput
-            value={modelKey}
-            onChange={setModelKey}
-            placeholder="provider/model"
-            disabled={busy}
-            monospace
-            className="max-w-[15rem]"
-          />
-        )}
-        <EffortSelect value={effort} onChange={setEffort} allowInherit disabled={busy} />
-        <Select
-          value={lock}
-          onChange={(v) => setLock(v === "require" ? "require" : "prefer")}
-          disabled={busy}
-          className="w-[11rem]"
-        >
-          <option value="prefer">Prefer (semi lock)</option>
-          <option value="require">Require (hard lock)</option>
-        </Select>
-      </div>
-
-      {invalid && <InlineError>{invalid}</InlineError>}
-
-      <div className="flex items-center gap-2">
-        <Button size="sm" disabled={busy} onClick={save}>
-          {busy ? <Spinner /> : null}
-          Save
-        </Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
-          Cancel
-        </Button>
-        {binding && (
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={onRemove}
-            className="ml-auto text-destructive hover:bg-destructive/10"
-          >
-            Remove binding
-          </Button>
-        )}
-      </div>
     </div>
   )
 }

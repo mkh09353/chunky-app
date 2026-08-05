@@ -2,14 +2,22 @@
 // clock, the optimistic toggle, and "this server is too old". Run with:
 //   bun test src/mainview/lib/skills.test.ts
 import { describe, expect, test } from "bun:test"
-import type { ManagedSkill, SkillModelBinding, SkillRepoStatus } from "@chunky/protocol"
+import type {
+  ManagedSkill,
+  SkillCatalogEntry,
+  SkillModelBinding,
+  SkillRepoStatus,
+} from "@chunky/protocol"
 import { HttpError } from "./configApi"
 import {
   bindingModelKey,
+  findSkillBinding,
+  findSkillRepoId,
   formatBinding,
   formatLastSync,
   isUnsupportedSkillRepos,
   parseBindingDraft,
+  setCatalogBindingIn,
   setSkillBindingIn,
   setSkillEnabledIn,
   summarizeSkills,
@@ -230,6 +238,80 @@ describe("setSkillBindingIn", () => {
   test("an unknown repo or skill changes nothing", () => {
     expect(setSkillBindingIn(repos, "nope", "alpha", BOUND)).toEqual(repos as SkillRepoStatus[])
     expect(setSkillBindingIn(repos, "one", "nope", BOUND)).toEqual(repos as SkillRepoStatus[])
+  })
+})
+
+const catalogEntry = (
+  name: string,
+  binding?: SkillModelBinding,
+): SkillCatalogEntry => ({
+  name,
+  description: `${name} from the catalog`,
+  source: "user",
+  sourceLabel: "User",
+  path: `/skills/${name}`,
+  enabled: true,
+  ...(binding ? { binding } : {}),
+})
+
+describe("findSkillRepoId", () => {
+  const repos = [
+    repo({ id: "one", skills: [skill("alpha", true)] }),
+    repo({ id: "two", skills: [skill("chunky-code-review", true)] }),
+  ]
+
+  test("names the repo shipping the skill", () => {
+    expect(findSkillRepoId(repos, "chunky-code-review")).toBe("two")
+    expect(findSkillRepoId(repos, "alpha")).toBe("one")
+  })
+
+  test("a skill no managed repo ships has no repo id", () => {
+    expect(findSkillRepoId(repos, "not-here")).toBeNull()
+    expect(findSkillRepoId([], "alpha")).toBeNull()
+  })
+})
+
+describe("findSkillBinding", () => {
+  test("reads a binding off the managed repo row", () => {
+    const repos = [repo({ id: "one", skills: [skill("alpha", true, BOUND)] })]
+    expect(findSkillBinding(repos, [], "alpha")).toEqual(BOUND)
+  })
+
+  test("falls back to the flat catalog", () => {
+    expect(findSkillBinding([], [catalogEntry("alpha", BOUND)], "alpha")).toEqual(BOUND)
+  })
+
+  test("the managed repo wins when both know the skill", () => {
+    const other: SkillModelBinding = { provider: "zen", model: "claude-4", lock: "require" }
+    const repos = [repo({ id: "one", skills: [skill("alpha", true, BOUND)] })]
+    expect(findSkillBinding(repos, [catalogEntry("alpha", other)], "alpha")).toEqual(BOUND)
+  })
+
+  test("an unbound or unknown skill has no binding", () => {
+    const repos = [repo({ id: "one", skills: [skill("alpha", true)] })]
+    expect(findSkillBinding(repos, [catalogEntry("beta")], "alpha")).toBeUndefined()
+    expect(findSkillBinding(repos, [], "nope")).toBeUndefined()
+  })
+})
+
+describe("setCatalogBindingIn", () => {
+  const catalog = [catalogEntry("alpha"), catalogEntry("beta", BOUND)]
+
+  test("binds only the named entry", () => {
+    const next = setCatalogBindingIn(catalog, "alpha", BOUND)
+    expect(next[0]!.binding).toEqual(BOUND)
+    expect(next[1]!.binding).toEqual(BOUND)
+  })
+
+  test("null removes the binding entirely", () => {
+    const next = setCatalogBindingIn(catalog, "beta", null)
+    expect("binding" in next[1]!).toBe(false)
+  })
+
+  test("does not mutate the input, and ignores unknown names", () => {
+    setCatalogBindingIn(catalog, "alpha", BOUND)
+    expect(catalog[0]!.binding).toBeUndefined()
+    expect(setCatalogBindingIn(catalog, "nope", BOUND)).toEqual(catalog as SkillCatalogEntry[])
   })
 })
 

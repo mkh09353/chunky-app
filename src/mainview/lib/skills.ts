@@ -4,7 +4,7 @@
 // component; everything here is a function of the server's repo rows, so the
 // summary line, the optimistic toggle and the older-server check can be
 // asserted without React or a server.
-import type { SkillModelBinding, SkillRepoStatus } from "@chunky/protocol"
+import type { SkillCatalogEntry, SkillModelBinding, SkillRepoStatus } from "@chunky/protocol"
 import { EFFORTS, HttpError } from "./configApi"
 import { relativeTime } from "./format"
 
@@ -132,6 +132,58 @@ export function parseBindingDraft(draft: BindingDraft): BindingValidation {
   }
   const lock = draft.lock === "require" ? "require" : "prefer"
   return { ok: true, binding: { provider, model, lock, ...(effort ? { effort } : {}) } }
+}
+
+/**
+ * Which managed repo ships a skill, by name. Binding a skill goes through its
+ * repo, so this is what turns a bare skill name (as the PR review lenses are
+ * configured) into an addressable bind request. null when no managed repo
+ * ships it — a user/project skill, which the server resolves by name alone.
+ */
+export function findSkillRepoId(
+  repos: readonly SkillRepoStatus[],
+  skillName: string,
+): string | null {
+  for (const repo of repos) {
+    if (repo.skills.some((skill) => skill.name === skillName)) return repo.id
+  }
+  return null
+}
+
+/**
+ * A skill's current binding, wherever it is known from. Managed repos win over
+ * the flat catalog: both describe the same skill, but the repo row is the one
+ * an optimistic write updates.
+ */
+export function findSkillBinding(
+  repos: readonly SkillRepoStatus[],
+  catalog: readonly SkillCatalogEntry[],
+  skillName: string,
+): SkillModelBinding | undefined {
+  for (const repo of repos) {
+    const hit = repo.skills.find((skill) => skill.name === skillName)
+    if (hit) return hit.binding
+  }
+  return catalog.find((entry) => entry.name === skillName)?.binding
+}
+
+/**
+ * The catalog-side twin of setSkillBindingIn, so an optimistic write repaints
+ * whichever of the two sources the row happened to read from.
+ */
+export function setCatalogBindingIn(
+  catalog: readonly SkillCatalogEntry[],
+  skillName: string,
+  binding: SkillModelBinding | null,
+): SkillCatalogEntry[] {
+  return catalog.map((entry) => {
+    if (entry.name !== skillName) return entry
+    if (!binding) {
+      const { binding: _dropped, ...rest } = entry
+      return rest
+    }
+    return { ...entry, binding }
+  })
 }
 
 /**

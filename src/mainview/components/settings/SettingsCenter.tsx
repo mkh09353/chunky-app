@@ -2,6 +2,7 @@ import {
   Boxes,
   Cpu,
   Eye,
+  GitPullRequest,
   Layers,
   Mic,
   Settings2,
@@ -20,6 +21,7 @@ import { AdvisorSection, ReviewerSection } from "./AgentConfigSection"
 import { GeneralSection } from "./GeneralSection"
 import { ModelsSection } from "./ModelsSection"
 import { ModesSection } from "./ModesSection"
+import { PrReviewsSection } from "./PrReviewsSection"
 import { ProvidersSection } from "./ProvidersSection"
 import { RelaySection } from "./RelaySection"
 import { SidekickSection } from "./SidekickSection"
@@ -35,6 +37,7 @@ type SectionId =
   | "sidekick"
   | "modes"
   | "skills"
+  | "prReviews"
   | "workflow"
   | "voice"
   | "relay"
@@ -48,6 +51,7 @@ const NAV: { id: SectionId; label: string; icon: typeof Cpu }[] = [
   { id: "sidekick", label: "Sidekick", icon: Wrench },
   { id: "modes", label: "Modes", icon: Layers },
   { id: "skills", label: "Skills", icon: Sparkles },
+  { id: "prReviews", label: "PR Reviews", icon: GitPullRequest },
   { id: "workflow", label: "Workflow", icon: Workflow },
   { id: "voice", label: "Voice", icon: Mic },
   { id: "relay", label: "Relay", icon: Smartphone },
@@ -98,6 +102,8 @@ function renderSection(
       return <ModesSection onApplied={onModesChanged} />
     case "skills":
       return <SkillsSection />
+    case "prReviews":
+      return <PrReviewsSection />
     case "workflow":
       return <WorkflowSection />
     case "voice":
