@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           git clone --no-checkout https://github.com/mkh09353/chunky.git "$GITHUB_WORKSPACE/../chunky"
-          git -C "$GITHUB_WORKSPACE/../chunky" checkout --detach 56bb4d6344316ee9c4eb21cd8e0a4ecf44583f76
+          git -C "$GITHUB_WORKSPACE/../chunky" checkout --detach 76d4d0e19fd41dd217bf5f851f523d0502db9177
 
       - uses: oven-sh/setup-bun@v2
 
