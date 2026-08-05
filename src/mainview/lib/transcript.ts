@@ -165,6 +165,67 @@ function closeRun(state: TranscriptState, threadId: string): RunRecord[] {
   return runs
 }
 
+/** Close every still-open item in a settled thread.
+ *
+ *  A turn does NOT always close what it opened: an interrupt/steer ends the
+ *  turn with `error: ⏹ Interrupted.` + `session.status: idle` and never sends
+ *  the `tool.end` / `message.end` for whatever was in flight (see any stopped
+ *  turn in the server's event log). Without this, that tool item stays
+ *  `done: false` forever, which keeps `isStreaming` true and the composer stuck
+ *  in its running shape long after the session went idle.
+ *
+ *  Partial `progress` is promoted to `output` so the interrupted call still
+ *  shows what it managed to print. */
+function settleItems(items: Item[]): Item[] {
+  let touched = false
+  const next = items.map((it): Item => {
+    if (it.kind === "assistant" && it.streaming) {
+      touched = true
+      return { ...it, streaming: false, endReason: it.endReason ?? "interrupted" }
+    }
+    if (it.kind === "reasoning" && it.streaming) {
+      touched = true
+      return { ...it, streaming: false }
+    }
+    if (it.kind === "tool" && !it.done) {
+      touched = true
+      const output = it.output ?? it.progress
+      // `ok: false` rather than a green check: the call never reported a
+      // result, so claiming success would be a lie.
+      return {
+        ...it,
+        done: true,
+        ok: false,
+        ...(output ? { output } : {}),
+        progress: undefined,
+      }
+    }
+    return it
+  })
+  return touched ? next : items
+}
+
+/** Settle open items in MAIN and in every thread that is not itself running.
+ *
+ *  Threads still marked `running` are left alone on purpose: a detached child
+ *  legitimately outlives the root turn (see the "keeps a delegate run live"
+ *  case in transcript.test.ts), and its own `thread.status: idle` settles it. */
+function settleSettledThreads(state: TranscriptState): TranscriptState {
+  let changed = false
+  const threads: Record<string, ThreadNode> = { ...state.threads }
+  for (const id of state.order) {
+    const thread = threads[id]
+    if (!thread) continue
+    if (id !== MAIN && thread.status === "running") continue
+    const items = settleItems(thread.items)
+    if (items !== thread.items) {
+      threads[id] = { ...thread, items }
+      changed = true
+    }
+  }
+  return changed ? { ...state, threads } : state
+}
+
 const PROGRESS_MAX_BYTES = 64 * 1024
 
 function appendProgress(prev: string | undefined, chunk: string): string {
@@ -292,11 +353,14 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
   switch (ev.type) {
     case "session.status": {
       const main = state.threads[MAIN]!
-      return {
+      const next: TranscriptState = {
         ...state,
         status: ev.status,
         threads: { ...state.threads, [MAIN]: { ...main, status: ev.status } },
       }
+      // Idle is authoritative: an idle session has nothing in flight, so any
+      // item an interrupted/aborted turn left open is closed here.
+      return ev.status === "idle" ? settleSettledThreads(next) : next
     }
 
     case "session.rewound":
@@ -395,10 +459,13 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
             status: ev.status,
             items: [],
           }
+      // Same authority rule one level down: a thread that reports idle cannot
+      // still have a streaming message or an unfinished tool.
+      const settled = ev.status === "idle" ? { ...node, items: settleItems(node.items) } : node
       return {
         ...state,
         order: existing ? state.order : [...state.order, ev.threadId],
-        threads: { ...state.threads, [ev.threadId]: node },
+        threads: { ...state.threads, [ev.threadId]: settled },
         runs:
           ev.status === "running"
             ? openRun(state, ev.threadId, node.parentId ?? MAIN, node.title, node.model)
@@ -486,9 +553,17 @@ export function isTreeIdle(state: TranscriptState): boolean {
   )
 }
 
-/** True when any assistant/reasoning/tool item is still open. */
+/** True when any assistant/reasoning/tool item is still open.
+ *
+ *  `session.status: idle` short-circuits this to false — idle is authoritative,
+ *  so nothing can still be streaming in an idle session. That is the backstop
+ *  for an end event that never arrives (aborted/steered turn, an SSE gap, a
+ *  child thread whose items never closed): the composer follows the server's
+ *  status, never a leftover item flag. Session-tree busyness — a detached child
+ *  outliving the root turn — is `isTreeIdle`, not this. */
 export function isStreaming(state: TranscriptState): boolean {
   if (state.status === "running") return true
+  if (state.status === "idle") return false
   for (const id of state.order) {
     const items = state.threads[id]?.items ?? []
     for (const it of items) {
