@@ -199,6 +199,11 @@ export function ChatTopBar({
  *  and we leave the viewport alone. */
 const BOTTOM_SLACK = 48
 
+/** Is the viewport parked at (or within slack of) the end of the transcript? */
+function atBottom(el: HTMLElement) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK
+}
+
 /** Breathing room above the answer when we park its first line at the top. */
 const ANSWER_TOP_GAP = 12
 
@@ -253,7 +258,7 @@ export function ChatView({
     const el = scrollRef.current
     if (!el) return
     const onScroll = () => {
-      stuckToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK
+      stuckToBottom.current = atBottom(el)
     }
     el.addEventListener("scroll", onScroll, { passive: true })
     return () => el.removeEventListener("scroll", onScroll)
@@ -305,16 +310,30 @@ export function ChatView({
   const [turnEnd, setTurnEnd] = useState(0)
   const wasRunning = useRef(running)
   const messageCount = thread.messages.length
-  const lastRole = thread.messages[messageCount - 1]?.role
   // Read at turn end (not a dep — the effect must fire on the transition only).
   const messagesRef = useRef(messages)
   messagesRef.current = messages
 
   // A fresh user turn always re-anchors to the bottom, even if the reader had
   // scrolled away to re-read the previous answer.
+  //
+  // Keyed on the NUMBER of user messages rather than on the last row's role:
+  // the user echo and the assistant's streaming placeholder routinely land in
+  // the SAME commit (mapTranscript emits an empty assistant block as soon as
+  // the stream opens), which leaves the trailing role "assistant" and would
+  // silently skip the re-anchor — the transcript then never follows the reply.
+  // A count also survives an optimistic message's id being swapped for the
+  // server's, and only ever re-arms on a genuine append, so scrolling up
+  // mid-stream still stays put.
+  const userMessageCount = useMemo(
+    () => thread.messages.reduce((n, m) => (m.role === "user" ? n + 1 : n), 0),
+    [thread.messages],
+  )
+  const prevUserMessageCount = useRef(userMessageCount)
   useEffect(() => {
-    if (lastRole === "user") stuckToBottom.current = true
-  }, [messageCount, lastRole])
+    if (userMessageCount > prevUserMessageCount.current) stuckToBottom.current = true
+    prevUserMessageCount.current = userMessageCount
+  }, [userMessageCount])
 
   // Switching sessions starts at the end of the new thread, not wherever the
   // previous one had parked us.
@@ -354,9 +373,21 @@ export function ChatView({
       if (!first) return
       const top =
         first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
-      // Clamped by the browser when the answer is short — its start is visible
-      // either way, which is the point.
-      el.scrollTo({ top: Math.max(0, top - ANSWER_TOP_GAP), behavior: "smooth" })
+      const target = Math.max(0, top - ANSWER_TOP_GAP)
+      // A short answer starts within slack of the end: the browser would clamp
+      // this scroll to the bottom and fire NO scroll event, so the listener
+      // above could never re-arm the follow — the transcript would stay frozen
+      // for every later turn while the reader sees no room to scroll down.
+      // Treat that as "still reading the bottom": same resting place, and an
+      // instant jump so nothing races the ResizeObserver's own bottom-follow.
+      if (target >= el.scrollHeight - el.clientHeight - BOTTOM_SLACK) {
+        stuckToBottom.current = true
+        el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
+        return
+      }
+      // A long answer genuinely parks away from the end, so the follow stays
+      // off until the reader returns to the bottom or sends the next message.
+      el.scrollTo({ top: target, behavior: "smooth" })
     })
     return () => cancelAnimationFrame(frame)
     // `messages` is a dep so this fires on every streamed delta, not just on
