@@ -3,6 +3,7 @@
 import { cn } from "~/lib/cn"
 import {
   compactTokens,
+  kindLabel,
   modelLabel,
   money,
   percent,
@@ -52,9 +53,11 @@ export function ScoreboardTable({ body }: { body: ScoreboardResponse }) {
   return (
     <Table head={["Model", "Kind", "N", "Avg", "Rework", "Cost", "Rating/$"]}>
       {rows.map((r) => (
-        <tr key={`${modelLabel(r)}-${r.kind}`} className="border-border/50 border-b last:border-0">
+        <tr key={`${modelLabel(r)}-${kindLabel(r)}`} className="border-border/50 border-b last:border-0">
           <Cell mono>{modelLabel(r)}</Cell>
-          <Cell right>{r.kind}</Cell>
+          <Cell right>
+            <span className="whitespace-nowrap">{kindLabel(r)}</span>
+          </Cell>
           <Cell right>{r.samples}</Cell>
           <Cell right>{rating(r.avgRating)}</Cell>
           <Cell right>{percent(r.reworkRate)}</Cell>

@@ -10,6 +10,8 @@ export interface ScoreboardRow {
   model: string
   effort: string | null
   kind: string
+  /** Named sidekick seat (e.g. "websearch"); null/absent for the default seat and older servers. */
+  seat?: string | null
   samples: number
   avgRating: number | null
   ratedCount: number
@@ -60,6 +62,11 @@ export function compactTokens(n: number): string {
 /** provider/model@effort — the identity every stats row is keyed by. */
 export function modelLabel(row: { provider: string; model: string; effort: string | null }): string {
   return `${row.provider}/${row.model}${row.effort ? `@${row.effort}` : ""}`
+}
+
+/** "sidekick · websearch" for named seats; plain kind otherwise. */
+export function kindLabel(row: { kind: string; seat?: string | null }): string {
+  return row.seat ? `${row.kind} · ${row.seat}` : row.kind
 }
 
 export const money = (v: number | null): string => (v == null ? "—" : `$${v.toFixed(2)}`)
