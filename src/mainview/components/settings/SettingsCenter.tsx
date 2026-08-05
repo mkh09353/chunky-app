@@ -17,7 +17,7 @@ import { cn } from "~/lib/cn"
 import { DRAG_REGION } from "~/lib/dragRegion"
 import { Dialog, DialogPopup } from "../ui/dialog"
 import { ScrollArea } from "../ui/scroll-area"
-import { AdvisorSection, ReviewerSection } from "./AgentConfigSection"
+import { AdvisorSection, ReviewerSection, SoloAdvisorSection } from "./AgentConfigSection"
 import { GeneralSection } from "./GeneralSection"
 import { ModelsSection } from "./ModelsSection"
 import { ModesSection } from "./ModesSection"
@@ -93,7 +93,15 @@ function renderSection(
     case "models":
       return <ModelsSection />
     case "advisor":
-      return <AdvisorSection />
+      // The always-on advisor, then its solo counterpart: same surface, and
+      // solo is the state a raw model pick puts you in, so it belongs here
+      // rather than in a section of its own.
+      return (
+        <div className="flex flex-col gap-8">
+          <AdvisorSection />
+          <SoloAdvisorSection />
+        </div>
+      )
     case "reviewer":
       return <ReviewerSection />
     case "sidekick":

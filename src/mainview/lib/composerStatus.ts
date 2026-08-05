@@ -9,11 +9,17 @@
 // "off" label. Demo/offline yields a single dim `demo` chip rather than
 // pretending a server config exists.
 //
+// SOLO (lib/solo) is the one state that CHANGES what the details mean: the
+// server is suppressing every delegate, so the chip carries a solo breakdown
+// (executor + the opt-in solo advisor + "no delegates") instead of seats that
+// would be a lie on screen.
+//
 // This module is pure so the semantics can be reasoned about (and tested)
 // without React; ComposerStatus.tsx only paints what it returns.
 import type { GoalSnapshot } from "@chunky/protocol"
 import { prettyModel } from "./api"
 import type { AdvisorStatus, SidekickConfig } from "./configApi"
+import { SOLO_EXPLAINER, soloLines } from "./solo"
 
 /** Visual weight, mapped to Tailwind classes by the component. */
 export type ChipTone = "danger" | "accent" | "dim" | "warning"
@@ -42,6 +48,11 @@ export interface ComposerStatusInput {
   executor?: { model?: string | null; effort?: string | null } | null
   sidekick?: SidekickConfig | null
   advisor?: AdvisorStatus | null
+  /** SOLO (see lib/solo): the model runs alone. The sidekick, its seats and the
+   *  normal advisor are suppressed server-side, so the rule must not carry
+   *  them — only the opt-in solo advisor. */
+  solo?: boolean
+  soloAdvisor?: AdvisorStatus | null
   goal?: GoalSnapshot | null
 }
 
@@ -75,7 +86,7 @@ export function buildComposerStatus(input: ComposerStatusInput): StatusChip[] {
   // INHERITS the executor, so record the effective model (what a handoff
   // actually runs on) rather than the word "inherit".
   const details: ChipDetail[] = []
-  const sidekick = input.sidekick
+  const sidekick = input.solo ? null : input.sidekick
   if (sidekick?.default.enabled) {
     const seatNames = Object.keys(sidekick.seats)
     const model = sidekick.default.model ? prettyModel(sidekick.default.model) : label
@@ -90,7 +101,7 @@ export function buildComposerStatus(input: ComposerStatusInput): StatusChip[] {
   }
 
   // Advisor — only when enabled AND it has a model; marked when suppressed.
-  const advisor = input.advisor
+  const advisor = input.solo ? null : input.advisor
   if (advisor?.config.enabled && advisor.config.model) {
     const model = prettyModel(advisor.config.model)
     details.push({ name: "advisor", model: advisor.active ? model : `${model} (unavailable)` })
@@ -99,12 +110,23 @@ export function buildComposerStatus(input: ComposerStatusInput): StatusChip[] {
   // Executor headline: `Claude Fable 5 (low)`, standing in for every seat it
   // feeds. The seats hang off it rather than crowding the rule.
   const effort = input.executor?.effort
+  // In solo the breakdown says what solo IS (executor, the opt-in solo advisor,
+  // and "no delegates") instead of a seat list the server is suppressing.
+  const soloDetails = input.solo
+    ? soloLines(label, input.soloAdvisor?.config, input.soloAdvisor?.active !== false)
+    : null
   chips.push({
     key: "executor",
     text: `${label}${effort ? ` (${effort})` : ""}`,
     tone: "accent",
-    title: `Executor model${effort ? ` · effort ${effort}` : ""}`,
-    ...(details.length ? { details: [{ name: "executor", model: label }, ...details] } : {}),
+    title: input.solo
+      ? `${SOLO_EXPLAINER}${effort ? ` · effort ${effort}` : ""}`
+      : `Executor model${effort ? ` · effort ${effort}` : ""}`,
+    ...(soloDetails
+      ? { details: soloDetails }
+      : details.length
+        ? { details: [{ name: "executor", model: label }, ...details] }
+        : {}),
   })
 
   // Goal — only when one exists; WARNING while active (it carries turns).

@@ -174,3 +174,65 @@ describe("trackCompletions", () => {
     expect(tracker.was.has("one:a")).toBe(true)
   })
 })
+
+// The server now puts `busy` on shell/stream rows (chunky: shellSummary /
+// shellSessions). These pin the two halves of that contract: a row that states
+// `busy` is taken at its word and costs no confirming poll, while a row from an
+// older server that omits it still falls back to the poll.
+describe("a stream that carries busy", () => {
+  test("is trusted verbatim, even when it contradicts what we knew", () => {
+    // Root run stopped AND no delegate left: the server says settled, so the
+    // previously-known busy must not survive.
+    const previous = row("a", { busy: true, running: true })
+    const streamed = row("a", { busy: false, running: false })
+    expect(mergeSummary(previous, streamed).busy).toBe(false)
+    expect(isSessionBusy(mergeSummary(previous, streamed))).toBe(false)
+  })
+
+  test("costs no confirming poll in either direction", () => {
+    const previous = row("a", { busy: true, running: true })
+    // Root stopped but a sidekick is still working — the case that used to be
+    // unknowable from the stream alone.
+    expect(needsAuthoritativeBusy(previous, row("a", { busy: true, running: false }))).toBe(false)
+    // Root stopped and nothing else is alive.
+    expect(needsAuthoritativeBusy(previous, row("a", { busy: false, running: false }))).toBe(false)
+  })
+
+  test("settles a session through snapshot and delta without going stale", () => {
+    const known = absorbAuthoritative(new Map(), [row("a", { busy: true, running: true })])
+
+    const snap = applySessionSnapshot(known, [row("a", { busy: false, running: false })])
+    expect(snap.stale).toEqual([])
+    expect(snap.map.get("a")!.busy).toBe(false)
+
+    const delta = applySessionDelta(known, { upsert: [row("a", { busy: false, running: false })], remove: [] })
+    expect(delta.stale).toEqual([])
+    expect(delta.map.get("a")!.busy).toBe(false)
+  })
+
+  test("lets a delegate-only completion drive a tracked running→idle transition", () => {
+    const tracker = createCompletionTracker()
+    const busyRow = row("a", { busy: true, running: false })
+    const idleRow = row("a", { busy: false, running: false })
+    // Observed busy first (delegate working while the root run is stopped)...
+    trackCompletions(tracker, [{ key: "r:a", sessionId: "a", running: isSessionBusy(busyRow) }], 0, 3_000)
+    // ...then the delegate finishes and the stream says so directly.
+    const result = trackCompletions(
+      tracker,
+      [{ key: "r:a", sessionId: "a", running: isSessionBusy(idleRow) }],
+      5_000,
+      3_000,
+    )
+    expect(result.completed).toBe(true)
+    expect(result.done).toEqual(["a"])
+  })
+})
+
+describe("a stream from an older server (no busy)", () => {
+  test("still keeps the last known busy and asks for a confirming poll", () => {
+    const known = absorbAuthoritative(new Map(), [row("a", { busy: true, running: true })])
+    const { map, stale } = applySessionDelta(known, { upsert: [row("a", { running: false })], remove: [] })
+    expect(stale).toEqual(["a"])
+    expect(map.get("a")!.busy).toBe(true)
+  })
+})

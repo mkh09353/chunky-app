@@ -129,4 +129,70 @@ describe("buildComposerStatus", () => {
       "advisor",
     ])
   })
+
+  describe("solo", () => {
+    const configured = {
+      sidekick: {
+        default: { enabled: true, model: "gpt-5.5" },
+        seats: { backend: { enabled: true, model: "grok-4.5" } },
+      },
+      advisor: { config: { enabled: true, model: "gpt-5.5" }, active: true },
+    }
+
+    it("drops the sidekick, its seats and the normal advisor — the server suppresses them", () => {
+      const chips = buildComposerStatus({ ...live, ...configured, solo: true })
+      expect(chips.map((c) => c.key)).toEqual(["executor"])
+      expect(chips[0]!.details?.map((d) => d.name)).toEqual(["executor", "delegates"])
+      expect(chips[0]!.details?.at(-1)?.model).toBe("none — solo")
+    })
+
+    it("keeps the opt-in solo advisor, and only that one", () => {
+      const chips = buildComposerStatus({
+        ...live,
+        ...configured,
+        solo: true,
+        soloAdvisor: { config: { enabled: true, model: "grok-4.5" }, active: true },
+      })
+      expect(chips[0]!.details).toEqual([
+        { name: "executor", model: "Claude Fable 5" },
+        { name: "solo advisor", model: "Grok 4.5" },
+        { name: "delegates", model: "none — solo" },
+      ])
+    })
+
+    it("ignores a solo advisor that is off, and marks one it can't resolve", () => {
+      const off = buildComposerStatus({
+        ...live,
+        solo: true,
+        soloAdvisor: { config: { enabled: false, model: "grok-4.5" }, active: false },
+      })
+      expect(off[0]!.details?.map((d) => d.name)).toEqual(["executor", "delegates"])
+      const stale = buildComposerStatus({
+        ...live,
+        solo: true,
+        soloAdvisor: { config: { enabled: true, model: "grok-4.5" }, active: false },
+      })
+      expect(stale[0]!.details?.[1]).toEqual({
+        name: "solo advisor",
+        model: "Grok 4.5 (unavailable)",
+      })
+    })
+
+    it("still spells solo out on hover and leaves the rule itself compact", () => {
+      const chips = buildComposerStatus({ ...live, ...configured, solo: true })
+      expect(texts({ ...live, ...configured, solo: true })).toEqual(["Claude Fable 5 (low)"])
+      expect(chips[0]!.title).toContain("Solo")
+      expect(chips[0]!.title).toContain("effort low")
+    })
+
+    it("leaves the non-solo rule untouched", () => {
+      const chips = buildComposerStatus({ ...live, ...configured, solo: false })
+      expect(chips[0]!.details?.map((d) => d.name)).toEqual([
+        "executor",
+        "sidekick (default)",
+        "sidekick (backend)",
+        "advisor",
+      ])
+    })
+  })
 })

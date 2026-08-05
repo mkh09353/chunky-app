@@ -5,11 +5,13 @@ import {
   getAdvisor,
   getReviewer,
   getReviewerStatus,
+  getSoloAdvisor,
   listAllModels,
   prettyModel,
   providerLabel,
   setAdvisor,
   setReviewer,
+  setSoloAdvisor,
 } from "~/lib/configApi"
 import type { AgentModelConfig, ModelRow, ReviewerStatus } from "~/lib/configApi"
 import { Button } from "../ui/button"
@@ -149,6 +151,22 @@ export function AdvisorSection() {
       noun="advisor"
       load={getAdvisor}
       save={setAdvisor}
+    />
+  )
+}
+
+/** The advisor's solo counterpart: while a raw model pick holds a session (or
+ *  the global default) in solo, every other delegate is suppressed and THIS is
+ *  the only one that may run. Same control surface, its own route, so turning
+ *  it on never turns the normal advisor on. */
+export function SoloAdvisorSection() {
+  return (
+    <AgentConfigSection
+      title="Solo advisor"
+      description="Picking a raw model runs it alone — no sidekick, seats or reviewer. Opt in here to keep one advisor available in solo."
+      noun="solo advisor"
+      load={getSoloAdvisor}
+      save={setSoloAdvisor}
     />
   )
 }

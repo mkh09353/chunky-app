@@ -20,6 +20,7 @@ import { cn } from "~/lib/cn"
 import { providerLabel } from "~/lib/api"
 import { filterCommands, type SlashCommand } from "~/lib/slashCommands"
 import { modeEmoji } from "~/lib/modes"
+import { SOLO_EXPLAINER } from "~/lib/solo"
 import { ModeSlotsMenu } from "./ModeSlotsMenu"
 import { Button } from "./ui/button"
 import {
@@ -84,6 +85,7 @@ export function Composer({
   modes = [],
   modeSpecs = [],
   activeMode = null,
+  solo = false,
   onSelectMode,
   onSaveMode,
   onModelChange,
@@ -111,8 +113,14 @@ export function Composer({
   /** The same modes as FULL specs, so each row's flyout can edit its slots.
    *  Matched to `modes` by name; a mode with no spec just has no flyout. */
   modeSpecs?: ModeInfo[]
-  /** Name of the mode currently in effect — the button's label, when set. */
+  /** Name of the mode whose pairing matches the live configuration — the
+   *  button's label, when set. In solo it is only a reference (the mode is NOT
+   *  in effect), so the selector falls back to the model name. */
   activeMode?: string | null
+  /** SOLO (lib/solo): a raw model pick runs alone — the server suppresses the
+   *  sidekick, its seats, the reviewer and the mode advisor. The selector must
+   *  therefore stop presenting a saved mode as active. */
+  solo?: boolean
   /** Apply a saved mode (the same path `/mode <name>` / `/<name>` takes). */
   onSelectMode?: (name: string) => void | Promise<void>
   /** Persist an edited mode spec (the caller re-applies it when it's active).
@@ -171,6 +179,9 @@ export function Composer({
   const dragDepth = useRef(0)
 
   const busy = switchingId !== null
+  // A mode names the selector only while it is actually in effect; solo means a
+  // raw model pick superseded it, so the model names the selector instead.
+  const modeLabel = solo ? null : activeMode
 
   const groups = useMemo(() => {
     const map = new Map<string, Model[]>()
@@ -552,11 +563,11 @@ export function Composer({
               >
                 {busy ? (
                   <Loader2 className="size-3.5 animate-spin text-primary" />
-                ) : activeMode ? (
+                ) : modeLabel ? (
                   // Same 14px slot as the chip icon, so swapping in a glyph
                   // can't change the button's height.
                   <span className="flex size-3.5 shrink-0 items-center justify-center text-[12px] leading-none">
-                    {modeEmoji(activeMode)}
+                    {modeEmoji(modeLabel)}
                   </span>
                 ) : (
                   <Cpu className="size-3.5 shrink-0 text-primary" />
@@ -564,9 +575,19 @@ export function Composer({
                 <span className="truncate font-medium text-foreground">
                   {/* A mode is the coarser choice: while one is in effect it
                       names the selector, and the executor chip beside it says
-                      which model that resolves to. */}
-                  {busy ? "Switching…" : activeMode || model.name}
+                      which model that resolves to. In solo no mode is in
+                      effect, so the model names the selector itself. */}
+                  {busy ? "Switching…" : modeLabel || model.name}
                 </span>
+                {!busy && solo && (
+                  // Quiet, not a badge shout: the state that matters is "alone".
+                  <span
+                    title={SOLO_EXPLAINER}
+                    className="shrink-0 font-normal text-[10px] text-muted-foreground uppercase tracking-wide"
+                  >
+                    solo
+                  </span>
+                )}
                 <ChevronDown className="size-3.5 shrink-0 opacity-60" />
               </DropdownMenuTrigger>
               <DropdownMenuContent
@@ -637,7 +658,9 @@ export function Composer({
                     <>
                       <DropdownMenuLabel>Modes</DropdownMenuLabel>
                       {modes.map((m) => {
-                        const selected = m.name === activeMode
+                        // In solo no mode is in effect — a check here would
+                        // claim the mode's delegates are running.
+                        const selected = !solo && m.name === activeMode
                         const spec = specByMode.get(m.name)
                         return (
                           // The row body applies the mode; the flyout beside it
@@ -672,6 +695,7 @@ export function Composer({
                                 mode={spec}
                                 models={models}
                                 disabled={busy}
+                                note={solo ? `${SOLO_EXPLAINER} These pins apply when you switch to this mode.` : null}
                                 onSave={onSaveMode}
                                 onDone={() => setMenuOpen(false)}
                               />
@@ -680,7 +704,9 @@ export function Composer({
                         )
                       })}
                       <DropdownMenuSeparator />
-                      <DropdownMenuLabel>Models</DropdownMenuLabel>
+                      <DropdownMenuLabel>
+                        Models{solo ? " — solo (no delegates)" : ""}
+                      </DropdownMenuLabel>
                     </>
                   )}
                   {models.length === 0 ? (

@@ -75,8 +75,9 @@ import {
 } from "./lib/api"
 // `setCacheGuard` is aliased: the local state setter of the same name owns the
 // pre-send confirm bar, while this one persists the server-side threshold.
-import { applyMode, deleteMode, getAdvisorStatus, getCacheGuard, getModes, getSidekick, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SidekickConfig } from "./lib/configApi"
+import { applyMode, deleteMode, getAdvisorStatus, getCacheGuard, getModes, getSidekick, getSoloAdvisorStatus, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SidekickConfig } from "./lib/configApi"
 import { buildComposerStatus } from "./lib/composerStatus"
+import { isSoloActive } from "./lib/solo"
 import { ComposerStatus } from "./components/ComposerStatus"
 import {
   defaultCloneParent,
@@ -165,6 +166,13 @@ import {
   unionSummaries,
   type SummaryMap,
 } from "./lib/sessionSummaries"
+import {
+  addUnreadSessions,
+  buildRepoActivity,
+  clearUnreadSession,
+  sameRepoRows,
+} from "./lib/repoActivity"
+import { ActivityOverlay } from "./components/ActivityOverlay"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
@@ -250,7 +258,11 @@ function sameSelection(a: ModelSelection | null, b: ModelSelection | null): bool
     a.provider === b.provider &&
     a.model === b.model &&
     (a.effort ?? null) === (b.effort ?? null) &&
-    (a.speed ?? null) === (b.speed ?? null)
+    (a.speed ?? null) === (b.speed ?? null) &&
+    // Solo rides on the selection: a session pinned to the same model but in a
+    // different solo state is NOT the global selection, and collapsing the two
+    // would silently drop the session's own suppression of its delegates.
+    (a.solo ?? false) === (b.solo ?? false)
   )
 }
 
@@ -269,6 +281,16 @@ function rowsToModels(rows: ModelRow[]): Model[] {
       .filter(Boolean)
       .join(" · "),
   }))
+}
+
+/** One repository's qualifying completions from a single fold.
+ *
+ *  `done` is what lets the far-left overview say WHICH sessions just finished
+ *  rather than only that a repo has news — the repo-level dot is derived from
+ *  the same result, so the two can never disagree. */
+interface RepoCompletion {
+  repoId: string
+  done: string[]
 }
 
 export function App() {
@@ -297,6 +319,9 @@ export function App() {
   // (and keyed by `${repoId}:${sessionId}`).
   const backgroundTracker = useRef(createCompletionTracker())
   const [unreadRepoIds, setUnreadRepoIds] = useState<Set<string>>(new Set())
+  // Every repository's rows, published from the same loop that feeds the
+  // sidebar (no extra requests). Only the far-left overview reads this.
+  const [repoRows, setRepoRows] = useState<ReadonlyMap<string, SessionSummary[]>>(new Map())
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
   // Replay is in flight: the projection on screen is last-seen state, not live
@@ -324,6 +349,8 @@ export function App() {
   // Server-side agent config behind the composer status rule. Null = unknown
   // (demo/offline or a failed read) and simply renders no chip.
   const [advisorStatus, setAdvisorStatus] = useState<AdvisorStatus | null>(null)
+  // The opt-in advisor that survives solo (lib/solo); null = unknown.
+  const [soloAdvisorStatus, setSoloAdvisorStatus] = useState<AdvisorStatus | null>(null)
   const [sidekickConfig, setSidekickConfig] = useState<SidekickConfig | null>(null)
   const [dialog, setDialog] = useState<"rename" | "fork" | "rewind" | "goal" | "ship" | "stats" | "incognito" | null>(null)
   const [incognitoModes, setIncognitoModes] = useState<SavedMode[]>([])
@@ -377,7 +404,10 @@ export function App() {
   // The same saved modes, as the composer's selector lists them, plus the
   // server's snapshot of the live pairing (what makes one of them "active").
   const [savedModes, setSavedModes] = useState<ModeInfo[]>([])
-  const [currentModeSpec, setCurrentModeSpec] = useState<ModeSpec | null>(null)
+  // `current` also reports the GLOBAL solo state (ModesResponse.current.solo).
+  const [currentModeSpec, setCurrentModeSpec] = useState<(ModeSpec & { solo?: boolean }) | null>(
+    null,
+  )
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
   const [sidekickPickerOpen, setSidekickPickerOpen] = useState(false)
@@ -472,6 +502,22 @@ export function App() {
   const activeMode = useMemo(
     () => (live ? activeModeName(savedModes, currentModeSpec) : null),
     [live, savedModes, currentModeSpec],
+  )
+
+  // SOLO: a raw model pick runs the model alone (see lib/solo). Session-pinned
+  // solo applies to the ATTACHED session only; with no pin the global state
+  // answers. While it holds, no saved mode is in effect — the selector, its
+  // flyout and the status rule must all stop implying otherwise.
+  const solo = useMemo(
+    () =>
+      isSoloActive({
+        live,
+        sessionId,
+        sessionModelSel,
+        modelSel,
+        currentSolo: currentModeSpec?.solo ?? null,
+      }),
+    [live, sessionId, sessionModelSel, modelSel, currentModeSpec],
   )
   const modeOptions = useMemo<ModeOption[]>(
     () =>
@@ -636,9 +682,11 @@ export function App() {
         executor: live ? effectiveModelSel : null,
         sidekick: sidekickConfig,
         advisor: advisorStatus,
+        solo,
+        soloAdvisor: soloAdvisorStatus,
         goal,
       }),
-    [live, incognitoSession, effectiveModelSel, sidekickConfig, advisorStatus, goal],
+    [live, incognitoSession, effectiveModelSel, sidekickConfig, advisorStatus, solo, soloAdvisorStatus, goal],
   )
 
   // Active model's context limit for the context-window meter (undefined in demo).
@@ -1106,13 +1154,13 @@ export function App() {
    *
    * Server-PUSHED (ROUTES.sessionStream, ~250ms debounced) rather than polled,
    * so a session finishing in another repo is visible in a quarter second
-   * instead of up to five. Its rows are shell-shaped though — `running` (root
-   * run) but never `busy` (root OR delegate OR detached spawn) — and the
-   * completion rules are defined on `busy`. So a streamed row that cannot speak
-   * for `busy` inherits the last authoritative value (lib/sessionSummaries) and
-   * asks for ONE targeted poll to settle it; a slow safety poll covers what no
-   * `running` transition can express, and a 5s poll takes over completely if
-   * the stream is unavailable.
+   * instead of up to five. Current servers put `busy` (root OR delegate OR
+   * detached spawn) on these rows and re-emit when a delegate starts/stops, so
+   * the stream alone settles a session and costs no confirming poll. Rows from
+   * an OLDER server carry only `running`: those inherit the last authoritative
+   * `busy` (lib/sessionSummaries) and ask for ONE targeted poll to settle. A
+   * slow safety poll covers what no transition can express, and a 5s poll takes
+   * over completely if the stream is unavailable.
    */
   useEffect(() => {
     if (!config || appMode !== "live" || connectionState !== "connected") return
@@ -1136,7 +1184,7 @@ export function App() {
       repo: Repo,
       rows: SessionSummary[],
       authoritative: boolean,
-    ): string | null => {
+    ): RepoCompletion | null => {
       const previous = repoSessionCache.current.get(repo.id) ?? []
       const merged = authoritative
         ? mergeSummaryLists(previous, rows)
@@ -1146,7 +1194,7 @@ export function App() {
         sessionCache.current.reconcileRepo(repo.id, new Set(merged.map((s) => s.sessionId)))
       }
       if (repo.id === activeRepoIdRef.current) return null
-      const { completed } = trackCompletions(
+      const { completed, done } = trackCompletions(
         backgroundTracker.current,
         merged.map((s) => ({
           key: `${repo.id}:${s.sessionId}`,
@@ -1156,17 +1204,34 @@ export function App() {
         Date.now(),
         MIN_COMPLETION_NOTIFY_MS,
       )
-      return completed ? repo.id : null
+      return completed ? { repoId: repo.id, done } : null
     }
 
-    const flagCompletedRepos = (ids: (string | null)[]) => {
-      const completed = ids.filter((id): id is string => id != null)
+    /** Republish every repo's rows for the far-left overview. Cheap: the cache
+     *  is already up to date, and `sameRepoRows` drops the no-op commits the
+     *  250ms delta cadence would otherwise cause. */
+    const publishRepoRows = () => {
+      if (stopped) return
+      const next = new Map<string, SessionSummary[]>()
+      for (const repo of repos) next.set(repo.id, repoSessionCache.current.get(repo.id) ?? [])
+      setRepoRows((prev) => (sameRepoRows(prev, next) ? prev : next))
+    }
+
+    const flagCompletedRepos = (results: (RepoCompletion | null)[]) => {
+      const completed = results.filter((r): r is RepoCompletion => r != null)
       if (completed.length === 0) return
       setUnreadRepoIds((prev) => {
         const next = new Set(prev)
-        for (const id of completed) next.add(id)
+        for (const r of completed) next.add(r.repoId)
         return next
       })
+      // Per-SESSION unread as well, so the overview can show "these just
+      // finished" instead of only which repos have news. The same set backs the
+      // sidebar dots, so switching to the repo shows the very same rows marked.
+      const done = completed.flatMap((r) => r.done)
+      if (done.length > 0) {
+        setUnreadDone((prev) => addUnreadSessions(prev, done, sessionIdRef.current))
+      }
       // A batch may contain several completed sessions/repos, but gets one horn.
       playCompletionHorn()
     }
@@ -1190,7 +1255,10 @@ export function App() {
           }
         }),
       )
-      if (!stopped) flagCompletedRepos(completed)
+      if (!stopped) {
+        flagCompletedRepos(completed)
+        publishRepoRows()
+      }
     }
 
     /** One debounced authoritative poll, for rows whose `busy` the stream could
@@ -1213,7 +1281,7 @@ export function App() {
      *  (and completion transitions) for the rest. */
     const publishSummaries = (stale: string[]) => {
       if (stopped) return
-      const completed: (string | null)[] = []
+      const completed: (RepoCompletion | null)[] = []
       for (const repo of repos) {
         const rows = sessionsInWorkspace(shellSummaries.current, repo.path)
         completed.push(applyRepoRows(repo, rows, false))
@@ -1223,6 +1291,7 @@ export function App() {
         }
       }
       flagCompletedRepos(completed)
+      publishRepoRows()
       if (stale.length > 0) confirmBusy()
     }
 
@@ -1375,17 +1444,20 @@ export function App() {
   const refreshAgents = useCallback(async () => {
     if (appMode !== "live") {
       setAdvisorStatus(null)
+      setSoloAdvisorStatus(null)
       setSidekickConfig(null)
       return
     }
     const sid = sessionId
-    const [advisor, sidekick] = await Promise.all([
+    const [advisor, soloAdvisor, sidekick] = await Promise.all([
       getAdvisorStatus().catch(() => null),
+      getSoloAdvisorStatus().catch(() => null),
       getSidekick(sid).catch(() => null),
     ])
     // A session switch can land mid-flight; drop a stale session's answer.
     if (sid !== sessionIdRef.current) return
     setAdvisorStatus(advisor)
+    setSoloAdvisorStatus(soloAdvisor)
     setSidekickConfig(sidekick)
   }, [appMode, sessionId])
 
@@ -1479,8 +1551,16 @@ export function App() {
     }
   }, [live, stopDemoStream, activeThread.projectId, config, refreshSessions, attachSession])
 
+  /** Switch the visible repository.
+   *
+   *  `preferSessionId` is the session the caller wants opened once the tab has
+   *  switched (a cross-repo jump from the far-left overview or the PR panel).
+   *  It is threaded through rather than attached by the caller afterwards
+   *  because this function ALREADY attaches a remembered/first session — a
+   *  caller that attaches its own would make two attachments race, and the
+   *  loser would still have replayed a whole transcript. */
   const handleSelectRepo = useCallback(
-    async (id: string) => {
+    async (id: string, preferSessionId?: string) => {
       if (!config || id === activeRepoIdRef.current) return
       setUnreadRepoIds((prev) => {
         if (!prev.has(id)) return prev
@@ -1503,7 +1583,12 @@ export function App() {
       setTranscriptLoading(!cached)
       // Pick from cached rows now; fetch/reconcile happens in the background.
       const remembered = lastSessionByRepo.current[id]
-      const pick = (remembered && cached?.find((s) => s.sessionId === remembered)?.sessionId) || cached?.[0]?.sessionId
+      // An explicitly requested session wins over the remembered one, and is
+      // honoured even when this client has not cached that row yet.
+      const pick =
+        preferSessionId ||
+        (remembered && cached?.find((s) => s.sessionId === remembered)?.sessionId) ||
+        cached?.[0]?.sessionId
       if (pick) {
         void attachSession(config.baseUrl, pick)
         void refreshSessions(config.baseUrl, id).catch(() => {})
@@ -1815,9 +1900,39 @@ export function App() {
       setPrOpen(false)
       if (!config) return
       if (repoId && repoId !== activeRepoIdRef.current) {
-        await handleSelectRepo(repoId)
+        // Hand the target to the switch itself: attaching afterwards would race
+        // the remembered-session attach it performs.
+        await handleSelectRepo(repoId, id)
+        return
       }
-      void attachSession(config.baseUrl, id)
+      if (id !== sessionIdRef.current) void attachSession(config.baseUrl, id)
+    },
+    [config, handleSelectRepo, attachSession],
+  )
+
+  /** Far-left overview rows, grouped per repository. Reads only state the
+   *  publish loop already maintains — the overlay makes no requests. */
+  const activityRepos = useMemo(
+    () =>
+      live
+        ? buildRepoActivity(repos, repoRows, { unread: unreadDone, now: Date.now() })
+        : [],
+    [live, repos, repoRows, unreadDone],
+  )
+
+  /** Jump to any session in any repository from the overview.
+   *
+   *  Acknowledging the row is unconditional: the reader has now seen that it
+   *  finished, whether or not the tab has to change. */
+  const handleOpenActivitySession = useCallback(
+    async (id: string, repoId: string) => {
+      if (!config) return
+      setUnreadDone((prev) => clearUnreadSession(prev, id))
+      if (repoId && repoId !== activeRepoIdRef.current) {
+        await handleSelectRepo(repoId, id)
+        return
+      }
+      if (id !== sessionIdRef.current) void attachSession(config.baseUrl, id)
     },
     [config, handleSelectRepo, attachSession],
   )
@@ -2333,14 +2448,21 @@ export function App() {
         },
         sid,
       )
-      if (sid) setSessionModelSel((prev) => ({ ...prev, [sid]: next }))
-      else setModelSel(next)
+      // A raw pick is a SOLO pick server-side. The global response says so; the
+      // session-scoped one doesn't carry the flag, so assume the pin the server
+      // just wrote and let the re-read below confirm it.
+      if (sid) setSessionModelSel((prev) => ({ ...prev, [sid]: { ...next, solo: next.solo ?? true } }))
+      else setModelSel({ ...next, solo: next.solo ?? true })
       // Picking a model by hand breaks the mode's pairing (the server drops its
       // own activeMode here too), so re-read what is now current: the selector
-      // must fall back from the mode name to the model name.
+      // must fall back from the mode name to the model name, and the status rule
+      // must drop the delegates solo suppressed.
       void refreshModes()
+      void refreshAgents()
+      // Authoritative solo state (GET /api/model, session-scoped when pinned).
+      void hydrateSessionModel(config.baseUrl, sid)
     },
-    [live, config, sessionId, refreshModes],
+    [live, config, sessionId, refreshModes, refreshAgents, hydrateSessionModel],
   )
 
   const enterDemo = useCallback(() => {
@@ -2598,6 +2720,15 @@ export function App() {
   return (
     <TooltipProvider delay={300}>
       <div className="shell-chrome chunky-aurora flex h-screen w-screen overflow-hidden">
+        {/* Far-left edge: the cross-repository overview. Fixed-position, so it
+            sits outside the flex row and never shifts the layout. */}
+        <ActivityOverlay
+          enabled={live}
+          repos={activityRepos}
+          activeRepoId={activeRepoId}
+          activeSessionId={sessionId}
+          onOpenSession={(id, repoId) => void handleOpenActivitySession(id, repoId)}
+        />
         <Sidebar
           projects={projects}
           threads={threads}
@@ -2718,13 +2849,14 @@ export function App() {
                 modes={modeOptions}
                 modeSpecs={live ? savedModes : []}
                 activeMode={activeMode}
+                solo={solo}
                 onSelectMode={live ? applyModeByName : undefined}
                 onSaveMode={live ? handleSaveModeSpec : undefined}
                 openModelPickerSignal={modelPickerSignal}
                 streaming={streaming}
                 onStop={handleStop}
                 contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
-                status={<ComposerStatus chips={statusChips} selectorLabel={activeMode ?? uiModel.name} />}
+                status={<ComposerStatus chips={statusChips} selectorLabel={solo ? uiModel.name : (activeMode ?? uiModel.name)} />}
                 cacheGuard={cacheGuard}
                 onCacheConfirm={() => void confirmCacheGuard()}
                 onCacheCancel={() => setCacheGuard(null)}

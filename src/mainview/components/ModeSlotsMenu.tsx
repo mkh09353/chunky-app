@@ -43,6 +43,7 @@ export function ModeSlotsMenu({
   mode,
   models,
   disabled,
+  note,
   onSave,
   onDone,
 }: {
@@ -51,6 +52,9 @@ export function ModeSlotsMenu({
   /** The composer's catalog rows (id = `provider/modelId`). */
   models: Model[]
   disabled?: boolean
+  /** A dim line above the slot list saying these pins are NOT live right now
+   *  (solo). The rows still edit the saved mode — they just aren't in effect. */
+  note?: string | null
   /** Persist the edited spec. Rejecting shows the reason inline. */
   onSave: (name: string, spec: ModeSpec) => Promise<void>
   /** Called after a successful save so the caller can close the whole menu. */
@@ -159,6 +163,9 @@ export function ModeSlotsMenu({
         </div>
 
         <div className="overflow-y-auto p-1">
+          {step === "slots" && note && (
+            <p className="px-2 pt-1 pb-1.5 text-[11px] text-muted-foreground leading-snug">{note}</p>
+          )}
           {step === "slots" ? (
             slots.map((s, i) => (
               <div key={s.id}>

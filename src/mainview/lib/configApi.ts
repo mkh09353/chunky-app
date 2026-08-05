@@ -495,6 +495,24 @@ export async function getAdvisorStatus(): Promise<AdvisorStatus> {
   return { config: normalizeAgentConfig(body?.config), active: body?.active === true }
 }
 
+/** The SOLO advisor: the only delegate allowed to run while a raw model pick
+ *  holds the session (or the global default) in solo. Same wire shape as the
+ *  advisor, its own route — enabling it never turns the normal advisor on. */
+export async function getSoloAdvisor(): Promise<AgentModelConfig> {
+  return normalizeAgentConfig(await req<unknown>(ROUTES.soloAdvisor))
+}
+
+export async function setSoloAdvisor(cfg: AgentModelConfig): Promise<AgentModelConfig> {
+  return normalizeAgentConfig(await req<unknown>(ROUTES.soloAdvisor, jsonInit("POST", cfg)))
+}
+
+/** GET ROUTES.soloAdvisor reports readiness the same way /api/advisor does:
+ *  `active: false` = configured but not currently resolvable. */
+export async function getSoloAdvisorStatus(): Promise<AdvisorStatus> {
+  const body = (await req<unknown>(ROUTES.soloAdvisor)) as { config?: unknown; active?: unknown }
+  return { config: normalizeAgentConfig(body?.config), active: body?.active === true }
+}
+
 export async function getReviewer(): Promise<AgentModelConfig> {
   return normalizeAgentConfig(await req<unknown>(ROUTES.review))
 }

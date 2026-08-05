@@ -5,14 +5,17 @@
 //
 //   GET /api/sessions?repo=<id>  (listSessions)  → authoritative. Carries
 //     `busy` = root run OR a live delegate thread OR a running detached spawn.
-//   GET /api/sessions/stream     (sessionStream) → fast (250ms debounced) but
-//     shell-shaped: it carries `running` (the ROOT run only) and never `busy`.
+//   GET /api/sessions/stream     (sessionStream) → fast (250ms debounced).
+//     Current servers put the same `busy` on these rows; OLDER ones send only
+//     `running` (the ROOT run), leaving `busy` undefined.
 //
 // The completion rules are defined on `busy`, so the stream must never be
 // allowed to silently downgrade a row to "idle" just because the root run
-// finished while a sidekick keeps working. Hence `mergeSummary`: a streamed row
-// that cannot speak for `busy` inherits the last authoritative value and is
-// reported as stale, so the caller can confirm it with one targeted poll.
+// finished while a sidekick keeps working. Hence `mergeSummary`, which keys off
+// the PRESENCE of the field rather than the server version: a row that states
+// `busy` is taken at its word (no confirming poll), while one that cannot speak
+// for it inherits the last authoritative value and is reported as stale so the
+// caller can settle it with one targeted poll.
 //
 // Pure — run with: bun test src/mainview/lib/sessionSummaries.test.ts
 import type { SessionDelta, SessionSummary } from "@chunky/protocol"

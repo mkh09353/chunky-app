@@ -49,6 +49,12 @@ export interface ModelSelection {
   model: string | null
   effort?: string | null
   speed?: string | null
+  /** SOLO: this selection runs the model alone — the server suppresses the
+   *  sidekick, named seats, the reviewer and the mode advisor, and only the
+   *  opt-in solo advisor may run. Present on GET /api/model (global or
+   *  `?sessionId=`) and on a global POST /api/model/select; a session-scoped
+   *  select answers without it, so re-read the session selection after one. */
+  solo?: boolean
 }
 
 export interface ModelRow {
@@ -252,8 +258,9 @@ export interface SessionStreamHandlers {
  * changes at 250ms, so a background session finishing is visible in the sidebar
  * (and to the unread/horn rules) within a quarter second instead of up to five.
  *
- * Its rows are shell-shaped — `running` but never `busy` — so callers must fold
- * them onto known state with lib/sessionSummaries and confirm a settled `busy`
+ * Current servers put `busy` on these rows as well as `running`; older ones
+ * send `running` only. Callers fold them onto known state with
+ * lib/sessionSummaries, which trusts a stated `busy` and confirms an absent one
  * with a targeted poll. Resolves when the server closes the stream; throws when
  * the route is missing (older server) so the caller can fall back to polling.
  */
