@@ -30,7 +30,7 @@ const SERVER_LEASES_PATH = "/_chunky/server-leases"
 const INFO_PATH = "/api/info"
 const STARTUP_TIMEOUT_MS = 15_000
 
-type RecordFile = {
+export type RecordFile = {
   schema: 1
   id: string
   workspace: string
@@ -42,7 +42,7 @@ type RecordFile = {
   startedAt: number
 }
 
-type Identity = Pick<RecordFile, "id" | "workspace" | "version" | "buildId" | "nonce" | "port"> & {
+export type Identity = Pick<RecordFile, "id" | "workspace" | "version" | "buildId" | "nonce" | "port"> & {
   /** Set by servers that are draining after being superseded (additive: older
    *  servers simply omit it). Such a server must not be handed new clients. */
   retiring?: boolean
@@ -161,7 +161,7 @@ function validRecord(value: unknown): value is RecordFile {
     && typeof x.startedAt === "number"
 }
 
-function recordEntries(dir: string): RecordEntry[] {
+export function recordEntries(dir: string): RecordEntry[] {
   try {
     return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
       if (!entry.isFile() || !entry.name.endsWith(".json")) return []
@@ -176,7 +176,7 @@ function recordEntries(dir: string): RecordEntry[] {
 
 /** The live identity of a recorded server, or null when it isn't answering as
  *  the server this record describes. */
-async function probe(
+export async function probe(
   record: RecordFile,
   token: string | undefined,
   deps: ConnectionDependencies,
@@ -212,7 +212,7 @@ function matchesRuntime(record: RecordFile, runtime: RuntimeIdentity): boolean {
  * Re-reads the file so a record another launcher has already replaced is left
  * alone.
  */
-function supersedeRecord(entry: RecordEntry): boolean {
+export function supersedeRecord(entry: RecordEntry): boolean {
   try {
     const current: unknown = JSON.parse(readFileSync(entry.path, "utf8"))
     if (!validRecord(current) || current.id !== entry.record.id) return false

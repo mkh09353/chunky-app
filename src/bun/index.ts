@@ -23,6 +23,7 @@ import { mergeDesktopState, readDesktopState, type DesktopState } from "./deskto
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
 import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
+import { inspectServers, retireServer, stopServer, type ServerInspection } from "./serverInspection"
 
 const DEV_SERVER_URL = process.env.VITE_DEV_URL ?? "http://localhost:5173"
 
@@ -62,6 +63,9 @@ async function checkRuntimeUpdate(): Promise<void> {
   if (!baseUrl) return
   const send = rpc?.send as unknown as Record<string, (value: unknown) => void> | undefined
   send?.chunkyServerChanged?.({ baseUrl, version: result.version })
+  void inspectServers().then((inspection) => {
+    if (inspection.servers.some((server) => server.reachable && !server.retiring && !server.current)) send?.chunkyOldServers?.(inspection)
+  })
 }
 
 /** Check, download, and offer to restart for an Electrobun release update. */
@@ -237,6 +241,9 @@ rpc = createRPC({
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
       }
     },
+    chunkyInspectServers: async () => inspectServers(),
+    chunkyRetireServer: async (params: unknown) => retireServer({}, (params as { id?: unknown })?.id as string),
+    chunkyStopServer: async (params: unknown) => stopServer({}, (params as { id?: unknown })?.id as string),
 
     // Voice credentials stay in Bun. The renderer receives only a short-lived
     // xAI realtime client secret, never the configured provider API key.

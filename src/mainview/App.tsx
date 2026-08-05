@@ -88,6 +88,9 @@ import {
 } from "./lib/cloneRepo"
 import { cloneRoots } from "./lib/dirSearch"
 import { reresolveConnection, shouldReresolve, subscribeServerChanged } from "./lib/reresolve"
+import { OldServersNotice } from "./components/OldServersNotice"
+import { classifyServers, subscribeOldServers } from "./lib/oldServers"
+import { inspectChunkyServers, type ServerInspection } from "./lib/serverLifecycle"
 import {
   desktopUiSnapshot,
   displayNameSnapshot,
@@ -203,6 +206,8 @@ const CLONE_LOG_LINES = 8
 /** How long a local apply suppresses the echoed mode.applied notice. */
 const SELF_APPLY_WINDOW_MS = 10_000
 const MIN_COMPLETION_NOTIFY_MS = 3_000
+/** Let the app settle before looking for servers left over from a previous run. */
+const OLD_SERVER_SCAN_DELAY_MS = 8_000
 
 /** Best effort only: browsers may reject playback before a user gesture. */
 function playCompletionHorn(): void {
@@ -370,6 +375,10 @@ export function App() {
   // TUI parity: bare /scoreboard is server-wide, `/scoreboard session` scopes it.
   const [scoreboardScope, setScoreboardScope] = useState<"session" | "all">("all")
   const [notice, setNotice] = useState<string | null>(null)
+  // Superseded servers still running after an upgrade. Dismissal is in-memory
+  // on purpose: it should come back next launch if they are still there.
+  const [oldServers, setOldServers] = useState<ServerInspection | null>(null)
+  const [oldServersDismissed, setOldServersDismissed] = useState(false)
 
   // ---- Demo/mock fallback state (preserved polish) ----
   const [demoThreads, setDemoThreads] = useState<Thread[]>(THREADS)
@@ -1374,6 +1383,35 @@ export function App() {
       void moveToResolvedServer()
     })
   }, [appMode, moveToResolvedServer])
+
+  // ---- Superseded servers that did not exit on their own ------------------
+
+  /** Re-read the server list; drops the notice once nothing is left to act on. */
+  const refreshOldServers = useCallback(async () => {
+    const inspection = await inspectChunkyServers().catch(() => null)
+    setOldServers(inspection && classifyServers(inspection).length > 0 ? inspection : null)
+  }, [])
+
+  // Bun announces this after an upgrade when old servers are still up.
+  useEffect(() => {
+    if (appMode !== "live") return
+    return subscribeOldServers((inspection) => {
+      if (classifyServers(inspection).length === 0) return
+      // A fresh announcement is worth showing even after an earlier dismissal.
+      setOldServersDismissed(false)
+      setOldServers(inspection)
+    })
+  }, [appMode])
+
+  // One quiet look shortly after launch, for servers left over from a previous
+  // run. Silent unless it finds something actionable.
+  useEffect(() => {
+    if (appMode !== "live") return
+    const timer = window.setTimeout(() => {
+      void refreshOldServers()
+    }, OLD_SERVER_SCAN_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [appMode, refreshOldServers])
 
   // A transition is meaningful only after this connected renderer observed the
   // running state. That avoids replay/initial-load notifications and dots.
@@ -2968,6 +3006,13 @@ export function App() {
               void refreshAgents()
               void refreshModes()
             }}
+          />
+        )}
+        {oldServers && !oldServersDismissed && (
+          <OldServersNotice
+            inspection={oldServers}
+            onRefresh={refreshOldServers}
+            onDismiss={() => setOldServersDismissed(true)}
           />
         )}
         {notice && <div className="fixed right-5 bottom-5 z-50 max-h-[60vh] max-w-sm overflow-y-auto rounded-xl border border-primary/25 bg-popover px-4 py-3 text-[13px] shadow-panel"><span className="whitespace-pre-line">{notice}</span><button type="button" className="ml-3 text-primary" onClick={() => setNotice(null)}>Dismiss</button></div>}
