@@ -10,6 +10,7 @@ import {
   upgradeRuntimeAndReconnect,
   type ConnectionDependencies,
 } from "./connectionManager"
+import { ensureChunkyServerLauncher } from "./launcherSymlink"
 
 const cleanup: string[] = []
 afterEach(async () => {
@@ -44,6 +45,33 @@ function deps(live: Set<number>, starts: { count: number }): ConnectionDependenc
     }) as typeof fetch,
   }
 }
+
+test("managed launcher symlink creates, refreshes, and reuses safely", () => {
+  const root = tempState()
+  const target = new Map<string, string>()
+  const dirs = new Set<string>()
+  const fs = {
+    mkdir: (path: string) => { dirs.add(path) },
+    readlink: (path: string) => { const value = target.get(path); if (!value) throw new Error("missing"); return value },
+    symlink: (value: string, path: string) => { target.set(path, value) },
+    rename: (from: string, to: string) => { target.set(to, target.get(from)!); target.delete(from) },
+    remove: (path: string) => { target.delete(path) },
+  }
+  const first = ensureChunkyServerLauncher(root, "/bun", fs)
+  expect(first).toBe(join(root, "bin", "chunky-server"))
+  expect(target.get(first!)).toBe("/bun")
+  expect(ensureChunkyServerLauncher(root, "/bun", fs)).toBe(first)
+  expect(ensureChunkyServerLauncher(root, "/other-bun", fs)).toBe(first)
+  expect(target.get(first!)).toBe("/other-bun")
+  expect(dirs.has(join(root, "bin"))).toBe(true)
+})
+
+test("launcher symlink filesystem errors return fallback", () => {
+  const result = ensureChunkyServerLauncher("/tmp/launcher-test", "/bun", {
+    mkdir: () => { throw new Error("read-only") }, readlink: () => "", symlink: () => {}, rename: () => {}, remove: () => {},
+  })
+  expect(result).toBeUndefined()
+})
 
 test("explicit URL and port overrides win without discovery", async () => {
   const starts = { count: 0 }
@@ -266,8 +294,10 @@ test("starts an isolated runtime and waits until its authenticated server is rea
   const starts = { count: 0 }
   const testDeps = deps(live, starts)
   let started: Record<string, string | undefined> = {}
+  let command: string[] = []
   testDeps.allocatePort = async () => 43210
   testDeps.spawn = (_command, options) => {
+    command = _command
     starts.count++
     started = options.env
     live.add(Number(options.env.CHUNKY_PORT))
@@ -292,6 +322,7 @@ test("starts an isolated runtime and waits until its authenticated server is rea
   expect(result.baseUrl).toBe("http://localhost:43210")
   expect(result.serverToken).toBeTruthy()
   expect(starts.count).toBe(1)
+  expect(command[0]).toBe(join(runtime, "bin", "chunky-server"))
 })
 
 test("an upgraded runtime moves the app onto a server built from it", async () => {

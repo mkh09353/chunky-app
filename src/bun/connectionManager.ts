@@ -24,6 +24,7 @@ import {
   upgradeRuntime,
   type RuntimeUpgrade,
 } from "./runtimeInstaller"
+import { ensureChunkyServerLauncher } from "./launcherSymlink"
 
 const SERVER_IDENTITY_PATH = "/_chunky/server-identity"
 const SERVER_LEASES_PATH = "/_chunky/server-leases"
@@ -80,6 +81,7 @@ export type ConnectionDependencies = {
   upgradeRuntime?(env: NodeJS.ProcessEnv): Promise<RuntimeUpgrade>
   /** Whether a recorded process still exists (guards record pruning). */
   pidAlive?(pid: number): boolean
+  launcherFs?: import("./launcherSymlink").LauncherSymlinkFs
 }
 
 const defaults: ConnectionDependencies = {
@@ -383,7 +385,11 @@ async function startServer(
       schema: 1, id: randomUUID(), workspace: targetWorkspace, version: installed.version, buildId: id,
       nonce, port, pid: 0, startedAt: deps.now(),
     }
-    const child = deps.spawn([installed.bun, "run", join(installed.root, "packages/server/src/index.ts")], {
+    const launcher = ensureChunkyServerLauncher(installed.root, installed.bun, deps.launcherFs)
+    const serverArgs = ["run", join(installed.root, "packages/server/src/index.ts")]
+    let child: { pid?: number }
+    try {
+      child = deps.spawn([launcher || installed.bun, ...serverArgs], {
       cwd: state,
       env: {
         ...env,
@@ -393,7 +399,21 @@ async function startServer(
         CHUNKY_DB: join(state, "chunky.db"), CHUNKY_GRAPH_DB: join(state, "chunky-graph.db"),
         CHUNKY_SETTINGS: settings, CHUNKY_AUTH: join(state, "auth.json"),
       },
-    })
+      })
+    } catch (error) {
+      if (!launcher) throw error
+      child = deps.spawn([installed.bun, ...serverArgs], {
+        cwd: state,
+        env: {
+          ...env,
+          CHUNKY_PORT: String(port), CHUNKY_WORKSPACE: targetWorkspace, CHUNKY_VERSION: installed.version,
+          CHUNKY_BUILD_ID: id, CHUNKY_SERVER_NONCE: nonce, CHUNKY_SERVER_ID: record.id,
+          CHUNKY_DISCOVERY_RECORD: join(serverDir, `${recordKey(targetWorkspace, installed.version, id)}.json`),
+          CHUNKY_DB: join(state, "chunky.db"), CHUNKY_GRAPH_DB: join(state, "chunky-graph.db"),
+          CHUNKY_SETTINGS: settings, CHUNKY_AUTH: join(state, "auth.json"),
+        },
+      })
+    }
     if (!child.pid) throw new Error("Chunky server could not be started")
     record.pid = child.pid
     const recordPath = join(serverDir, `${recordKey(targetWorkspace, installed.version, id)}.json`)
