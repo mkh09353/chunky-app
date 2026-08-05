@@ -11,6 +11,7 @@ import {
 } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
+import { reportSetupStage, type SetupStage } from "./setupStatus"
 
 const RELEASE_URL = "https://api.github.com/repos/mkh09353/chunky/releases/latest"
 // A real install (release download + bun install) can take minutes; wait
@@ -35,6 +36,8 @@ export type RuntimeInstallerDependencies = {
   platform: NodeJS.Platform
   arch: string
   log(message: string): void
+  /** Best-effort progress sink; failures here never affect the install. */
+  report(stage: SetupStage): void
 }
 
 const defaults: RuntimeInstallerDependencies = {
@@ -49,6 +52,7 @@ const defaults: RuntimeInstallerDependencies = {
   platform: process.platform,
   arch: process.arch,
   log: (message) => console.log(message),
+  report: reportSetupStage,
 }
 
 export function runtimeRoot(env: NodeJS.ProcessEnv, home = homedir()): string {
@@ -159,8 +163,68 @@ interface LatestRelease {
   downloadUrl: string
 }
 
+/** Never let a progress push break the thing it is describing. */
+function announce(deps: RuntimeInstallerDependencies, stage: SetupStage): void {
+  try {
+    deps.report(stage)
+  } catch {
+    /* best-effort by design */
+  }
+}
+
+/**
+ * Read the archive body, reporting whole-percent progress when the server told
+ * us how big it is. Falls back to the plain buffered read when the response has
+ * no readable stream (older runtimes, test doubles) — the bytes written are the
+ * same either way, so this stays pure instrumentation.
+ */
+async function readArchive(
+  response: Response,
+  tag: string,
+  deps: RuntimeInstallerDependencies,
+): Promise<Uint8Array> {
+  // One reader for the whole body: acquiring a second one locks the stream.
+  const reader = typeof response.body?.getReader === "function" ? response.body.getReader() : null
+  if (!reader) {
+    announce(deps, { kind: "downloading", version: tag })
+    return new Uint8Array(await response.arrayBuffer())
+  }
+
+  const declared = Number(response.headers.get("content-length") ?? "")
+  const total = Number.isFinite(declared) && declared > 0 ? declared : undefined
+  announce(deps, { kind: "downloading", version: tag, percent: total ? 0 : undefined })
+
+  const chunks: Uint8Array[] = []
+  let received = 0
+  let lastPercent = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    received += value.byteLength
+    if (!total) continue
+    // Whole percents only: a chunk-per-message stream would otherwise push
+    // thousands of RPC messages across a multi-megabyte download.
+    const percent = Math.min(99, Math.floor((received / total) * 100))
+    if (percent > lastPercent) {
+      lastPercent = percent
+      announce(deps, { kind: "downloading", version: tag, percent })
+    }
+  }
+
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
+}
+
 /** The newest published runtime release (tag + tarball URL). */
 async function fetchLatestRelease(deps: RuntimeInstallerDependencies): Promise<LatestRelease> {
+  announce(deps, { kind: "checking" })
   let response: Response
   try {
     response = await deps.fetch(RELEASE_URL, { headers: { Accept: "application/vnd.github+json" } })
@@ -196,12 +260,18 @@ async function stageRelease(
       throw new Error(`Could not download the Chunky runtime archive. Check your network connection and retry. (${error instanceof Error ? error.message : "request failed"})`)
     }
     if (!archiveResponse.ok) throw new Error(`Could not download the Chunky runtime archive (HTTP ${archiveResponse.status}). Please retry.`)
-    writeFileSync(archive, new Uint8Array(await archiveResponse.arrayBuffer()))
+    let bytes: Uint8Array
+    try { bytes = await readArchive(archiveResponse, tag, deps) } catch (error) {
+      throw new Error(`Could not download the Chunky runtime archive. Check your network connection and retry. (${error instanceof Error ? error.message : "read failed"})`)
+    }
+    writeFileSync(archive, bytes)
 
+    announce(deps, { kind: "extracting", version: tag })
     rmSync(temporary, { recursive: true, force: true })
     mkdirSync(temporary, { recursive: true })
     run(["tar", "-xzf", archive, "--strip-components=1", "-C", temporary], parent, deps, "Could not extract the Chunky runtime archive")
     const bun = resolveBun(env, deps.homeDir)
+    announce(deps, { kind: "installing", version: tag, attempt: 1 })
     run([bun, "install", "--ignore-scripts"], temporary, deps, "Could not install Chunky runtime dependencies")
 
     const platform = platformId(deps.platform, deps.arch)
@@ -209,6 +279,7 @@ async function stageRelease(
       let binary = findClaudeBinary(temporary, platform)
       if (!binary) {
         deps.log("Chunky native agent binary missing; retrying dependency installation…")
+        announce(deps, { kind: "installing", version: tag, attempt: 2 })
         rmSync(join(temporary, "node_modules"), { recursive: true, force: true })
         for (const entry of readdirSync(join(temporary, "packages"), { withFileTypes: true })) {
           if (entry.isDirectory()) rmSync(join(temporary, "packages", entry.name, "node_modules"), { recursive: true, force: true })
@@ -222,6 +293,7 @@ async function stageRelease(
 
     // Verify BEFORE anything is swapped in: a half-downloaded or mislabelled
     // release must never replace a working runtime.
+    announce(deps, { kind: "verifying", version: tag })
     const stagedVersion = installedRuntimeVersion(temporary)
     if (stagedVersion !== tag) throw new Error(`Expected Chunky release v${tag}, but its package.json reports v${stagedVersion ?? "unknown"}.`)
     if (!hasRuntime(temporary)) throw new Error(`The downloaded Chunky runtime v${tag} is incomplete.`)

@@ -88,6 +88,11 @@ import {
 } from "./lib/cloneRepo"
 import { cloneRoots } from "./lib/dirSearch"
 import { reresolveConnection, shouldReresolve, subscribeServerChanged } from "./lib/reresolve"
+import {
+  describeSetupStage,
+  subscribeSetupStage,
+  type SetupStage,
+} from "./lib/setupStatus"
 import { OldServersNotice } from "./components/OldServersNotice"
 import { classifyServers, subscribeOldServers } from "./lib/oldServers"
 import { inspectChunkyServers, type ServerInspection } from "./lib/serverLifecycle"
@@ -305,6 +310,10 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>("booting")
   const [connError, setConnError] = useState<string | null>(null)
+  // First-run install progress pushed by Bun. Disposable: null on a warm launch
+  // (and cleared once the connection resolves), so the banner keeps its usual
+  // wording whenever there is nothing extra to say.
+  const [setupStage, setSetupStage] = useState<SetupStage | null>(null)
   const [appMode, setAppMode] = useState<AppMode>("live")
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
@@ -1066,9 +1075,27 @@ export function App() {
   // ---- Boot ----
   useEffect(() => {
     let cancelled = false
+    let unsubscribeSetup: (() => void) | null = null
     ;(async () => {
+      // Subscribe BEFORE getConfig: on a first run that call is what makes Bun
+      // download and install the runtime, and its stages are what turn a
+      // multi-minute blank wait into a status line.
+      unsubscribeSetup = await subscribeSetupStage((stage) => {
+        if (!cancelled) setSetupStage(stage)
+      })
+      if (cancelled) {
+        unsubscribeSetup()
+        return
+      }
+
       const cfg = await loadConfig()
+      // Setup is over the moment the connection resolves: stop listening (a
+      // later background runtime upgrade must not repaint the boot banner) and
+      // drop the line.
+      unsubscribeSetup?.()
+      unsubscribeSetup = null
       if (cancelled) return
+      setSetupStage(null)
       setConfig(cfg)
 
       if (cfg.connectionError) {
@@ -1123,6 +1150,7 @@ export function App() {
     })()
     return () => {
       cancelled = true
+      unsubscribeSetup?.()
       stopStream()
       if (settleTimer.current != null) clearTimeout(settleTimer.current)
     }
@@ -2690,10 +2718,16 @@ export function App() {
   // The theme switch lives in the top bar's overflow menu now (ChatTopBar),
   // which is handed `resolved` + `toggle` directly.
 
+  // null unless Bun actually reported a setup stage (i.e. a first run / install).
+  const setupStatusLine = describeSetupStage(setupStage)
+
   const statusBanner =
     connectionState === "booting" ? (
       <div className="flex items-center justify-center gap-2 border-border border-b bg-muted/40 px-4 py-1.5 text-[12px] text-muted-foreground">
-        Connecting to Chunky server…
+        {/* First run installs a runtime before any server exists; Bun reports
+            what it is doing so this is not a silent multi-minute wait. Warm
+            launches report nothing and read exactly as they always have. */}
+        <span className="truncate">{setupStatusLine ?? "Connecting to Chunky server…"}</span>
       </div>
     ) : connectionState === "reconnecting" && live ? (
       <div className="flex items-center justify-center gap-2 border-border border-b bg-muted/40 px-4 py-1.5 text-[12px] text-muted-foreground">

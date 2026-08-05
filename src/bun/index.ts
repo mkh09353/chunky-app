@@ -22,6 +22,7 @@ import {
 import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
+import { setSetupStageReporter, SETUP_STAGE_MESSAGE, type SetupStage } from "./setupStatus"
 import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
 import { inspectServers, retireServer, stopServer, type ServerInspection } from "./serverInspection"
 
@@ -463,6 +464,20 @@ rpc = createRPC({
     scmClone: async (params: unknown) => git.scmClone(params ?? {}),
     scmPublish: async (params: unknown) => git.scmPublish(params ?? {}),
   },
+})
+
+// First-run setup can take minutes (release download → bun install → server
+// start). Push each stage to the webview over the existing fire-and-forget
+// message channel so the connecting screen can say what is happening. Stages
+// carry no credentials, and every failure here is swallowed: progress must
+// never be able to break the install or the connection it describes.
+setSetupStageReporter((stage: SetupStage) => {
+  try {
+    const send = rpc?.send as unknown as Record<string, (value: unknown) => void> | undefined
+    send?.[SETUP_STAGE_MESSAGE]?.(stage)
+  } catch {
+    /* the webview may not be attached yet, or may be gone */
+  }
 })
 
 const url = await getMainViewUrl()

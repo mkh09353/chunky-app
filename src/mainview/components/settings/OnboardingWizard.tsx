@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Check, RotateCw } from "lucide-react"
+import { AlertTriangle, ArrowLeft, Check, Copy, RotateCw } from "lucide-react"
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   applyOnboardingMode,
@@ -7,8 +7,14 @@ import {
   prettyModel,
   providerLabel,
 } from "~/lib/configApi"
-import type { OnboardingProvider, OnboardingResponse, SuggestedMode } from "~/lib/configApi"
+import type {
+  LoginInitiation,
+  OnboardingProvider,
+  OnboardingResponse,
+  SuggestedMode,
+} from "~/lib/configApi"
 import { cn } from "~/lib/cn"
+import { copyText } from "~/lib/clipboard"
 import { DRAG_REGION } from "~/lib/dragRegion"
 import { Button } from "../ui/button"
 import { InlineError, Loading, Spinner, useAsync } from "./common"
@@ -368,6 +374,10 @@ function ProviderStep({
                 provider={p}
                 polling={isPolling(p.id)}
                 error={login?.provider === p.id ? login.error : null}
+                // Device code / instructions belong to the one pending login only:
+                // the hook nulls `login` on success and drops `polling` on
+                // failure or timeout, so this clears itself.
+                initiation={login?.provider === p.id && login.polling ? login.initiation : null}
                 onSignIn={() => void startLogin(p.id)}
               />
             ))}
@@ -393,23 +403,59 @@ function ProviderStep({
   )
 }
 
+/** How long the copied-check stays up on the device-code copy button. */
+const COPY_FEEDBACK_MS = 1600
+
 function ProviderCard({
   provider,
   polling,
   error,
+  initiation,
   onSignIn,
 }: {
   provider: OnboardingProvider
   polling: boolean
   error: string | null
+  /** Pending login details for THIS provider, or null when nothing is in flight. */
+  initiation: LoginInitiation | null
   onSignIn: () => void
 }) {
   const detail =
     provider.detail ??
     (provider.ready ? "Credentials detected on this machine." : "Sign in to use this provider.")
 
+  // A device-code login (Codex, Grok) opens a page that asks for a code the
+  // user can only get from here — show it, or the wizard is a dead end.
+  const pending = polling && initiation && initiation.kind !== "ready" ? initiation : null
+  const userCode = pending?.kind === "url" ? pending.userCode : undefined
+
+  const [copied, setCopied] = useState<boolean | null>(null)
+  const copyTimer = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    },
+    [],
+  )
+
+  // Stale confirmation would outlive the code it belongs to.
+  useEffect(() => {
+    if (!userCode) setCopied(null)
+  }, [userCode])
+
+  const copyCode = useCallback(async (code: string) => {
+    const ok = await copyText(code)
+    setCopied(ok)
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => {
+      setCopied(null)
+      copyTimer.current = null
+    }, COPY_FEEDBACK_MS)
+  }, [])
+
   return (
-    <GlowCard className="h-[224px] select-none items-center justify-center gap-3 px-4 text-center">
+    <GlowCard className="min-h-[224px] select-none items-center justify-center gap-3 px-4 text-center">
       <ProviderMark id={provider.id} label={provider.label} className="size-11" />
       <h2 className="max-w-full truncate font-normal text-[14px] text-foreground leading-5">
         {provider.label}
@@ -436,9 +482,36 @@ function ProviderCard({
         </button>
       )}
 
+      {pending && (
+        <div className="flex w-full min-w-0 flex-col items-center gap-1.5">
+          {userCode && (
+            <div className="flex w-full min-w-0 items-center justify-center gap-1.5 rounded-lg border border-border bg-muted/30 px-2 py-1.5">
+              <code className="min-w-0 select-text break-all font-mono font-semibold text-[13px] text-foreground leading-4 tracking-[0.12em]">
+                {userCode}
+              </code>
+              <button
+                type="button"
+                onClick={() => void copyCode(userCode)}
+                aria-label={`Copy ${provider.label} login code`}
+                className="shrink-0 cursor-pointer rounded-md p-0.5 text-muted-foreground outline-none motion-safe:transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {copied === true ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              </button>
+            </div>
+          )}
+          <p className="max-w-[13rem] text-[11px] text-muted-foreground leading-4" role="status">
+            {copied === true
+              ? "Code copied."
+              : copied === false
+                ? "Couldn't copy — select the code above."
+                : pending.instructions}
+          </p>
+        </div>
+      )}
+
       {error ? (
         <p className="max-w-[13rem] text-[11px] text-destructive leading-4">{error}</p>
-      ) : (
+      ) : pending ? null : (
         <p className="max-w-[13rem] text-[11px] text-muted-foreground leading-4">{detail}</p>
       )}
     </GlowCard>

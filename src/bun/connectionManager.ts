@@ -25,6 +25,7 @@ import {
   type RuntimeUpgrade,
 } from "./runtimeInstaller"
 import { ensureChunkyServerLauncher } from "./launcherSymlink"
+import { reportSetupStage, type SetupStage } from "./setupStatus"
 
 const SERVER_IDENTITY_PATH = "/_chunky/server-identity"
 const SERVER_LEASES_PATH = "/_chunky/server-leases"
@@ -79,6 +80,8 @@ export type ConnectionDependencies = {
   allocatePort?(): Promise<number>
   installRuntime?(env: NodeJS.ProcessEnv): Promise<void>
   upgradeRuntime?(env: NodeJS.ProcessEnv): Promise<RuntimeUpgrade>
+  /** Best-effort first-run progress sink; failures never affect resolution. */
+  report?(stage: SetupStage): void
   /** Whether a recorded process still exists (guards record pruning). */
   pidAlive?(pid: number): boolean
   launcherFs?: import("./launcherSymlink").LauncherSymlinkFs
@@ -90,6 +93,7 @@ const defaults: ConnectionDependencies = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   spawn: (command, options) => Bun.spawn(command, { ...options, stdout: "ignore", stderr: "ignore" }),
   log: (message) => console.log(message),
+  report: reportSetupStage,
   installRuntime,
   pidAlive: (pid) => {
     if (!Number.isInteger(pid) || pid <= 0) return false
@@ -329,6 +333,15 @@ function recordKey(workspace: string, version: string, id: string): string {
   return createHash("sha256").update(`${workspace}\0${version}\0${id}`).digest("hex").slice(0, 24)
 }
 
+/** Never let a progress push break connection resolution. */
+function announce(deps: ConnectionDependencies, stage: SetupStage): void {
+  try {
+    deps.report?.(stage)
+  } catch {
+    /* best-effort by design */
+  }
+}
+
 async function acquireLock(lock: string, deps: ConnectionDependencies): Promise<() => void> {
   const deadline = deps.now() + STARTUP_TIMEOUT_MS
   while (deps.now() < deadline) {
@@ -379,6 +392,7 @@ async function startServer(
       && existing.version === installed.version && existing.buildId === id) {
       return existing
     }
+    announce(deps, { kind: "starting" })
     const port = deps.allocatePort ? await deps.allocatePort() : await freePort()
     const nonce = randomUUID()
     const record: RecordFile = {
