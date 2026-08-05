@@ -49,6 +49,14 @@ import {
 const SEARCH_DEBOUNCE_MS = 180
 /** How long a tab shows the "copied" check before returning to its folder icon. */
 const COPY_FEEDBACK_MS = 1500
+/**
+ * Ceiling for a single tab, in rem. A tab stretches into the titlebar's free
+ * space up to this width, and the whole row is capped at `tabs x this`, so the
+ * growth always lands *inside* the tabs — the branch pill stays glued to the
+ * last one instead of an empty gap opening in front of it. Keep in sync with
+ * the `max-w-[22rem]` on the tab wrapper below; Tailwind needs the literal.
+ */
+const TAB_MAX_REM = 22
 
 /** Which source the popover is adding a repository from. */
 type AddMode = "existing" | "new"
@@ -511,13 +519,25 @@ export function RepoTabs({
     // The row itself stays draggable (it sits in the window's titlebar strip);
     // only the controls inside it opt out, so any slack around the tabs can
     // still be used to move the window.
-    <div ref={rootRef} className="relative flex min-w-0 items-center gap-1.5">
+    <div
+      ref={rootRef}
+      // The row shares the header's slack with the drag spacer instead of
+      // leaving all of it to the right of the pill — but only up to the width
+      // the tabs themselves can fill, so the extra width never shows up as
+      // empty space in front of the branch pill, nor as a dead (undraggable)
+      // strip at the end of the tablist. With no tabs there is nothing to grow
+      // into, so the row stays exactly as wide as the add button.
+      className={cn("relative flex min-w-0 items-center gap-1.5", repos.length > 0 && "grow")}
+      style={
+        repos.length > 0 ? { maxWidth: `${repos.length * TAB_MAX_REM}rem` } : undefined
+      }
+    >
       <div
         role="tablist"
         aria-label="Repositories"
         className={cn(
           NO_DRAG_REGION,
-          "flex min-w-0 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          "flex min-w-0 grow items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         )}
       >
         {repos.map((r) => {
@@ -526,7 +546,10 @@ export function RepoTabs({
           return (
             <div
               key={r.id}
-              className="group/tab relative flex shrink-0 items-center"
+              // `grow` hands the tab a share of the row's free width (capped
+              // at one tab's ceiling); `shrink-0` keeps the row scrolling
+              // rather than squeezing every tab once they outgrow it.
+              className="group/tab relative flex min-w-0 max-w-[22rem] shrink-0 grow items-center"
               // Right-click anywhere on the tab (including its menu button) is
               // the discoverable way to grab the repo's absolute path.
               onContextMenu={(e) => openTabMenu(r.id, e)}
@@ -541,13 +564,15 @@ export function RepoTabs({
                 disabled={disabled || busy}
                 onClick={() => onSelect(r.id)}
                 className={cn(
-                  // No tight clamp: at fullscreen width the strip has hundreds
-                  // of px of slack, so a long repo name should simply read in
-                  // full. The ceiling only stops one absurd name from eating
-                  // the row; when the row does outgrow the space it scrolls
-                  // (the tablist is `min-w-0 overflow-x-auto`) rather than
-                  // pushing the branch pill or the action cluster out.
-                  "inline-flex h-7 max-w-[22rem] cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-[12px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                  // The tab fills its wrapper, which is what carries the
+                  // width: at fullscreen the strip has hundreds of px of
+                  // slack, so the tab stretches into it (up to the wrapper's
+                  // ceiling) and a long repo name simply reads in full. That
+                  // ceiling also stops one absurd name from eating the row;
+                  // when the tabs do outgrow the space the row scrolls (the
+                  // tablist is `min-w-0 overflow-x-auto`) rather than pushing
+                  // the branch pill or the action cluster out.
+                  "inline-flex h-7 w-full cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-[12px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                   repos.length > 1 && "pr-7",
                   active
                     ? "bg-background/80 text-foreground shadow-xs"

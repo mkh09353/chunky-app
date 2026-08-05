@@ -132,8 +132,9 @@ export function ChatTopBar({
 
       {/* The window's guaranteed drag handle. Repo tabs and the action cluster
           both opt out of dragging, so this spacer is what stays grabbable at
-          every window width — it grows into the free space and never shrinks
-          below a usable strip, and it never hosts controls. */}
+          every window width — it splits the free space with the tab row (which
+          stops growing once the tabs hit their ceiling, handing the rest back
+          here) and never shrinks below a usable strip, nor hosts controls. */}
       <div aria-hidden className="h-full min-w-12 flex-1" />
 
       {/* At most a handful of targets live out here: the mic and the session
