@@ -14,7 +14,7 @@ import {
   Sun,
   Target,
 } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Repo } from "~/lib/api"
 import type { Message, Project, Thread } from "~/lib/mock"
 import { Button } from "./ui/button"
@@ -32,6 +32,13 @@ import { MessageView } from "./Message"
 import { AgentCard } from "./AgentCard"
 import { LiveRunsProvider, type LiveRunsValue } from "./LiveRun"
 import { cn } from "~/lib/cn"
+import {
+  BOTTOM_SLACK,
+  classifyScroll,
+  isAtBottom,
+  reAnchor,
+  shouldPark,
+} from "~/lib/followBottom"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { applyRunAnchors } from "~/lib/mapTranscript"
 import { liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
@@ -194,15 +201,46 @@ export function ChatTopBar({
   )
 }
 
-/** Within this many px of the end still counts as "reading the bottom", so the
- *  transcript keeps following the stream. Past it the reader is scrolled away
- *  and we leave the viewport alone. */
-const BOTTOM_SLACK = 48
-
-/** Is the viewport parked at (or within slack of) the end of the transcript? */
+/** Is the viewport parked at (or within slack of) the end of the transcript?
+ *  The band itself and the rest of the follow rules live in ~/lib/followBottom,
+ *  where they are unit-testable without a DOM. */
 function atBottom(el: HTMLElement) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK
+  return isAtBottom(el)
 }
+
+/** How long a turn-end park may still be animating before we stop treating the
+ *  viewport as its property. The animation can be cancelled (the reader takes
+ *  over) or land a pixel off its target, so the guard is time-boxed too. */
+const PARK_SETTLE_MS = 700
+
+/** Land `el` on `top` in ONE frame, and report where it actually landed.
+ *
+ *  Not `behavior: "instant"`: that is a WebIDL enum, so an engine without the
+ *  value THROWS on the call rather than ignoring it — and this runs inside the
+ *  ResizeObserver callback that does the following, where a throw would kill
+ *  the follow outright. An inline `scroll-behavior: auto` beats the viewport's
+ *  `scroll-smooth` class (which would otherwise animate even a plain scrollTop
+ *  assignment), so this is instant on every engine, with nothing to support. */
+function jumpTo(el: HTMLElement, top: number) {
+  const previous = el.style.scrollBehavior
+  el.style.scrollBehavior = "auto"
+  el.scrollTop = top
+  el.style.scrollBehavior = previous
+  return el.scrollTop
+}
+
+/** Animated scroll for the one move that should be seen happening (the turn-end
+ *  park). Falls back to the class-driven animation if the options object is
+ *  rejected; either way the caller gets the target it asked for. */
+function glideTo(el: HTMLElement, top: number) {
+  try {
+    el.scrollTo({ top, behavior: "smooth" })
+  } catch {
+    el.scrollTop = top
+  }
+  return top
+}
+
 
 /** Breathing room above the answer when we park its first line at the top. */
 const ANSWER_TOP_GAP = 12
@@ -254,32 +292,125 @@ export function ChatView({
   // Is the reader parked at the end of the thread? Only then do we follow the
   // stream; scrolling up mid-turn must stay put.
   const stuckToBottom = useRef(true)
+  // Where our OWN last scroll landed. This is the only reliable way to tell our
+  // scrolling from the reader's: content growing under a stationary viewport
+  // moves scrollHeight but NEVER scrollTop, and scroll events are dispatched a
+  // frame late — so an event we queued before a chunk landed arrives after it
+  // and, measured naively, reads as "the reader is 200px off the bottom". That
+  // misread is what used to latch the follow off for the rest of a turn while
+  // the reader sat motionless at the end.
+  const commandedTop = useRef<number | null>(null)
+  // Target of the turn-end park while its animation is in flight: the viewport
+  // belongs to that animation until it settles or the reader interrupts it.
+  const parkTarget = useRef<number | null>(null)
+  const parkTimer = useRef<number | null>(null)
+  // The park put the reader where they are — they did not choose it. Any real
+  // scroll gesture clears this, and it is what lets an auto-continued turn (goal
+  // mode: no user message to re-anchor on) start following again.
+  const parkedByUs = useRef(false)
+
+  const endPark = useCallback(() => {
+    parkTarget.current = null
+    if (parkTimer.current != null) {
+      window.clearTimeout(parkTimer.current)
+      parkTimer.current = null
+    }
+  }, [])
+  useEffect(() => endPark, [endPark])
+
+  /** Follow the end of the transcript, remembering where we asked to land. */
+  const followBottom = useCallback((el: HTMLElement) => {
+    commandedTop.current = jumpTo(el, el.scrollHeight)
+  }, [])
+
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const onScroll = () => {
-      stuckToBottom.current = atBottom(el)
+      switch (
+        classifyScroll({
+          scrollTop: el.scrollTop,
+          commandedTop: commandedTop.current,
+          parkTarget: parkTarget.current,
+        })
+      ) {
+        // The park's animation owns the viewport; its intermediate positions are
+        // not the reader changing their mind.
+        case "park-moving":
+          return
+        case "park-settled":
+          endPark()
+          return
+        // Our own follow, reported back to us. Deliberately NOT re-measured: the
+        // content may have grown since we asked, and "at the bottom" measured
+        // against content that arrived afterwards is a lie.
+        case "ours":
+          return
+        // A position nobody asked us for: wheel, trackpad, keys, thumb drag,
+        // momentum. This is reader intent — the only thing allowed to turn the
+        // follow off, and the thing that turns it back on by returning to the
+        // end.
+        case "reader":
+          commandedTop.current = null
+          parkedByUs.current = false
+          stuckToBottom.current = atBottom(el)
+          return
+      }
     }
     el.addEventListener("scroll", onScroll, { passive: true })
     return () => el.removeEventListener("scroll", onScroll)
-  }, [])
+  }, [endPark])
+
+  // A real gesture also cancels a park mid-animation. WebKit stops the animation
+  // for the reader, so it never reports the target the scroll handler waits for;
+  // without this the guard would only lift on its timeout.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onGesture = () => {
+      if (parkTarget.current == null) return
+      endPark()
+      parkedByUs.current = false
+      stuckToBottom.current = atBottom(el)
+    }
+    el.addEventListener("wheel", onGesture, { passive: true })
+    el.addEventListener("touchmove", onGesture, { passive: true })
+    // Keys go on the window: the scrollport is not focusable, so PageDown/arrows
+    // are delivered to whatever IS focused and never reach it. Harmless as a
+    // global — it does nothing at all unless a park is currently animating.
+    window.addEventListener("keydown", onGesture, true)
+    return () => {
+      el.removeEventListener("wheel", onGesture)
+      el.removeEventListener("touchmove", onGesture)
+      window.removeEventListener("keydown", onGesture, true)
+    }
+  }, [endPark])
 
   // Follow the bottom whenever the CONTENT grows, not just when React rows
   // change: tool output, live delegate streams, expanding cards, images and
   // markdown all resize the transcript without producing a new message row,
-  // and the render-effect below never fires for them. A ResizeObserver on the
-  // inner column catches every one of those. Instant, never smooth — smooth
-  // restarts per delta and falls behind a fast stream.
+  // and the render-effect below never fires for them. A ResizeObserver catches
+  // every one of those. Instant, never smooth — smooth restarts per delta and
+  // falls behind a fast stream.
+  //
+  // The SCROLLPORT is observed as well as the content column, because the panes
+  // below the transcript (composer growing to 220px, todos, queue chips, the
+  // background-tasks line, the connection banner, the terminal drawer) mount and
+  // resize mid-turn. They shrink the viewport without touching content height
+  // and without firing a scroll event, which silently pushes the end of the
+  // transcript out of sight — nothing used to notice.
   useEffect(() => {
     const el = scrollRef.current
     const inner = innerRef.current
     if (!el || !inner) return
     const observer = new ResizeObserver(() => {
-      if (stuckToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
+      if (parkTarget.current != null) return
+      if (stuckToBottom.current) followBottom(el)
     })
     observer.observe(inner)
+    observer.observe(el)
     return () => observer.disconnect()
-  }, [])
+  }, [followBottom])
 
   // Run state → anchors: which pill owns which run, live or settled.
   const anchors = useMemo(
@@ -310,6 +441,7 @@ export function ChatView({
   const [turnEnd, setTurnEnd] = useState(0)
   const wasRunning = useRef(running)
   const messageCount = thread.messages.length
+  const prevMessageCount = useRef(messageCount)
   // Read at turn end (not a dep — the effect must fire on the transition only).
   const messagesRef = useRef(messages)
   messagesRef.current = messages
@@ -331,27 +463,57 @@ export function ChatView({
   )
   const prevUserMessageCount = useRef(userMessageCount)
   useEffect(() => {
-    if (userMessageCount > prevUserMessageCount.current) stuckToBottom.current = true
+    if (userMessageCount > prevUserMessageCount.current) {
+      stuckToBottom.current = true
+      parkedByUs.current = false
+      endPark()
+    }
     prevUserMessageCount.current = userMessageCount
-  }, [userMessageCount])
+  }, [userMessageCount, endPark])
 
   // Switching sessions starts at the end of the new thread, not wherever the
   // previous one had parked us.
   useEffect(() => {
     stuckToBottom.current = true
-  }, [thread.id])
+    parkedByUs.current = false
+    commandedTop.current = null
+    endPark()
+  }, [thread.id, endPark])
 
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
     const justEnded = wasRunning.current && !running
+    const justStarted = !wasRunning.current && running
     wasRunning.current = running
+    const appended = messageCount > prevMessageCount.current
+    prevMessageCount.current = messageCount
+
+    // Re-anchor without a user message. The count-based re-anchor above only
+    // sees turns a person started; these two cases are what left a goal-mode or
+    // auto-continued turn streaming below the fold forever:
+    //  · a new turn starts while the reader is still exactly where the previous
+    //    turn's park put them. That position was our choice, not theirs, so a
+    //    fresh turn's output is allowed to pull them back to the live end.
+    //  · a row appends while the reader is VISUALLY at the end. Sitting at the
+    //    end IS reading the end, whatever the flag says, so this also heals any
+    //    stale "off" the flag ever picks up.
+    const anchored = reAnchor({
+      stuck: stuckToBottom.current,
+      parkedByUs: parkedByUs.current,
+      parkInFlight: parkTarget.current != null,
+      justStarted,
+      appended,
+      atBottom: atBottom(el),
+    })
+    stuckToBottom.current = anchored.stuck
+    parkedByUs.current = anchored.parkedByUs
 
     if (!justEnded) {
       // Streaming (or replaying): follow the bottom unless the reader left it.
       // Instant, not smooth — the viewport's scroll-smooth would restart an
       // animation on every delta and never catch up with a fast stream.
-      if (stuckToBottom.current) el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
+      if (stuckToBottom.current && parkTarget.current == null) followBottom(el)
       return
     }
 
@@ -365,12 +527,26 @@ export function ChatView({
     // Stop the ResizeObserver's bottom-follow immediately. Otherwise a resize
     // notification between this effect and the animation frame can jump to the
     // tail just before we park at the answer's start.
+    const wasFollowing = stuckToBottom.current
+    // A reader who scrolled into history mid-turn keeps the viewport they chose:
+    // the park re-frames an answer they were WATCHING arrive (or one we parked
+    // them in ourselves), it is not a licence to move them at every turn end.
+    if (!shouldPark({ wasFollowing, parkedByUs: parkedByUs.current })) return
     stuckToBottom.current = false
     const frame = requestAnimationFrame(() => {
       const inner = innerRef.current
-      if (!inner) return
-      const first = inner.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(answerId)}"]`)
-      if (!first) return
+      const first =
+        inner?.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(answerId)}"]`) ?? null
+      if (!first) {
+        // No row to park against (the answer is not rendered as its own row).
+        // Returning here used to leave the follow OFF with the viewport never
+        // moved — the transcript then ignored every later message until the
+        // reader typed. Hand the follow back instead: nothing scrolled, so
+        // whatever was true an instant ago is still true.
+        stuckToBottom.current = wasFollowing || atBottom(el)
+        if (stuckToBottom.current) followBottom(el)
+        return
+      }
       const top =
         first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
       const target = Math.max(0, top - ANSWER_TOP_GAP)
@@ -382,17 +558,28 @@ export function ChatView({
       // instant jump so nothing races the ResizeObserver's own bottom-follow.
       if (target >= el.scrollHeight - el.clientHeight - BOTTOM_SLACK) {
         stuckToBottom.current = true
-        el.scrollTo({ top: el.scrollHeight, behavior: "instant" })
+        followBottom(el)
         return
       }
-      // A long answer genuinely parks away from the end, so the follow stays
-      // off until the reader returns to the bottom or sends the next message.
-      el.scrollTo({ top: target, behavior: "smooth" })
+      // A long answer genuinely parks away from the end. The follow stays off
+      // until the reader returns to the bottom, the next turn starts, or they
+      // send a message — but the position is remembered as OURS, so none of
+      // those is mistaken for a deliberate scroll into history.
+      parkedByUs.current = true
+      // We no longer own the bottom: forget the position, or a reader scrolling
+      // back to exactly it would be mistaken for our own follow and left unstuck.
+      commandedTop.current = null
+      parkTarget.current = glideTo(el, target)
+      if (parkTimer.current != null) window.clearTimeout(parkTimer.current)
+      parkTimer.current = window.setTimeout(() => {
+        parkTimer.current = null
+        parkTarget.current = null
+      }, PARK_SETTLE_MS)
     })
     return () => cancelAnimationFrame(frame)
     // `messages` is a dep so this fires on every streamed delta, not just on
     // turn boundaries; the follow above is what tracks mid-message growth.
-  }, [running, messageCount, streamingId, loading, messages])
+  }, [running, messageCount, streamingId, loading, messages, followBottom])
 
   // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
   // in the same commit can never cancel each other out.
