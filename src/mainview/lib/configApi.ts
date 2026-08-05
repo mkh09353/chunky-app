@@ -681,8 +681,8 @@ export async function saveMode(request: SaveModeRequest): Promise<ModesResponse>
 
 /** Apply a saved mode — the server switches executor + advisor + sidekick as
  *  one unit and returns the applied selection. */
-export async function applyMode(name: string): Promise<ApplyModeResult> {
-  return req<ApplyModeResult>(ROUTES.applyMode(name), jsonInit("POST"))
+export async function applyMode(name: string, sessionId?: string | null): Promise<ApplyModeResult> {
+  return req<ApplyModeResult>(ROUTES.applyMode(name), jsonInit("POST", sessionId ? { sessionId } : {}))
 }
 
 export async function deleteMode(name: string): Promise<ModesResponse> {

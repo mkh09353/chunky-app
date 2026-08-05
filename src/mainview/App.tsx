@@ -2173,7 +2173,7 @@ export function App() {
     async (name: string) => {
       try {
         markSelfApplied(name)
-        const applied = await applyMode(name)
+        const applied = await applyMode(name, sessionIdRef.current)
         await refreshModels()
         void refreshModes()
         void refreshAgents()
@@ -2289,7 +2289,7 @@ export function App() {
           return
         }
         markSelfApplied(action.name)
-        const applied = await applyMode(action.name)
+        const applied = await applyMode(action.name, sessionIdRef.current)
         await refreshModels()
         void refreshModes()
         void refreshAgents()
