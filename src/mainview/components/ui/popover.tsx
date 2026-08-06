@@ -7,6 +7,7 @@
 // takes and returns focus.
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 
 export const Popover = PopoverPrimitive.Root
 export const PopoverTrigger = PopoverPrimitive.Trigger
@@ -18,22 +19,32 @@ export function PopoverPopup({
   side = "bottom",
   align = "center",
   sideOffset = 6,
+  collisionPadding = 8,
   ...props
 }: PopoverPrimitive.Popup.Props & {
   side?: PopoverPrimitive.Positioner.Props["side"]
   align?: PopoverPrimitive.Positioner.Props["align"]
   sideOffset?: PopoverPrimitive.Positioner.Props["sideOffset"]
+  /** Keeps the popup this far from the viewport edges (Base UI clamps/flips
+   *  against it and publishes the result as `--available-width/height`). */
+  collisionPadding?: PopoverPrimitive.Positioner.Props["collisionPadding"]
 }) {
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Positioner
         align={align}
         className="z-50"
+        collisionPadding={collisionPadding}
         side={side}
         sideOffset={sideOffset}
       >
         <PopoverPrimitive.Popup
           className={cn(
+            // A floating surface is never a window-drag handle: it is portaled
+            // to <body>, so it can be painted over the titlebar strip, and
+            // WITHOUT this class a mousedown there would start a native window
+            // move instead of reaching the popup (see lib/dragRegion.ts).
+            NO_DRAG_REGION,
             "origin-(--transform-origin) rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-panel outline-none",
             "transition-[transform,opacity] duration-150 data-[ending-style]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0",
             className,

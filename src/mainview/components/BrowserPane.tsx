@@ -12,6 +12,7 @@ import {
 } from "~/lib/browserPaneWidth"
 import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browserNav"
 import { cn } from "~/lib/cn"
+import { rectsIntersect } from "~/lib/browserOverlay"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { Button } from "./ui/button"
 
@@ -153,10 +154,6 @@ const OVERLAY_POLL_MS = 200
 const OVERLAY_PROBE_COLUMNS = 4
 const OVERLAY_PROBE_ROWS = 6
 
-function rectsIntersect(a: DOMRect, b: DOMRect): boolean {
-  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
-}
-
 /**
  * Does anything inside this portal layer overlap `target`?
  *
@@ -220,7 +217,6 @@ function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): ()
   let frame = 0
 
   const evaluate = () => {
-    frame = 0
     // Before the native view exists there is nothing to hide; `applied` stays
     // untouched so the poll re-applies as soon as it does.
     if (element.webviewId == null) return
@@ -230,8 +226,19 @@ function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): ()
     element.toggleHidden(covered)
   }
   const schedule = () => {
-    if (frame) return
-    frame = requestAnimationFrame(evaluate)
+    // MutationObserver callbacks run before the next paint. Apply the native
+    // visibility change in that callback rather than waiting for an animation
+    // frame; otherwise the first click on a newly opened popup can still be
+    // intercepted by the native view.
+    if (!frame) {
+      frame = requestAnimationFrame(() => {
+        // Clear the handle only when the queued callback runs. Synchronous
+        // evaluation below must not make the pending RAF uncancellable.
+        frame = 0
+        evaluate()
+      })
+    }
+    evaluate()
   }
 
   // Overlays mount and unmount as DOM changes, so react to those directly (the

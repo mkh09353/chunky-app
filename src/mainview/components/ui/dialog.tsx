@@ -18,6 +18,10 @@ export function DialogPopup({
     <DialogPrimitive.Portal>
       <DialogPrimitive.Backdrop
         className={cn(
+          // The backdrop covers the titlebar strip too. Without an explicit
+          // opt-out, a mousedown on the part of it that overlaps the app's drag
+          // region moves the window instead of dismissing the dialog.
+          NO_DRAG_REGION,
           "fixed inset-0 z-50 bg-background/60 backdrop-blur-[3px]",
           "transition-opacity duration-200 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0",
         )}
@@ -25,6 +29,8 @@ export function DialogPopup({
       <DialogPrimitive.Popup
         data-slot="dialog"
         className={cn(
+          // Nothing inside a dialog drags the window; see lib/dragRegion.ts.
+          NO_DRAG_REGION,
           "-translate-x-1/2 -translate-y-1/2 fixed top-1/2 left-1/2 z-50 flex w-[calc(100vw-2rem)] max-w-lg flex-col rounded-2xl border border-border bg-popover text-popover-foreground shadow-panel outline-none",
           "transition-[transform,opacity] duration-200 data-[ending-style]:scale-97 data-[starting-style]:scale-97 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0",
           className,

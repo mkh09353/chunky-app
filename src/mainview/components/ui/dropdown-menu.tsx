@@ -2,6 +2,7 @@ import { Menu as MenuPrimitive } from "@base-ui/react/menu"
 import { Check } from "lucide-react"
 import type * as React from "react"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 
 export const DropdownMenu = MenuPrimitive.Root
 export const DropdownMenuGroup = MenuPrimitive.Group
@@ -14,8 +15,12 @@ export const DropdownMenuSub = MenuPrimitive.SubmenuRoot
 const ITEM_CLASSES =
   "flex min-h-8 cursor-pointer select-none items-center gap-2 rounded-lg px-2.5 text-sm outline-none transition-colors data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground"
 
+// Menus opened from the titlebar (repo tabs, header actions) are portaled to
+// <body> and can be painted over the drag region, so they have to opt out of
+// window dragging explicitly — see lib/dragRegion.ts.
 const POPUP_CLASSES =
-  "min-w-44 origin-[var(--transform-origin)] rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-panel outline-none transition-[transform,opacity] duration-150 data-[ending-style]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0"
+  NO_DRAG_REGION +
+  " min-w-44 origin-[var(--transform-origin)] rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-panel outline-none transition-[transform,opacity] duration-150 data-[ending-style]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[starting-style]:opacity-0"
 
 export function DropdownMenuTrigger({ className, ...props }: MenuPrimitive.Trigger.Props) {
   return <MenuPrimitive.Trigger data-slot="dropdown-trigger" className={className} {...props} />

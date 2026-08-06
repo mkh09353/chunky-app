@@ -16,16 +16,17 @@ import {
   useCallback,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react"
 import type { Repo } from "~/lib/api"
 import { copyText } from "~/lib/clipboard"
 import { cn } from "~/lib/cn"
+import { clampDragOffset } from "~/lib/browserOverlay"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import {
   nativeDirSearchAvailable,
@@ -38,6 +39,7 @@ import { joinPath, parseGitUrl } from "~/lib/cloneRepo"
 import { scmClone } from "~/lib/git"
 import { nativeRpcAvailable } from "~/lib/rpc"
 import { Button } from "./ui/button"
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -152,21 +154,20 @@ export function RepoTabs({
   const [directCloning, setDirectCloning] = useState(false)
   const cloneUrlRef = useRef<HTMLInputElement>(null)
   const cloneLogRef = useRef<HTMLDivElement>(null)
+  const addPopupRef = useRef<HTMLDivElement>(null)
+  const addDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    startOffsetX: number
+    startOffsetY: number
+    rect: { left: number; top: number; width: number; height: number }
+  } | null>(null)
+  const [addOffset, setAddOffset] = useState({ x: 0, y: 0 })
   const cloning = cloneStatus?.phase === "running" || cloneStatus?.phase === "registering"
   const canClone = !!onClone
   const canDirectClone = nativeRpcAvailable()
 
-  const rootRef = useRef<HTMLDivElement>(null)
-  const addBtnRef = useRef<HTMLButtonElement>(null)
-  // Viewport-clamped placement for the add popover: the strip lives at the top
-  // of the window and the "+" button can sit near the right edge, so a plain
-  // absolute `left-0` panel gets cut off in narrow windows. We position it
-  // `fixed`, clamped to the viewport, and cap its height so it scrolls.
-  const [addPanelPos, setAddPanelPos] = useState<{
-    left: number
-    top: number
-    maxHeight: number
-  } | null>(null)
   const pathInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const searchSeq = useRef(0)
@@ -223,28 +224,6 @@ export function RepoTabs({
       ? joinPath(newParent.trim(), newName.trim())
       : ""
 
-  useLayoutEffect(() => {
-    if (!adding) {
-      setAddPanelPos(null)
-      return
-    }
-    const MARGIN = 8
-    const PANEL_WIDTH = 352 // w-[22rem]
-    const place = () => {
-      const rect = addBtnRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const left = Math.max(
-        MARGIN,
-        Math.min(rect.left, window.innerWidth - PANEL_WIDTH - MARGIN),
-      )
-      const top = rect.bottom + 6
-      setAddPanelPos({ left, top, maxHeight: Math.max(160, window.innerHeight - top - MARGIN) })
-    }
-    place()
-    window.addEventListener("resize", place)
-    return () => window.removeEventListener("resize", place)
-  }, [adding])
-
   // Keep the newest agent activity in view (the log is short and scrolls).
   useEffect(() => {
     const el = cloneLogRef.current
@@ -266,43 +245,101 @@ export function RepoTabs({
     setSearchError(null)
     setActiveHit(-1)
     setPicking(false)
+    setAddOffset({ x: 0, y: 0 })
   }, [])
 
-  useEffect(() => {
-    if (!adding) return
-    // A running clone keeps the popover open: its progress lines are the point.
-    const onDown = (e: MouseEvent) => {
-      if (cloning) return
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) closeAdd()
+  const beginAddDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || cloning) return
+    event.preventDefault()
+    event.stopPropagation()
+    const popup = addPopupRef.current
+    if (!popup) return
+    popup.setPointerCapture(event.pointerId)
+    addDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startOffsetX: addOffset.x,
+      startOffsetY: addOffset.y,
+      rect: {
+        left: popup.getBoundingClientRect().left,
+        top: popup.getBoundingClientRect().top,
+        width: popup.getBoundingClientRect().width,
+        height: popup.getBoundingClientRect().height,
+      },
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !cloning) {
-        // Consume the key: Esc here means "close this popover", and it must
-        // not reach the global Esc-to-stop handler and kill a running thread.
-        e.preventDefault()
-        e.stopPropagation()
-        closeAdd()
+  }
+
+  const moveAddDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = addDragRef.current
+    const popup = addPopupRef.current
+    if (!drag || !popup || drag.pointerId !== event.pointerId) return
+    const next = clampDragOffset(
+      drag.rect,
+      {
+        x: event.clientX - drag.startX,
+        y: event.clientY - drag.startY,
+      },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    setAddOffset({ x: drag.startOffsetX + next.x, y: drag.startOffsetY + next.y })
+  }
+
+  const endAddDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!addDragRef.current || addDragRef.current.pointerId !== event.pointerId) return
+    addDragRef.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+
+  /** Open/close requests from the popover itself (trigger, outside press).
+   *  A running clone keeps it open: its progress lines are the point. */
+  const handleAddOpenChange = useCallback(
+    (next: boolean) => {
+      if (next) {
+        setAdding(true)
+        return
       }
-    }
-    document.addEventListener("mousedown", onDown)
-    document.addEventListener("keydown", onKey)
-    return () => {
-      document.removeEventListener("mousedown", onDown)
-      document.removeEventListener("keydown", onKey)
-    }
-  }, [adding, closeAdd, cloning])
+      if (cloning) return
+      closeAdd()
+    },
+    [cloning, closeAdd],
+  )
 
   useEffect(() => {
     if (!adding) return
-    // New-folder mode: the name is the only thing to type. Otherwise prefer the
-    // search field when native search is available; else path paste.
+    // Consume Escape in the CAPTURE phase: it means "close this popover", and
+    // it must not reach the global Esc-to-stop handler and kill a running
+    // thread. Winning the capture phase also keeps a clone-in-progress open,
+    // since Base UI's own dismissal listener never sees the key either.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!cloning) closeAdd()
+    }
+    document.addEventListener("keydown", onKey, true)
+    return () => document.removeEventListener("keydown", onKey, true)
+  }, [adding, closeAdd, cloning])
+
+  /** Which field the popover opens on. Base UI would otherwise focus the first
+   *  tabbable control (the mode toggle), but typing is the point here.
+   *  New-folder mode: the name is the only thing to type. Otherwise prefer the
+   *  search field when native search is available; else path paste. */
+  const addInitialFocus = useCallback(() => {
+    if (addMode === "new") return newNameRef.current
+    if (canSearch) return searchInputRef.current
+    return pathInputRef.current
+  }, [addMode, canSearch])
+
+  // Switching modes re-points focus at the field that mode is about (opening is
+  // handled by `addInitialFocus`, before the popup ever paints).
+  useEffect(() => {
+    if (!adding) return
     const t = window.setTimeout(() => {
-      if (addMode === "new") newNameRef.current?.focus()
-      else if (canSearch) searchInputRef.current?.focus()
-      else pathInputRef.current?.focus()
+      addInitialFocus()?.focus()
     }, 0)
     return () => window.clearTimeout(t)
-  }, [adding, canSearch, addMode])
+  }, [adding, addInitialFocus])
 
   // Debounced FFF directory search.
   useEffect(() => {
@@ -565,7 +602,6 @@ export function RepoTabs({
     // only the controls inside it opt out, so any slack around the tabs can
     // still be used to move the window.
     <div
-      ref={rootRef}
       // The row shares the header's slack with the drag spacer instead of
       // leaving all of it to the right of the pill — but only up to the width
       // the tabs themselves can fill, so the extra width never shows up as
@@ -739,42 +775,53 @@ export function RepoTabs({
       )}
 
       {/* Add button + its popover (folder search input, path field): every
-          control here needs clicks, so the whole subtree opts out of dragging. */}
-      <div className={cn(NO_DRAG_REGION, "relative shrink-0")}>
-        <Button
-          ref={addBtnRef}
-          type="button"
-          variant="ghost"
-          size="icon-sm"
-          disabled={disabled || busy || submitting}
-          aria-label={busy ? "Adding repository…" : "Add repository"}
-          title="Add folder"
-          onClick={() => setAdding((v) => !v)}
-          className="size-7 text-muted-foreground"
-        >
-          {busy || submitting ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <Plus className="size-3.5" />
-          )}
-        </Button>
+          control here needs clicks, so the whole subtree opts out of dragging.
 
-        {adding && (
-          <div
-            role="dialog"
-            aria-labelledby={formId}
-            style={
-              addPanelPos
-                ? {
-                    left: addPanelPos.left,
-                    top: addPanelPos.top,
-                    maxHeight: addPanelPos.maxHeight,
-                  }
-                : undefined
+          The popover itself is a Base UI popover, which portals it to <body>:
+          it must not be a descendant of the titlebar's drag region, or a
+          mousedown inside it starts a native window move instead of reaching
+          the field under the cursor. Base UI also owns the viewport clamping
+          (`collisionPadding` + `--available-height`) and the dismissal that
+          this panel used to hand-roll. */}
+      <div className={cn(NO_DRAG_REGION, "relative shrink-0")}>
+        <Popover open={adding} onOpenChange={handleAddOpenChange}>
+          <PopoverTrigger
+            disabled={disabled || busy || submitting}
+            render={
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={busy ? "Adding repository…" : "Add repository"}
+                title="Add folder"
+                className="size-7 text-muted-foreground"
+              />
             }
-            className="fixed z-50 w-[22rem] overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-panel"
           >
-            <div id={formId} className="mb-1.5 font-medium text-[12px] text-foreground">
+            {busy || submitting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Plus className="size-3.5" />
+            )}
+          </PopoverTrigger>
+
+          <PopoverPopup
+            ref={addPopupRef}
+            align="start"
+            side="bottom"
+            aria-labelledby={formId}
+            initialFocus={addInitialFocus}
+            style={{ translate: `${addOffset.x}px ${addOffset.y}px` }}
+            onPointerMove={moveAddDrag}
+            onPointerUp={endAddDrag}
+            onPointerCancel={endAddDrag}
+            className="max-h-[var(--available-height)] w-[22rem] overflow-y-auto p-3"
+          >
+            <div
+              id={formId}
+              onPointerDown={beginAddDrag}
+              className="mb-1.5 cursor-grab select-none font-medium text-[12px] text-foreground active:cursor-grabbing"
+            >
               Add a repository
             </div>
             {canCreateFolder && (
@@ -1221,8 +1268,8 @@ export function RepoTabs({
                 </div>
               </div>
             )}
-          </div>
-        )}
+          </PopoverPopup>
+        </Popover>
       </div>
     </div>
   )
