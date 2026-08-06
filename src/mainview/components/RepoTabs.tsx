@@ -16,6 +16,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -156,6 +157,16 @@ export function RepoTabs({
   const canDirectClone = nativeRpcAvailable()
 
   const rootRef = useRef<HTMLDivElement>(null)
+  const addBtnRef = useRef<HTMLButtonElement>(null)
+  // Viewport-clamped placement for the add popover: the strip lives at the top
+  // of the window and the "+" button can sit near the right edge, so a plain
+  // absolute `left-0` panel gets cut off in narrow windows. We position it
+  // `fixed`, clamped to the viewport, and cap its height so it scrolls.
+  const [addPanelPos, setAddPanelPos] = useState<{
+    left: number
+    top: number
+    maxHeight: number
+  } | null>(null)
   const pathInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const searchSeq = useRef(0)
@@ -211,6 +222,28 @@ export function RepoTabs({
     newParent.trim().startsWith("/") && newName.trim()
       ? joinPath(newParent.trim(), newName.trim())
       : ""
+
+  useLayoutEffect(() => {
+    if (!adding) {
+      setAddPanelPos(null)
+      return
+    }
+    const MARGIN = 8
+    const PANEL_WIDTH = 352 // w-[22rem]
+    const place = () => {
+      const rect = addBtnRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const left = Math.max(
+        MARGIN,
+        Math.min(rect.left, window.innerWidth - PANEL_WIDTH - MARGIN),
+      )
+      const top = rect.bottom + 6
+      setAddPanelPos({ left, top, maxHeight: Math.max(160, window.innerHeight - top - MARGIN) })
+    }
+    place()
+    window.addEventListener("resize", place)
+    return () => window.removeEventListener("resize", place)
+  }, [adding])
 
   // Keep the newest agent activity in view (the log is short and scrolls).
   useEffect(() => {
@@ -697,6 +730,7 @@ export function RepoTabs({
           control here needs clicks, so the whole subtree opts out of dragging. */}
       <div className={cn(NO_DRAG_REGION, "relative shrink-0")}>
         <Button
+          ref={addBtnRef}
           type="button"
           variant="ghost"
           size="icon-sm"
@@ -717,7 +751,16 @@ export function RepoTabs({
           <div
             role="dialog"
             aria-labelledby={formId}
-            className="absolute top-[calc(100%+6px)] left-0 z-50 w-[22rem] rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-panel"
+            style={
+              addPanelPos
+                ? {
+                    left: addPanelPos.left,
+                    top: addPanelPos.top,
+                    maxHeight: addPanelPos.maxHeight,
+                  }
+                : undefined
+            }
+            className="fixed z-50 w-[22rem] overflow-y-auto rounded-xl border border-border bg-popover p-3 text-popover-foreground shadow-panel"
           >
             <div id={formId} className="mb-1.5 font-medium text-[12px] text-foreground">
               Add a repository
