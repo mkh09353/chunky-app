@@ -53,6 +53,7 @@ export function ChatTopBar({
   onSelectRepo,
   onAddRepo,
   onRemoveRepo,
+  onOpenRepoFiles,
   reposBusy = false,
   reposDisabled = false,
   onCloneRepo,
@@ -76,6 +77,7 @@ export function ChatTopBar({
   onSelectRepo?: (id: string) => void
   onAddRepo?: (path: string) => Promise<void>
   onRemoveRepo?: (id: string) => void | Promise<void>
+  onOpenRepoFiles?: (repoId: string) => void
   reposBusy?: boolean
   reposDisabled?: boolean
   /** Clone a git URL via an agent session; omitted → that section is hidden. */
@@ -115,6 +117,7 @@ export function ChatTopBar({
           onSelect={onSelectRepo}
           onAdd={onAddRepo}
           onRemove={onRemoveRepo}
+          onOpenRepoFiles={onOpenRepoFiles}
           busy={reposBusy}
           disabled={reposDisabled}
           onClone={onCloneRepo}

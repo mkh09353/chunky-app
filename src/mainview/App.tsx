@@ -29,6 +29,7 @@ import { PrPanel } from "./components/PrPanel"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
 import { FactoryPane } from "./components/FactoryPane"
+import { RepoFilesPane } from "./components/RepoFilesPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
 import { ConfirmHost } from "./components/ConfirmDialog"
 import { confirm } from "./lib/confirm"
@@ -405,6 +406,12 @@ export function App() {
   const [browserOpen, setBrowserOpen] = useState(false)
   // The factory shares the content-panel side region with the browser pane.
   const [factoryOpen, setFactoryOpen] = useState(false)
+  const [filesRepoId, setFilesRepoId] = useState<string | null>(null)
+  const openRepoFiles = useCallback((repoId: string) => {
+    setFilesRepoId(repoId)
+    setBrowserOpen(false)
+    setFactoryOpen(false)
+  }, [])
   // PR reviews: the board is polled here (the sidebar widget needs it whether or
   // not the panel is open); the slide-over owns actions and setup.
   const [prOpen, setPrOpen] = useState(false)
@@ -415,7 +422,14 @@ export function App() {
   const [prLastSeen, setPrLastSeen] = useState<number | null>(() => loadPrLastSeen())
   // The link context menu's "Open in Chunky browser" mounts the pane; the pane
   // itself picks the URL up from the same store.
-  useEffect(() => subscribeBrowserNavigation(() => setBrowserOpen(true)), [])
+  useEffect(() => subscribeBrowserNavigation(() => {
+    setFilesRepoId(null)
+    setFactoryOpen(false)
+    setBrowserOpen(true)
+  }), [])
+  useEffect(() => {
+    if (filesRepoId && !repos.some((repo) => repo.id === filesRepoId)) setFilesRepoId(null)
+  }, [filesRepoId, repos])
   // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
@@ -2635,8 +2649,8 @@ export function App() {
       if (a.id === "new") dispatchAppAction({ type: "new-session" })
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
-      else if (a.id === "browser") setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open })
-      else if (a.id === "factory") setFactoryOpen((open) => { if (!open) setBrowserOpen(false); return !open })
+      else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open }) }
+      else if (a.id === "factory") { setFilesRepoId(null); setFactoryOpen((open) => { if (!open) setBrowserOpen(false); return !open }) }
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
       else if (a.id.startsWith("repo:")) dispatchAppAction({ type: "select-repo", repoId: a.id.slice(5) })
@@ -2864,6 +2878,7 @@ export function App() {
             onSelectRepo={(id) => void handleSelectRepo(id)}
             onAddRepo={handleAddRepo}
             onRemoveRepo={(id) => void handleRemoveRepo(id)}
+            onOpenRepoFiles={openRepoFiles}
             // Cloning needs a reachable server (the agent does the work), so the
             // section disappears entirely in demo/offline mode.
             onCloneRepo={live && connectionState === "connected" ? handleCloneRepo : undefined}
@@ -2873,7 +2888,7 @@ export function App() {
             defaultCloneParent={cloneParentDefault}
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
-            onToggleBrowser={() => setBrowserOpen((open) => !open)}
+            onToggleBrowser={() => { setFilesRepoId(null); setFactoryOpen(false); setBrowserOpen((open) => !open) }}
             onToggleTerminal={() => setTerminalsOpen((value) => !value)}
             terminalOpen={terminalsOpen}
           />
@@ -2949,7 +2964,13 @@ export function App() {
                 />
               </div>
             </div>
-            {browserOpen ? (
+            {filesRepoId && !repos.some((repo) => repo.id === filesRepoId) ? null : filesRepoId ? (
+              <RepoFilesPane
+                repo={repos.find((repo) => repo.id === filesRepoId)!}
+                baseUrl={config?.baseUrl ?? ""}
+                onClose={() => setFilesRepoId(null)}
+              />
+            ) : browserOpen ? (
               <BrowserPane
                 onClose={() => setBrowserOpen(false)}
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}

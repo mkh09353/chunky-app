@@ -435,10 +435,11 @@ export async function searchFiles(
   baseUrl: string,
   query: string,
   repoId?: string | null,
+  limit = 12,
 ): Promise<FileSearchItem[]> {
   const url = new URL(baseUrl + ROUTES.fileSearch, window.location.origin)
   url.searchParams.set("q", query)
-  url.searchParams.set("limit", "12")
+  url.searchParams.set("limit", String(Math.min(50, Math.max(1, limit))))
   if (repoId) url.searchParams.set("repo", repoId)
   const res = await fetch(url)
   if (!res.ok) throw new Error(`file search failed (${res.status})`)

@@ -84,6 +84,7 @@ export function RepoTabs({
   onSelect,
   onAdd,
   onRemove,
+  onOpenRepoFiles,
   busy = false,
   disabled = false,
   onClone,
@@ -98,6 +99,7 @@ export function RepoTabs({
   onSelect: (id: string) => void
   onAdd: (path: string) => Promise<void>
   onRemove: (id: string) => void | Promise<void>
+  onOpenRepoFiles?: (repoId: string) => void
   busy?: boolean
   disabled?: boolean
   /** Clone a git URL through an agent session. Omitted → the section is hidden
@@ -202,6 +204,12 @@ export function RepoTabs({
     e.preventDefault()
     e.stopPropagation()
     setTabMenu({ repoId, x: e.clientX, y: e.clientY })
+  }, [])
+  const preventRightSelection = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button === 2) {
+      e.preventDefault()
+      e.stopPropagation()
+    }
   }, [])
 
   const menuRepo = tabMenu ? (repos.find((r) => r.id === tabMenu.repoId) ?? null) : null
@@ -630,10 +638,11 @@ export function RepoTabs({
               // `grow` hands the tab a share of the row's free width (capped
               // at one tab's ceiling); `shrink-0` keeps the row scrolling
               // rather than squeezing every tab once they outgrow it.
-              className="group/tab relative flex min-w-0 max-w-[22rem] shrink-0 grow items-center"
+              className="group/tab relative flex min-w-0 max-w-[22rem] shrink-0 grow select-none items-center"
               // Right-click anywhere on the tab (including its menu button) is
               // the discoverable way to grab the repo's absolute path.
               onContextMenu={(e) => openTabMenu(r.id, e)}
+              onPointerDown={preventRightSelection}
             >
               <button
                 type="button"
@@ -701,6 +710,7 @@ export function RepoTabs({
                       <Copy />
                       Copy path
                     </DropdownMenuItem>
+                    {onOpenRepoFiles && <DropdownMenuItem onClick={() => onOpenRepoFiles(r.id)}><FolderOpen /> Quick files</DropdownMenuItem>}
                     <DropdownMenuItem
                       variant="destructive"
                       onClick={() => void onRemove(r.id)}
@@ -755,6 +765,7 @@ export function RepoTabs({
               <Copy />
               Copy path
             </DropdownMenuItem>
+            {onOpenRepoFiles && <DropdownMenuItem onClick={() => { onOpenRepoFiles(menuRepo.id); setTabMenu(null) }}><FolderOpen /> Quick files</DropdownMenuItem>}
             {repos.length > 1 && (
               <>
                 <DropdownMenuSeparator />
