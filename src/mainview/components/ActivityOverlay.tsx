@@ -75,14 +75,34 @@ function ActivityRowButton({
   )
 }
 
-function GroupLabel({ children, count }: { children: React.ReactNode; count: number }) {
+function GroupLabel({
+  children,
+  count,
+  active = false,
+}: {
+  children: React.ReactNode
+  count: number
+  active?: boolean
+}) {
   return (
     <div className="flex items-center gap-2 px-2 pt-1.5 pb-0.5">
-      <span className="font-medium text-[10px] text-muted-foreground/60 uppercase tracking-[0.08em]">
+      <span
+        className={cn(
+          "font-medium text-[10.5px] uppercase tracking-[0.08em]",
+          active ? "text-primary/80" : "text-muted-foreground/70",
+        )}
+      >
         {children}
       </span>
-      <span className="h-px flex-1 bg-border/50" />
-      <span className="text-[10px] text-muted-foreground/40 tabular-nums">{count}</span>
+      <span
+        className={cn(
+          "text-[10.5px] tabular-nums",
+          active ? "text-primary/60" : "text-muted-foreground/50",
+        )}
+      >
+        {count}
+      </span>
+      <span className="h-px flex-1 bg-border/60" />
     </div>
   )
 }
@@ -193,12 +213,15 @@ export function ActivityOverlay({
               </p>
             ) : (
               repos.map((repo) => (
-                <div key={repo.repoId} className="mb-1.5 last:mb-0">
-                  <div className="flex items-center gap-1.5 px-2 pt-1 pb-0.5">
+                <div
+                  key={repo.repoId}
+                  className="mt-1 border-border/60 border-t pt-2 pb-1 first:mt-0 first:border-t-0 first:pt-1"
+                >
+                  <div className="flex items-center gap-1.5 px-2 pb-0.5">
                     <span
                       className={cn(
-                        "truncate font-semibold text-[11.5px]",
-                        repo.repoId === activeRepoId ? "text-foreground" : "text-muted-foreground",
+                        "truncate font-mono font-semibold text-[12px]",
+                        repo.repoId === activeRepoId ? "text-foreground" : "text-foreground/75",
                       )}
                     >
                       {repo.repoName}
@@ -207,7 +230,9 @@ export function ActivityOverlay({
 
                   {repo.inProgress.length > 0 && (
                     <>
-                      <GroupLabel count={repo.inProgress.length}>In progress</GroupLabel>
+                      <GroupLabel active count={repo.inProgress.length}>
+                        In progress
+                      </GroupLabel>
                       {repo.inProgress.map((r) => (
                         <ActivityRowButton
                           key={r.sessionId}
