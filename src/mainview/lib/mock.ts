@@ -89,6 +89,8 @@ export interface Message {
   role: Role
   blocks: MessageBlock[]
   model?: string
+  /** Number of image attachments sent with a user message, when known. */
+  imageCount?: number
 }
 
 export type ThreadStatus =

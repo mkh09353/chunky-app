@@ -148,6 +148,7 @@ export function itemsToMessages(
         messages.push({
           id: nextId(),
           role: "user",
+          ...(it.imageCount ? { imageCount: it.imageCount } : {}),
           blocks: [{ type: "text", content: it.from ? `${it.text}\n\n— from ${it.from}` : it.text }],
         })
         break

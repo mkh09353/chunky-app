@@ -15,6 +15,6 @@ describe("asScoreboard", () => {
   test("tolerates rows without a seat field (older servers)", () => {
     const body = asScoreboard({ rows: [{ provider: "zen", model: "m", effort: null, kind: "sidekick", samples: 1, avgRating: 9, ratedCount: 1, reworkRate: 0, totalCost: null, totalTokens: 0, ratingPerDollar: null }] })
     expect(body.rows).toHaveLength(1)
-    expect(kindLabel(body.rows[0])).toBe("sidekick")
+    expect(kindLabel(body.rows[0]!)).toBe("sidekick")
   })
 })

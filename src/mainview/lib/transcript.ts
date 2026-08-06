@@ -12,7 +12,7 @@ import type {
 export const MAIN = "main"
 
 export type Item =
-  | { kind: "user"; text: string; from?: string; interjection?: boolean }
+  | { kind: "user"; text: string; from?: string; interjection?: boolean; imageCount?: number }
   | { kind: "assistant"; text: string; streaming: boolean; endReason?: MessageEndReason }
   | { kind: "reasoning"; text: string; streaming: boolean }
   | {
@@ -236,7 +236,15 @@ function appendProgress(prev: string | undefined, chunk: string): string {
 function reduceItems(items: Item[], ev: AgentEvent): Item[] {
   switch (ev.type) {
     case "message.user":
-      return [...items, { kind: "user", text: ev.text, ...(ev.from ? { from: ev.from } : {}) }]
+      return [
+        ...items,
+        {
+          kind: "user",
+          text: ev.text,
+          ...(ev.from ? { from: ev.from } : {}),
+          ...(ev.imageCount ? { imageCount: ev.imageCount } : {}),
+        },
+      ]
 
     case "message.start":
       return [...items, { kind: "assistant", text: "", streaming: true }]
@@ -424,7 +432,12 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
       if (ev.injected) return state
       return updateThreadItems(state, MAIN, (items) => [
         ...items,
-        { kind: "user", text: ev.text, interjection: true },
+        {
+          kind: "user",
+          text: ev.text,
+          interjection: true,
+          ...(ev.imageCount ? { imageCount: ev.imageCount } : {}),
+        },
       ])
     }
 

@@ -33,6 +33,20 @@ const PROSE: AgentEvent[] = [
 ]
 
 describe("tool grouping", () => {
+  test("maps an image-only user message and its count through to the rendered message", () => {
+    const state = play([{ type: "message.user", text: "", imageCount: 2 }])
+    const messages = itemsToMessages(state.threads[MAIN]!.items)
+
+    expect(messages).toEqual([
+      {
+        id: "ev-0",
+        role: "user",
+        imageCount: 2,
+        blocks: [{ type: "text", content: "" }],
+      },
+    ])
+  })
+
   test("consecutive bash calls fold into one activity group", () => {
     const state = play([
       { type: "message.user", text: "check the build" },

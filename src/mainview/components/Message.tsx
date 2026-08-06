@@ -8,6 +8,7 @@ import {
   FileText,
   Folder,
   Loader2,
+  Paperclip,
   RefreshCw,
   Search,
   Terminal,
@@ -669,6 +670,19 @@ export function MessageView({
                 {block.content}
               </p>
             ))}
+            {!!message.imageCount && (
+              <div
+                className={cn(
+                  "flex items-center gap-1 text-[11px] leading-none text-muted-foreground",
+                  blocks.some((block) => block.content) && "mt-2",
+                )}
+              >
+                <Paperclip className="size-3" />
+                <span>
+                  {message.imageCount} {message.imageCount === 1 ? "image" : "images"}
+                </span>
+              </div>
+            )}
           </div>
         ) : (
           <div className="w-full">
