@@ -490,6 +490,7 @@ export function Composer({
         )}
         <Textarea
           ref={ref}
+          data-chat-composer=""
           value={value}
           rows={1}
           disabled={disabled && !streaming}

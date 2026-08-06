@@ -2695,6 +2695,13 @@ export function App() {
         e.preventDefault()
         setFoldThreads((value) => !value)
       } else if (e.key === "Escape" && streaming && live) {
+        // Esc-to-stop is armed ONLY from the chat composer. An Esc meant for a
+        // dialog, popover, search field, or plain "exit fullscreen" must never
+        // kill the running thread. `defaultPrevented` covers surfaces (slash
+        // menu, mention picker, cache guard) that already consumed the key.
+        if (overlayOpen || e.defaultPrevented) return
+        const target = e.target instanceof Element ? e.target : null
+        if (!target?.closest("[data-chat-composer]")) return
         // Claim the key so AppKit doesn't also treat Esc as "exit fullscreen".
         e.preventDefault()
         e.stopPropagation()

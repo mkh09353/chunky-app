@@ -276,7 +276,13 @@ export function RepoTabs({
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) closeAdd()
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !cloning) closeAdd()
+      if (e.key === "Escape" && !cloning) {
+        // Consume the key: Esc here means "close this popover", and it must
+        // not reach the global Esc-to-stop handler and kill a running thread.
+        e.preventDefault()
+        e.stopPropagation()
+        closeAdd()
+      }
     }
     document.addEventListener("mousedown", onDown)
     document.addEventListener("keydown", onKey)
@@ -490,11 +496,17 @@ export function RepoTabs({
     }
   }, [cloneUrl, cloneDest, onAdd, closeAdd])
 
-  const fillFromHit = useCallback((hit: DirSearchHit) => {
-    setPath(hit.path)
-    setError(null)
-    pathInputRef.current?.focus()
-  }, [])
+  /** Selecting a hit means "add this repo": mirror the path into the field so
+   *  the user sees what was chosen, then register it in one step. The old
+   *  fill-only behavior read as "clicking does nothing". */
+  const fillFromHit = useCallback(
+    (hit: DirSearchHit) => {
+      setPath(hit.path)
+      setError(null)
+      void submitAdd(hit.path)
+    },
+    [submitAdd],
+  )
 
   /** `target` picks which field the chosen folder fills: the repo to add, or
    *  the destination a clone lands in. Fill only — the user still confirms. */
