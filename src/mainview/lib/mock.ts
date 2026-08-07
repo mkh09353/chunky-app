@@ -91,6 +91,11 @@ export interface Message {
   model?: string
   /** Number of image attachments sent with a user message, when known. */
   imageCount?: number
+  /** Optimistic user row: posted, not yet echoed by the server. Renderer-side
+   *  presentation only — see lib/pendingSends.ts. */
+  sending?: boolean
+  /** The send failed; the row says so instead of pretending it is on its way. */
+  sendError?: string
 }
 
 export type ThreadStatus =

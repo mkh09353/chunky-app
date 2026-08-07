@@ -664,7 +664,15 @@ export function MessageView({
         </div>
 
         {isUser ? (
-          <div className="min-w-0 max-w-full rounded-2xl bg-foreground/[0.06] px-4 py-2.5 text-[14px] leading-[1.6] text-foreground">
+          <div
+            className={cn(
+              "min-w-0 max-w-full rounded-2xl bg-foreground/[0.06] px-4 py-2.5 text-[14px] leading-[1.6] text-foreground",
+              // Optimistic row: posted, not yet echoed back. Dimmed rather than
+              // restyled, so the swap to the authoritative row is invisible.
+              message.sending && "opacity-70",
+              message.sendError && "ring-1 ring-destructive/40",
+            )}
+          >
             {blocks.map((block, bi) => (
               <p key={bi} className={cn("whitespace-pre-wrap break-words", bi > 0 && "mt-3")}>
                 {block.content}
@@ -681,6 +689,18 @@ export function MessageView({
                 <span>
                   {message.imageCount} {message.imageCount === 1 ? "image" : "images"}
                 </span>
+              </div>
+            )}
+            {message.sending && (
+              <div className="mt-2 flex items-center gap-1 text-[11px] leading-none text-muted-foreground">
+                <Loader2 className="size-3 animate-spin" />
+                <span>Sending…</span>
+              </div>
+            )}
+            {message.sendError && (
+              <div className="mt-2 flex items-start gap-1 text-[11px] leading-tight text-destructive">
+                <X className="mt-px size-3 shrink-0" />
+                <span className="break-words">Not sent — {message.sendError}</span>
               </div>
             )}
           </div>

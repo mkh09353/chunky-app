@@ -15,6 +15,7 @@ import { describeTool, isGroupableTool } from "./toolSummary"
 import { relativeTime, threadLabel, workspaceMark, workspaceName } from "./format"
 import type { Item, ThreadNode, TranscriptState } from "./transcript"
 import { isStreaming, mainItems } from "./transcript"
+import { pendingMessages, type PendingSend } from "./pendingSends"
 import type { RunAnchor } from "./runs"
 import { anchoredItemIndices } from "./runs"
 
@@ -368,12 +369,14 @@ export function buildActiveThread(
   session: SessionSummary | undefined,
   transcript: TranscriptState,
   modelName?: string,
+  /** Optimistic rows for sends the server has not echoed yet. They are appended
+   *  here, at the presentation seam, and never enter the reduced transcript. */
+  pending: readonly PendingSend[] = [],
 ): Thread {
-  const messages = itemsToMessages(
-    mainItems(transcript),
-    modelName,
-    anchoredItemIndices(transcript),
-  )
+  const messages = [
+    ...itemsToMessages(mainItems(transcript), modelName, anchoredItemIndices(transcript)),
+    ...pendingMessages(pending),
+  ]
   if (!session) {
     return {
       id: "none",
