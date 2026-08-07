@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { AgentEvent } from "@chunky/protocol"
-import { initialState, reduce } from "./transcript"
-import { rebuildTranscript } from "./sessionCache"
+import { initialState, reduce, type TranscriptState } from "./transcript"
+import { rebuildTranscript, SessionCache } from "./sessionCache"
 import { ReplayReconciler, sameReplayEvent } from "./replayReconciler"
 
 const history: AgentEvent[] = [
@@ -110,6 +110,66 @@ describe("ReplayReconciler", () => {
     for (const ev of grown) expect(reconciler.next(ev).kind).toBe("skip")
     expect(reconciler.matchedCount).toBe(grown.length)
     expect(reconciler.next({ type: "message.start", role: "assistant" })).toEqual({ kind: "accept" })
+  })
+
+  test("a live event remembered into the cached array is never compared against", () => {
+    // The session cache appends to its retained `events` in place, so the array
+    // handed to reset() keeps growing while this replay runs. Recognising the
+    // prefix must depend on what it held AT reset, not on its current length.
+    const cached: AgentEvent[] = [...history]
+    const reconciler = new ReplayReconciler(cached)
+    for (const ev of history) expect(reconciler.next(ev).kind).toBe("skip")
+    expect(reconciler.live).toBe(true)
+
+    // First genuinely-new event: accepted, then remembered into the same array.
+    const sent: AgentEvent = { type: "message.user", text: "and now this" }
+    expect(reconciler.next(sent)).toEqual({ kind: "accept" })
+    cached.push(sent)
+
+    // The event that follows must still be plain news. Diffing it against the
+    // just-remembered `sent` would report a bogus divergence and rebuild from a
+    // prefix that drops the user's message.
+    expect(reconciler.next({ type: "message.start", role: "assistant" })).toEqual({ kind: "accept" })
+    expect(reconciler.live).toBe(true)
+  })
+
+  test("a message sent after reattaching survives the replay", () => {
+    // End-to-end against the real SessionCache, mirroring attachSession's
+    // onEvent loop (App.tsx): construct the reconciler from the cache entry,
+    // skip/rebuild/accept, then remember each event onto the projection.
+    const cache = new SessionCache()
+    const attach = (id: string, incoming: AgentEvent[]): TranscriptState => {
+      const cached = cache.get(id)
+      const reconciler = new ReplayReconciler(cached?.events)
+      let state = cached?.transcript ?? initialState
+      if (!cached) cache.set(id, { transcript: initialState, goal: null, repoId: null, events: [] })
+      for (const ev of incoming) {
+        const decision = reconciler.next(ev)
+        if (decision.kind === "skip") continue
+        if (decision.kind === "rebuild") {
+          state = rebuildTranscript(decision.prefix)
+          cache.set(id, { transcript: state, goal: null, repoId: null, events: [...decision.prefix] })
+        }
+        state = reduce(state, ev)
+        cache.remember(id, state, null, null, ev)
+      }
+      return state
+    }
+    const userTexts = (state: TranscriptState) =>
+      state.threads.main!.items.flatMap((it) => (it.kind === "user" ? [it.text] : []))
+
+    attach("s1", history)
+    expect(cache.get("s1")!.events).toHaveLength(history.length)
+
+    // Reattach (session switch or SSE reconnect): the server replays from event
+    // zero, then the reader sends a message and the agent starts answering.
+    const sent = attach("s1", [
+      ...history,
+      { type: "message.user", text: "and tests please" },
+      { type: "message.start", role: "assistant" },
+      { type: "message.delta", text: "working" },
+    ])
+    expect(userTexts(sent)).toEqual(["build it", "and tests please"])
   })
 
   test("sameReplayEvent compares payloads, not just types", () => {
