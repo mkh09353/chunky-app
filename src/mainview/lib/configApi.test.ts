@@ -7,6 +7,7 @@ import {
   testProviderAuth,
   UNSUPPORTED_LOGOUT,
   UNSUPPORTED_TEST,
+  normalizeSessionAgentConfig,
   type AuthRouteTable,
 } from "./configApi"
 
@@ -79,4 +80,42 @@ test("the canonical ROUTES still carries both auth helpers (skew canary)", () =>
   // auth routes — exactly the skew the build typecheck gate is there to catch.
   expect(typeof ROUTES.authTest).toBe("function")
   expect(typeof ROUTES.authLogout).toBe("function")
+})
+
+test("session agent config normalization keeps authoritative mode identity and pin provenance", () => {
+  const normalized = normalizeSessionAgentConfig({
+    selection: { provider: "zen", model: "glm-5.2", effort: "low", speed: "fast", solo: false },
+    source: "session-mode",
+    activeMode: "fire",
+    advisor: { enabled: true, provider: "grok", model: "grok-4.5", effort: "high" },
+    review: { enabled: false },
+    sidekick: { enabled: true, provider: "codex", model: "gpt-5.6-luna", effort: "xhigh" },
+    sidekickSeats: { frontend: { provider: "anthropic", model: "claude-opus-4-6", effort: "high" } },
+  })
+
+  expect(normalized).toEqual({
+    selection: { provider: "zen", model: "glm-5.2", effort: "low", speed: "fast", solo: false, pinned: true },
+    source: "session-mode",
+    activeMode: "fire",
+    advisor: { enabled: true, provider: "grok", model: "grok-4.5", effort: "high" },
+    review: { enabled: false, provider: null, model: null, effort: null },
+    sidekick: {
+      default: { enabled: true, provider: "codex", model: "gpt-5.6-luna", effort: "xhigh" },
+      seats: { frontend: { enabled: true, provider: "anthropic", model: "claude-opus-4-6", effort: "high" } },
+    },
+  })
+})
+
+test("global session agent config is explicitly unpinned", () => {
+  const normalized = normalizeSessionAgentConfig({
+    selection: { provider: "grok", model: "grok-4.5", solo: true },
+    source: "global",
+    activeMode: null,
+    advisor: { enabled: false },
+    review: { enabled: false },
+    sidekick: { enabled: false },
+    sidekickSeats: {},
+  })
+  expect(normalized.selection.pinned).toBe(false)
+  expect(normalized.activeMode).toBeNull()
 })

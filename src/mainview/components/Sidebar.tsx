@@ -2,6 +2,7 @@ import {
   Archive,
   ArchiveRestore,
   ChevronDown,
+  GitBranch,
   History,
   House,
   Inbox,
@@ -22,6 +23,7 @@ import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { avatarInitial, resolveDisplayName } from "~/lib/identity"
 import { collapseList } from "~/lib/sessionList"
+import { groupByWorktree } from "~/lib/sessionGroups"
 import { cn } from "~/lib/cn"
 import { DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
@@ -51,6 +53,43 @@ function StatusDot({ status }: { status: ThreadStatus }) {
       <span className="size-1.5 rounded-full bg-primary" aria-label="Unread" />
     ) : null
   return <span className="flex size-1.5 shrink-0 items-center justify-center">{dot}</span>
+}
+
+/** Header for one worktree/branch group in the working list.
+ *
+ *  Metrics deliberately match the "Settled" divider below (same 10.5px label,
+ *  same hairline, same trailing count) so the list keeps one rhythm. Two
+ *  differences are deliberate: a branch icon, because this names a checkout
+ *  rather than a lifecycle section, and NO uppercasing — branch names are
+ *  case-sensitive identifiers, and `CHUNKY/FIX-ABC` is not the branch the user
+ *  has checked out. */
+function GroupDivider({
+  label,
+  linked,
+  count,
+  first = false,
+}: { label: string; linked: boolean; count: number; first?: boolean }) {
+  return (
+    // The first header sits directly under the search field, which already
+    // supplies the gap — a second full stride there just pushes the list down.
+    <div className={cn("flex items-center gap-2 px-2.5 pb-1.5", first ? "pt-0.5" : "pt-4")}>
+      <GitBranch
+        className={cn("size-3 shrink-0", linked ? "text-primary/70" : "text-muted-foreground/50")}
+        aria-hidden="true"
+      />
+      <span
+        title={linked ? `${label} (linked worktree)` : label}
+        className={cn(
+          "min-w-0 max-w-[60%] truncate font-medium font-mono text-[10.5px] tracking-tight",
+          linked ? "text-primary/80" : "text-muted-foreground/70",
+        )}
+      >
+        {label}
+      </span>
+      <span className="h-px flex-1 bg-border/60" />
+      <span className="text-[10.5px] text-muted-foreground/40 tabular-nums">{count}</span>
+    </div>
+  )
 }
 
 function RepoMark({ mark }: { mark: string }) {
@@ -348,6 +387,47 @@ export function Sidebar({
     [settled, settledExpanded],
   )
 
+  // Second grouping level, and ONLY when the repo has earned it: null means the
+  // working list renders exactly as it did before worktrees existed (see
+  // lib/sessionGroups). Deliberately computed from `active`, i.e. AFTER the
+  // search filter, so narrowing into one branch drops the headers again.
+  // History and Archive stay flat: they are read at a glance, and a second axis
+  // there is noise.
+  const activeGroups = useMemo(() => groupByWorktree(active), [active])
+
+  // One definition of a working-list row, shared by the flat and grouped paths
+  // so the two can never drift apart.
+  const renderThread = useCallback(
+    (t: Thread) => (
+      <ThreadRow
+        key={t.id}
+        thread={t}
+        project={projectOf.get(t.projectId)}
+        active={t.id === activeThreadId}
+        onSelect={() => onSelectThread(t.id)}
+        onRename={() => onRenameThread?.(t.id)}
+        onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
+        unreadMarked={unreadThreadIds?.has(t.id)}
+        onToggleArchive={() => toggleArchived(t.id)}
+        onSettledChange={
+          onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
+        }
+        showProject={showProjects}
+      />
+    ),
+    [
+      projectOf,
+      activeThreadId,
+      onSelectThread,
+      onRenameThread,
+      onThreadUnreadChange,
+      unreadThreadIds,
+      toggleArchived,
+      onThreadSettledChange,
+      showProjects,
+    ],
+  )
+
   return (
     <aside className="relative flex h-full w-72 shrink-0 flex-col overflow-hidden bg-transparent text-sidebar-foreground">
       {/* Starfield nebula behind the header */}
@@ -435,25 +515,21 @@ export function Sidebar({
       </div>
 
       <ScrollArea className="flex-1" viewportClassName="px-2 pb-3">
-        <div className="flex flex-col gap-0.5">
-          {active.map((t) => (
-            <ThreadRow
-              key={t.id}
-              thread={t}
-              project={projectOf.get(t.projectId)}
-              active={t.id === activeThreadId}
-              onSelect={() => onSelectThread(t.id)}
-              onRename={() => onRenameThread?.(t.id)}
-              onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
-              unreadMarked={unreadThreadIds?.has(t.id)}
-              onToggleArchive={() => toggleArchived(t.id)}
-              onSettledChange={
-                onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
-              }
-              showProject={showProjects}
-            />
-          ))}
-        </div>
+        {activeGroups ? (
+          activeGroups.map((group, index) => (
+            <div key={group.key}>
+              <GroupDivider
+                label={group.label}
+                linked={group.linked}
+                count={group.rows.length}
+                first={index === 0}
+              />
+              <div className="flex flex-col gap-0.5">{group.rows.map(renderThread)}</div>
+            </div>
+          ))
+        ) : (
+          <div className="flex flex-col gap-0.5">{active.map(renderThread)}</div>
+        )}
 
         {settled.length > 0 && (
           <>

@@ -5,7 +5,8 @@ import type { AgentEvent } from "@chunky/protocol"
 import { MAIN, initialState, reduce } from "./transcript"
 import type { TranscriptState } from "./transcript"
 import { anchoredItemIndices, runAnchors } from "./runs"
-import { applyRunAnchors, itemsToMessages } from "./mapTranscript"
+import { applyRunAnchors, itemsToMessages, sessionToThread } from "./mapTranscript"
+import { groupByWorktree, groupKeyOf } from "./sessionGroups"
 import type { MessageBlock } from "./mock"
 
 function play(events: AgentEvent[]): TranscriptState {
@@ -209,5 +210,66 @@ describe("tool grouping", () => {
     ])
     const group = assistantBlocks(state).find((b) => b.type === "toolGroup")!
     expect(group.tools!.map((t) => t.ok)).toEqual([true, false])
+  })
+})
+
+// ---- session rows -> sidebar threads ---------------------------------------
+
+describe("sessionToThread carries git identity without redefining `branch`", () => {
+  const base = {
+    sessionId: "s1",
+    title: "Thread",
+    createdAt: 0,
+    lastActivity: Date.now(),
+    workspace: "/repos/widget",
+  }
+
+  test("an OLDER SERVER row yields neither grouping key, so the sidebar stays flat", () => {
+    const thread = sessionToThread({ ...base })
+    // `branch` remains the workspace basename the sidebar SEARCH matches on.
+    expect(thread.branch).toBe("widget")
+    // The grouping fields must be absent, not undefined-valued: absence is the
+    // signal lib/sessionGroups reads as "render flat".
+    expect("gitBranch" in thread).toBe(false)
+    expect("worktreePath" in thread).toBe(false)
+    expect(groupKeyOf(thread)).toBeNull()
+  })
+
+  test("a main-checkout row carries the real branch but no worktree path", () => {
+    const thread = sessionToThread({ ...base, branch: "main" })
+    expect(thread.branch).toBe("widget")
+    expect(thread.gitBranch).toBe("main")
+    expect("worktreePath" in thread).toBe(false)
+    expect(groupKeyOf(thread)).toBe("br:main")
+  })
+
+  test("a linked-worktree row carries both, and groups by the worktree", () => {
+    const thread = sessionToThread({
+      ...base,
+      workspace: "/state/worktrees/widget-fix",
+      branch: "chunky/fix",
+      worktree: { path: "/state/worktrees/widget-fix", isLinked: true },
+    })
+    // Still the folder basename — unchanged meaning, still what search uses.
+    expect(thread.branch).toBe("widget-fix")
+    expect(thread.gitBranch).toBe("chunky/fix")
+    expect(thread.worktreePath).toBe("/state/worktrees/widget-fix")
+    expect(groupKeyOf(thread)).toBe("wt:/state/worktrees/widget-fix")
+  })
+
+  test("a repo with a main row and a worktree row groups into two", () => {
+    const rows = [
+      sessionToThread({ ...base, sessionId: "a", branch: "main" }),
+      sessionToThread({
+        ...base,
+        sessionId: "b",
+        workspace: "/state/worktrees/widget-fix",
+        branch: "chunky/fix",
+        worktree: { path: "/state/worktrees/widget-fix", isLinked: true },
+      }),
+    ]
+    const groups = groupByWorktree(rows)!
+    expect(groups.map((g) => g.label)).toEqual(["main", "chunky/fix"])
+    expect(groups.map((g) => g.linked)).toEqual([false, true])
   })
 })

@@ -27,6 +27,7 @@ export type {
   ModeSpec,
   ModesResponse,
   SaveModeRequest,
+  SessionAgentConfigResponse,
   SkillCatalogEntry,
   SkillRepoAction,
   SkillReposResponse,
@@ -46,6 +47,7 @@ import type {
   ModesResponse,
   ModeSpec,
   SaveModeRequest,
+  SessionAgentConfigResponse,
   SkillCatalogEntry,
   SkillReposResponse,
   SkillRepoStatus,
@@ -589,6 +591,40 @@ function normalizeSidekick(data: unknown): SidekickConfig {
   return out
 }
 
+export interface SessionAgentConfig {
+  selection: ModelSelection
+  source: "session-mode" | "session-selection" | "global"
+  activeMode: string | null
+  advisor: AgentModelConfig
+  review: AgentModelConfig
+  sidekick: SidekickConfig
+}
+
+/** Normalize the authoritative session snapshot into the renderer's existing
+ * advisor/sidekick shapes. Exported to keep skew handling independently tested. */
+export function normalizeSessionAgentConfig(data: SessionAgentConfigResponse): SessionAgentConfig {
+  return {
+    selection: {
+      provider: data.selection.provider,
+      model: data.selection.model ?? null,
+      effort: data.selection.effort ?? null,
+      speed: data.selection.speed ?? null,
+      solo: data.selection.solo,
+      pinned: data.source !== "global",
+    },
+    source: data.source,
+    activeMode: data.activeMode ?? null,
+    advisor: normalizeAgentConfig(data.advisor),
+    review: normalizeAgentConfig(data.review),
+    sidekick: normalizeSidekick({ config: data.sidekick, seats: data.sidekickSeats }),
+  }
+}
+
+/** Authoritative effective configuration for one session. */
+export async function getSessionAgentConfig(sessionId: string): Promise<SessionAgentConfig> {
+  return normalizeSessionAgentConfig(await req<SessionAgentConfigResponse>(ROUTES.agentConfig(sessionId)))
+}
+
 /** Read sidekick config. With `sessionId` the server returns that session's
  *  EFFECTIVE config (per-session override merged over the global default). */
 export async function getSidekick(sessionId?: string | null): Promise<SidekickConfig> {
@@ -679,8 +715,8 @@ export async function saveMode(request: SaveModeRequest): Promise<ModesResponse>
   return req<ModesResponse>(ROUTES.modes, jsonInit("POST", request))
 }
 
-/** Apply a saved mode — the server switches executor + advisor + sidekick as
- *  one unit and returns the applied selection. */
+/** Apply a saved mode as one unit. With `sessionId` the complete preset is
+ * pinned to that session; without it Settings changes global defaults. */
 export async function applyMode(name: string, sessionId?: string | null): Promise<ApplyModeResult> {
   return req<ApplyModeResult>(ROUTES.applyMode(name), jsonInit("POST", sessionId ? { sessionId } : {}))
 }

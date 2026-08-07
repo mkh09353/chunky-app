@@ -110,7 +110,17 @@ export interface Thread {
   updated: string
   preview: string
   status: ThreadStatus
+  /** Presentation label derived from the WORKSPACE FOLDER, not from git. Kept
+   *  as-is because the sidebar search matches against it; see `gitBranch` for
+   *  the actual checked-out branch. */
   branch: string
+  /** The real git branch of this session's workspace, when the server resolved
+   *  one (SessionSummary.branch). Absent on older servers, outside a repo, or
+   *  on a detached HEAD — which is what makes the sidebar render flat. */
+  gitBranch?: string
+  /** Set only when the session runs in a LINKED git worktree rather than the
+   *  repository's main checkout (SessionSummary.worktree.path). */
+  worktreePath?: string
   number?: number
   messages: Message[]
 }

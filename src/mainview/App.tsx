@@ -76,7 +76,7 @@ import {
 } from "./lib/api"
 // `setCacheGuard` is aliased: the local state setter of the same name owns the
 // pre-send confirm bar, while this one persists the server-side threshold.
-import { applyMode, deleteMode, getAdvisorStatus, getCacheGuard, getModes, getSidekick, getSoloAdvisorStatus, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SidekickConfig } from "./lib/configApi"
+import { applyMode, deleteMode, getCacheGuard, getModes, getSessionAgentConfig, getSoloAdvisorStatus, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SessionAgentConfig, type SidekickConfig } from "./lib/configApi"
 import { buildComposerStatus } from "./lib/composerStatus"
 import { isSoloActive } from "./lib/solo"
 import { ComposerStatus } from "./components/ComposerStatus"
@@ -136,7 +136,6 @@ import {
   type SlashCommand,
 } from "./lib/slashCommands"
 import type { GoalSnapshot, ModeInfo, ModeSpec, QueueEntry, RewindPoint } from "@chunky/protocol"
-import { activeModeName } from "./lib/modes"
 import { followUpNotice, steerQueuedMessage } from "./lib/queueActions"
 import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
@@ -281,22 +280,6 @@ function modelSelectionToUi(sel: ModelSelection | null, rows: ModelRow[]): Model
       .filter(Boolean)
       .join(" · ") || "active",
   }
-}
-
-/** Same executor pairing? Used to tell a session PIN apart from the inherited
- *  global default (both come back in the same shape from /api/model). */
-function sameSelection(a: ModelSelection | null, b: ModelSelection | null): boolean {
-  if (!a || !b) return a === b
-  return (
-    a.provider === b.provider &&
-    a.model === b.model &&
-    (a.effort ?? null) === (b.effort ?? null) &&
-    (a.speed ?? null) === (b.speed ?? null) &&
-    // Solo rides on the selection: a session pinned to the same model but in a
-    // different solo state is NOT the global selection, and collapsing the two
-    // would silently drop the session's own suppression of its delegates.
-    (a.solo ?? false) === (b.solo ?? false)
-  )
 }
 
 function rowsToModels(rows: ModelRow[]): Model[] {
@@ -474,13 +457,10 @@ export function App() {
   // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
-  // The same saved modes, as the composer's selector lists them, plus the
-  // server's snapshot of the live pairing (what makes one of them "active").
+  // Saved definitions are global, but applied/effective configuration is keyed
+  // by session so switching chats can never carry a label or delegate display.
   const [savedModes, setSavedModes] = useState<ModeInfo[]>([])
-  // `current` also reports the GLOBAL solo state (ModesResponse.current.solo).
-  const [currentModeSpec, setCurrentModeSpec] = useState<(ModeSpec & { solo?: boolean }) | null>(
-    null,
-  )
+  const [sessionAgentConfig, setSessionAgentConfig] = useState<Record<string, SessionAgentConfig>>({})
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
   const [sidekickPickerOpen, setSidekickPickerOpen] = useState(false)
@@ -514,7 +494,7 @@ export function App() {
   // Same reason for the live `mode.applied` broadcast: attachSession must keep a
   // stable identity (it seeds the boot effect), so the SSE handler can't take
   // refreshModels/refreshModes as deps — it reads them through this ref.
-  const modeAppliedRef = useRef<(name: string, spec: ModeSpec) => void>(() => {})
+  const modeAppliedRef = useRef<(name: string, spec: ModeSpec, sessionId?: string) => void>(() => {})
   // Set just BEFORE this window POSTs an apply: the server broadcasts
   // mode.applied to every stream, and the local caller already shows a notice.
   const selfAppliedMode = useRef<{ name: string; at: number } | null>(null)
@@ -572,13 +552,9 @@ export function App() {
     return list.length > 0 ? list : [modelSelectionToUi(effectiveModelSel, modelRows)]
   }, [live, modelRows, effectiveModelSel])
 
-  // The mode in effect, derived from the server's own `current` pairing (see
-  // lib/modes) — it names the selector, and dissolves the moment the live
-  // configuration stops matching any saved mode.
-  const activeMode = useMemo(
-    () => (live ? activeModeName(savedModes, currentModeSpec) : null),
-    [live, savedModes, currentModeSpec],
-  )
+  // Mode identity is authoritative per session. Never derive this label from
+  // global /api/modes.current: that is the Settings default, not chat state.
+  const activeMode = live && sessionId ? (sessionAgentConfig[sessionId]?.activeMode ?? null) : null
 
   // SOLO: a raw model pick runs the model alone (see lib/solo). Session-pinned
   // solo applies to the ATTACHED session only; with no pin the global state
@@ -591,9 +567,9 @@ export function App() {
         sessionId,
         sessionModelSel,
         modelSel,
-        currentSolo: currentModeSpec?.solo ?? null,
+        currentSolo: sessionId ? (sessionAgentConfig[sessionId]?.selection.solo ?? null) : null,
       }),
-    [live, sessionId, sessionModelSel, modelSel, currentModeSpec],
+    [live, sessionId, sessionModelSel, modelSel, sessionAgentConfig],
   )
   const modeOptions = useMemo<ModeOption[]>(
     () =>
@@ -818,11 +794,8 @@ export function App() {
   const liveCompacted = live ? transcript.compacted : 0
   const liveQueue = live ? transcript.queue.entries : []
 
-  /** Read the global default AND (when given) a session's EFFECTIVE selection,
-   *  so pins survive an app reload and pins made in the TUI/another window show
-   *  up here. The session entry is kept only when it differs from the global
-   *  default — an unpinned session keeps tracking the global (which the 15s
-   *  poll refreshes) instead of freezing at load-time state. */
+  /** Read global + session effective selection. The server's `pinned` bit is
+   * authoritative even when a pin happens to equal the global value. */
   const hydrateSessionModel = useCallback(async (baseUrl: string, id: string | null) => {
     const [globalSel, sessionSel] = await Promise.all([
       fetchModel(baseUrl),
@@ -831,14 +804,11 @@ export function App() {
     if (globalSel) setModelSel(globalSel)
     if (!id || !sessionSel) return
     setSessionModelSel((prev) => {
-      if (sameSelection(globalSel, sessionSel)) {
-        if (!(id in prev)) return prev
-        const next = { ...prev }
-        delete next[id]
-        return next
-      }
-      if (sameSelection(prev[id] ?? null, sessionSel)) return prev
-      return { ...prev, [id]: sessionSel }
+      if (sessionSel.pinned === true) return { ...prev, [id]: sessionSel }
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
     })
   }, [])
 
@@ -897,8 +867,14 @@ export function App() {
     const gen = ++attachGen.current
 
     setSessionId(id)
-    // Pins are server state: read this session's effective executor on attach.
+    // Both model provenance and complete mode/delegate state are server truth.
     void hydrateSessionModel(baseUrl, id)
+    void getSessionAgentConfig(id).then((next) => {
+      if (gen !== attachGen.current) return
+      setSessionAgentConfig((prev) => ({ ...prev, [id]: next }))
+      setAdvisorStatus({ config: next.advisor, active: next.advisor.enabled && !!next.advisor.model })
+      setSidekickConfig(next.sidekick)
+    }).catch(() => {})
     void getGoal(baseUrl, id).then((nextGoal) => {
       if (gen !== attachGen.current) return
       goalRef.current = nextGoal
@@ -1031,7 +1007,7 @@ export function App() {
         // another window/the TUI applied a mode, so re-read model + alias state.
         if (ev.type === "mode.applied") {
           rememberEvent(ev)
-          modeAppliedRef.current(ev.name, ev.spec)
+          modeAppliedRef.current(ev.name, ev.spec, ev.sessionId)
           return
         }
         // The agent asking for our browser pane. Also live-only: claimed here
@@ -1585,11 +1561,7 @@ export function App() {
     setModelRows(rows)
   }, [config, appMode, hydrateSessionModel])
 
-  /** Advisor + sidekick config for the composer status rule. The sidekick read
-   *  is SESSION-SCOPED (effective = per-session override over the global
-   *  default) so another session's change never rewrites this one's chip.
-   *  Demo/offline never touches the server, and a failed read degrades to
-   *  "no chip" (never noise). */
+  /** Re-read the attached session's complete authoritative config. */
   const refreshAgents = useCallback(async () => {
     if (appMode !== "live") {
       setAdvisorStatus(null)
@@ -1598,31 +1570,40 @@ export function App() {
       return
     }
     const sid = sessionId
-    const [advisor, soloAdvisor, sidekick] = await Promise.all([
-      getAdvisorStatus().catch(() => null),
+    if (!sid) return
+    const [agentConfig, soloAdvisor] = await Promise.all([
+      getSessionAgentConfig(sid).catch(() => null),
       getSoloAdvisorStatus().catch(() => null),
-      getSidekick(sid).catch(() => null),
     ])
-    // A session switch can land mid-flight; drop a stale session's answer.
     if (sid !== sessionIdRef.current) return
-    setAdvisorStatus(advisor)
     setSoloAdvisorStatus(soloAdvisor)
-    setSidekickConfig(sidekick)
+    if (!agentConfig) return
+    setSessionAgentConfig((prev) => ({ ...prev, [sid]: agentConfig }))
+    setAdvisorStatus({
+      config: agentConfig.advisor,
+      active: agentConfig.advisor.enabled && !!agentConfig.advisor.model,
+    })
+    setSidekickConfig(agentConfig.sidekick)
+    setSessionModelSel((prev) => {
+      if (agentConfig.source !== "global") return { ...prev, [sid]: agentConfig.selection }
+      if (!(sid in prev)) return prev
+      const next = { ...prev }
+      delete next[sid]
+      return next
+    })
   }, [appMode, sessionId])
 
-  /** Saved modes → slash aliases. Demo/offline never touches the server. */
+  /** Saved definitions → slash aliases. Global `current` is intentionally ignored. */
   const refreshModes = useCallback(async () => {
     if (appMode !== "live") {
       setSlashModes([])
       setSavedModes([])
-      setCurrentModeSpec(null)
       return
     }
     try {
-      const { modes, current } = await getModes()
+      const { modes } = await getModes()
       setSlashModes(modeCommands(modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
       setSavedModes(modes)
-      setCurrentModeSpec(current ?? null)
     } catch {
       /* keep the last known aliases; the menu is a convenience, not state */
     }
@@ -1632,7 +1613,7 @@ export function App() {
     if (appMode !== "live") {
       setSlashModes([])
       setSavedModes([])
-      setCurrentModeSpec(null)
+      setSessionAgentConfig({})
       return
     }
     if (connectionState !== "connected") return
@@ -1648,13 +1629,39 @@ export function App() {
     selfAppliedMode.current = { name: name.toLowerCase(), at: Date.now() }
   }, [])
 
-  /** Server said a mode was applied on this session's stream (this window, the
-   *  TUI, or another app window): re-read models + aliases, then notice once. */
+  /** Session events refresh only that keyed config. Global events refresh only
+   * defaults/definitions; they must not repaint a pinned chat. */
   const handleModeApplied = useCallback(
-    (name: string, spec: ModeSpec) => {
-      void refreshModels()
-      void refreshModes()
-      void refreshAgents()
+    (name: string, spec: ModeSpec, eventSessionId?: string) => {
+      if (eventSessionId) {
+        void getSessionAgentConfig(eventSessionId).then((next) => {
+          setSessionAgentConfig((prev) => ({ ...prev, [eventSessionId]: next }))
+          if (eventSessionId !== sessionIdRef.current) return
+          setSessionModelSel((prev) => ({ ...prev, [eventSessionId]: next.selection }))
+          setAdvisorStatus({ config: next.advisor, active: next.advisor.enabled && !!next.advisor.model })
+          setSidekickConfig(next.sidekick)
+        }).catch(() => {})
+      } else {
+        void fetchModel(config?.baseUrl ?? "").then((next) => next && setModelSel(next))
+        void refreshModes()
+        // Global defaults affect only inheriting sessions, but the server is
+        // the authority on whether this attached session inherits or is pinned.
+        const sid = sessionIdRef.current
+        if (sid) {
+          void getSessionAgentConfig(sid).then((next) => {
+            setSessionAgentConfig((prev) => ({ ...prev, [sid]: next }))
+            setSessionModelSel((prev) => {
+              if (next.source !== "global") return { ...prev, [sid]: next.selection }
+              if (!(sid in prev)) return prev
+              const copy = { ...prev }
+              delete copy[sid]
+              return copy
+            })
+            setAdvisorStatus({ config: next.advisor, active: next.advisor.enabled && !!next.advisor.model })
+            setSidekickConfig(next.sidekick)
+          }).catch(() => {})
+        }
+      }
       const self = selfAppliedMode.current
       if (self && self.name === name.toLowerCase() && Date.now() - self.at < SELF_APPLY_WINDOW_MS) {
         selfAppliedMode.current = null
@@ -1665,7 +1672,7 @@ export function App() {
         : ""
       setNotice(`Mode "${name}" applied${detail}`)
     },
-    [refreshModels, refreshModes, refreshAgents],
+    [config, refreshModes],
   )
   modeAppliedRef.current = handleModeApplied
 
@@ -2402,11 +2409,11 @@ export function App() {
   const applyModeByName = useCallback(
     async (name: string) => {
       try {
+        const sid = sessionIdRef.current
+        if (!sid) throw new Error("No attached session.")
         markSelfApplied(name)
-        const applied = await applyMode(name, sessionIdRef.current)
-        await refreshModels()
-        void refreshModes()
-        void refreshAgents()
+        const applied = await applyMode(name, sid)
+        await refreshAgents()
         const detail = applied?.model
           ? `: ${prettyModel(applied.model)}${applied.effort ? ` (${applied.effort})` : ""} · ${applied.provider}`
           : ""
@@ -2415,7 +2422,7 @@ export function App() {
         setNotice(`Mode "${name}": ${(err as Error).message}`)
       }
     },
-    [refreshModels, refreshModes, refreshAgents, markSelfApplied],
+    [refreshAgents, markSelfApplied],
   )
 
   /** Steer a queued message into the running turn. The server's promote route
@@ -2457,7 +2464,6 @@ export function App() {
     async (name: string, spec: ModeSpec) => {
       const next = await saveMode({ name, spec })
       setSavedModes(next.modes)
-      setCurrentModeSpec(next.current ?? null)
       setSlashModes(modeCommands(next.modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
       if (activeMode && activeMode.toLowerCase() === name.toLowerCase()) {
         await applyModeByName(name)
@@ -2518,11 +2524,11 @@ export function App() {
           setDialog("incognito")
           return
         }
+        const sid = sessionIdRef.current
+        if (!sid) throw new Error("No attached session.")
         markSelfApplied(action.name)
-        const applied = await applyMode(action.name, sessionIdRef.current)
-        await refreshModels()
-        void refreshModes()
-        void refreshAgents()
+        const applied = await applyMode(action.name, sid)
+        await refreshAgents()
         setNotice(
           incognitoAppliedLine(
             applied?.applied || action.name,
@@ -2533,7 +2539,7 @@ export function App() {
         setNotice(`Incognito request failed: ${(err as Error).message}`)
       }
     },
-    [refreshModels, refreshModes, refreshAgents, markSelfApplied],
+    [refreshAgents, markSelfApplied],
   )
 
   /** `/cacheguard [tokens|off]` — same parsing + wording as the TUI, backed by
@@ -2740,12 +2746,9 @@ export function App() {
       // own activeMode here too), so re-read what is now current: the selector
       // must fall back from the mode name to the model name, and the status rule
       // must drop the delegates solo suppressed.
-      void refreshModes()
       void refreshAgents()
-      // Authoritative solo state (GET /api/model, session-scoped when pinned).
-      void hydrateSessionModel(config.baseUrl, sid)
     },
-    [live, config, sessionId, refreshModes, refreshAgents, hydrateSessionModel],
+    [live, config, sessionId, refreshAgents],
   )
 
   const enterDemo = useCallback(() => {

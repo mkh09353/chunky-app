@@ -360,7 +360,14 @@ export function sessionToThread(
     updated: relativeTime(s.lastActivity),
     preview: threadLabel(s.title),
     status,
+    // Folder basename, NOT a git branch. Long-standing behaviour the sidebar
+    // search depends on; the real branch rides alongside it below.
     branch: workspaceName(s.workspace),
+    // Server-resolved git identity, spread so an older server (which sends
+    // neither field) produces a row with neither key rather than `undefined`
+    // values — that absence is exactly what keeps the sidebar flat.
+    ...(s.branch ? { gitBranch: s.branch } : {}),
+    ...(s.worktree?.path ? { worktreePath: s.worktree.path } : {}),
     messages: opts.messages ?? [],
   }
 }

@@ -51,10 +51,10 @@ export interface ModelSelection {
   speed?: string | null
   /** SOLO: this selection runs the model alone — the server suppresses the
    *  sidekick, named seats, the reviewer and the mode advisor, and only the
-   *  opt-in solo advisor may run. Present on GET /api/model (global or
-   *  `?sessionId=`) and on a global POST /api/model/select; a session-scoped
-   *  select answers without it, so re-read the session selection after one. */
+   *  opt-in solo advisor may run. */
   solo?: boolean
+  /** Session reads only: true when this value is pinned rather than inherited. */
+  pinned?: boolean
 }
 
 export interface ModelRow {
@@ -534,8 +534,8 @@ export async function openEventStream(
 }
 
 /** Read the executor selection. With `sessionId` the server returns that
- *  session's EFFECTIVE selection (its pin, else the global default) in the same
- *  shape; omit it for the global default itself. */
+ * session's effective selection plus authoritative `pinned` provenance; omit it
+ * for the global default itself. */
 export async function fetchModel(
   baseUrl: string,
   sessionId?: string | null,
