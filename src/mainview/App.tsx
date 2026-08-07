@@ -35,7 +35,7 @@ import { ConfirmHost } from "./components/ConfirmDialog"
 import { confirm } from "./lib/confirm"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
-import { consumeAppOpenUrl, subscribeBrowserNavigation } from "./lib/browserNav"
+import { subscribeBrowserNavigation } from "./lib/browserNav"
 import { getPrReviews, refreshPrReviews } from "./lib/prApi"
 import {
   hasNewActivity,
@@ -59,7 +59,6 @@ import {
   listRepos,
   listSessions,
   loadConfig,
-  openEventStream,
   openSessionStream,
   prettyModel,
   QueueFullError,
@@ -88,7 +87,7 @@ import {
   runCloneSession,
 } from "./lib/cloneRepo"
 import { cloneRoots } from "./lib/dirSearch"
-import { reresolveConnection, shouldReresolve, subscribeServerChanged } from "./lib/reresolve"
+import { reresolveConnection, subscribeServerChanged } from "./lib/reresolve"
 import {
   describeSetupStage,
   subscribeSetupStage,
@@ -104,7 +103,6 @@ import {
   loadDesktopUiState,
   quickKeysSnapshot,
   rememberActiveRepo,
-  rememberLastSession,
   saveDisplayName,
   saveQuickKeys,
   saveSessionShelves,
@@ -153,11 +151,11 @@ import {
   sessionToThread,
   streamingMessageId,
 } from "./lib/mapTranscript"
-import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
-import type { AgentEvent, MessageDelivery, SessionDelta } from "@chunky/protocol"
+import { isIntentionalAbort, sleep } from "./lib/reconnect"
+import type { MessageDelivery, SessionDelta } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
-import { initialState, isStreaming, isTreeIdle, mainItems, type TranscriptState } from "./lib/transcript"
-import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "./lib/sessionCache"
+import { initialState, isStreaming, isTreeIdle, mainItems } from "./lib/transcript"
+import { SessionCache } from "./lib/sessionCache"
 import {
   createPendingSend,
   dropPendingSend,
@@ -165,10 +163,7 @@ import {
   samePendingSends,
   shouldAppendOptimistically,
   unresolvedPendingSends,
-  type PendingSend,
 } from "./lib/pendingSends"
-import { TranscriptCoalescer } from "./lib/replayCoalescer"
-import { ReplayReconciler } from "./lib/replayReconciler"
 import {
   absorbAuthoritative,
   applySessionDelta,
@@ -197,15 +192,9 @@ import {
   type FeedRepo,
 } from "./lib/homeFeed"
 import { HomeView } from "./components/HomeView"
+import { useAttachedSession, type AppMode, type ConnectionState } from "./hooks/useAttachedSession"
 import hornUrl from "./assets/horn.wav"
 
-type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
-type AppMode = "live" | "demo"
-
-const REPLAY_SETTLE_MS = 120
-/** Hard cap on the "catching up…" state. A session that is still RUNNING never
- *  goes quiet, so quiet alone must never be the only way out of it. */
-const CATCH_UP_MAX_MS = 1_500
 /** Safety poll while the session stream is healthy: it only has to catch what
  *  shell rows cannot express (a detached spawn settling with the root idle). */
 const SAFETY_POLL_MS = 20_000
@@ -322,7 +311,6 @@ export function App() {
   const [setupStage, setSetupStage] = useState<SetupStage | null>(null)
   const [appMode, setAppMode] = useState<AppMode>("live")
   const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [sessionId, setSessionId] = useState<string | null>(null)
   // Sessions to revisit: completion adds unselected rows automatically, and a
   // row context menu can add/remove the same marker manually. Clicking a row
   // acknowledges and clears its marker, including the already-active row.
@@ -356,17 +344,6 @@ export function App() {
   const [homeGoalsLoading, setHomeGoalsLoading] = useState(false)
   // Home's own clock (seconds-grained, and only ticking while Home is up).
   const [homeNow, setHomeNow] = useState(() => Date.now())
-  const [transcript, setTranscript] = useState<TranscriptState>(initialState)
-  const [transcriptLoading, setTranscriptLoading] = useState(false)
-  // Messages posted but not yet echoed by the server, shown straight away so a
-  // send never looks lost. Renderer-side presentation state ONLY: never reduced
-  // into the transcript, never written to the session cache's event log, never
-  // seen by the ReplayReconciler (see lib/pendingSends.ts).
-  const [pendingSends, setPendingSends] = useState<readonly PendingSend[]>([])
-  // Replay is in flight: the projection on screen is last-seen state, not live
-  // state. Everything that would otherwise claim "running" from the transcript
-  // defers to the server's own summary while this is true.
-  const [catchingUp, setCatchingUp] = useState(false)
   const [modelSel, setModelSel] = useState<ModelSelection | null>(null)
   // Session-pinned executor selections: POST /api/model/select with a sessionId
   // pins that session only, so its display must survive global refreshes/SSE.
@@ -384,7 +361,6 @@ export function App() {
   const [cacheGuard, setCacheGuard] = useState<{ text: string; images: { base64: string; mediaType: string }[]; approxTokens: number; reason: string; delivery?: MessageDelivery } | null>(null)
   const [foldThreads, setFoldThreads] = useState(false)
   const [terminalsOpen, setTerminalsOpen] = useState(loadTerminalsOpen)
-  const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
   // Server-side agent config behind the composer status rule. Null = unknown
   // (demo/offline or a failed read) and simply renders no chip.
   const [advisorStatus, setAdvisorStatus] = useState<AdvisorStatus | null>(null)
@@ -486,7 +462,6 @@ export function App() {
     }
   }, [])
 
-  const streamAbort = useRef<AbortController | null>(null)
   const cloneAbort = useRef<AbortController | null>(null)
   // handleSend runs before the dialog/settings actions are declared, so slash
   // dispatch is reached through a ref (same trick as the TUI's doModeRef).
@@ -498,13 +473,8 @@ export function App() {
   // Set just BEFORE this window POSTs an apply: the server broadcasts
   // mode.applied to every stream, and the local caller already shows a notice.
   const selfAppliedMode = useRef<{ name: string; at: number } | null>(null)
-  const settleTimer = useRef<number | null>(null)
-  const sessionIdRef = useRef<string | null>(null)
-  const transcriptRef = useRef<TranscriptState>(initialState)
-  const goalRef = useRef<GoalSnapshot | null>(null)
   const activeRepoIdRef = useRef<string | null>(null)
   const repoListGen = useRef(0)
-  const attachGen = useRef(0)
   // Session lists are populated by both the selected-repo refresh and the
   // existing all-repo poll. Transcript projections are bounded because a
   // lengthy history can be much larger than a sidebar row.
@@ -513,11 +483,6 @@ export function App() {
   /** Monotonic source of optimistic row ids. Distinct from mapTranscript's
    *  `ev-N` ids, so a pending row can never collide with a mapped one. */
   const pendingSendSeq = useRef(0)
-  // Publishes the attached session's projection on a cadence instead of once
-  // per event (see lib/replayCoalescer). Owned by the current attachment.
-  const coalescer = useRef<TranscriptCoalescer | null>(null)
-  // Timers belonging to the current attachment's catch-up bookkeeping.
-  const attachTimers = useRef<(() => void) | null>(null)
   // Every session the server knows about, folded from the session stream and
   // from authoritative polls (see lib/sessionSummaries).
   const shellSummaries = useRef<SummaryMap>(new Map())
@@ -528,10 +493,80 @@ export function App() {
     ...desktopUiSnapshot().lastSessionByRepo,
   })
 
-  sessionIdRef.current = sessionId
-  transcriptRef.current = transcript
-  goalRef.current = goal
   activeRepoIdRef.current = activeRepoId
+
+  /** Read global + session effective selection. The server's `pinned` bit is
+   * authoritative even when a pin happens to equal the global value. */
+  const hydrateSessionModel = useCallback(async (baseUrl: string, id: string | null) => {
+    const [globalSel, sessionSel] = await Promise.all([
+      fetchModel(baseUrl),
+      id ? fetchModel(baseUrl, id) : Promise.resolve(null),
+    ])
+    if (globalSel) setModelSel(globalSel)
+    if (!id || !sessionSel) return
+    setSessionModelSel((prev) => {
+      if (sessionSel.pinned === true) return { ...prev, [id]: sessionSel }
+      if (!(id in prev)) return prev
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+  }, [])
+  // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
+  const refreshSessions = useCallback(
+    async (baseUrl: string, repoId: string | null = activeRepoIdRef.current) => {
+      const gen = ++repoListGen.current
+      const list = await listSessions(baseUrl, repoId)
+      if (gen !== repoListGen.current) return list
+      // Authoritative rows (they carry `busy`) — fold them into the shared map
+      // so a later streamed row can inherit what only a poll can know.
+      shellSummaries.current = absorbAuthoritative(shellSummaries.current, list)
+      repoSessionCache.current.set(repoId, list)
+      sessionCache.current.reconcileRepo(repoId, new Set(list.map((session) => session.sessionId)))
+      // Only apply if still viewing this repo (or boot with matching ref).
+      if (repoId != null && repoId !== activeRepoIdRef.current) return list
+      setSessions(list)
+      return list
+    },
+    [],
+  )
+
+  // The attached session's whole SSE machine (hooks/useAttachedSession). Moved
+  // out of this component verbatim; the names below are the ones the rest of
+  // App already used, so every call site downstream is unchanged.
+  const {
+    sessionId,
+    setSessionId,
+    transcript,
+    setTranscript,
+    transcriptLoading,
+    setTranscriptLoading,
+    catchingUp,
+    pendingSends,
+    setPendingSends,
+    goal,
+    setGoalState,
+    sessionIdRef,
+    transcriptRef,
+    settleTimer,
+    attachSession,
+    stopStream,
+  } = useAttachedSession({
+    sessionCache,
+    activeRepoIdRef,
+    lastSessionByRepo,
+    modeAppliedRef,
+    setConnectionState,
+    setAppMode,
+    setConfig,
+    setSendError,
+    setConnError,
+    setSessionAgentConfig,
+    setAdvisorStatus,
+    setSidekickConfig,
+    hydrateSessionModel,
+    refreshSessions,
+  })
 
   const live = appMode === "live"
   const streaming = live ? isStreaming(transcript) || sending : demoStreamingId !== null
@@ -794,294 +829,9 @@ export function App() {
   const liveCompacted = live ? transcript.compacted : 0
   const liveQueue = live ? transcript.queue.entries : []
 
-  /** Read global + session effective selection. The server's `pinned` bit is
-   * authoritative even when a pin happens to equal the global value. */
-  const hydrateSessionModel = useCallback(async (baseUrl: string, id: string | null) => {
-    const [globalSel, sessionSel] = await Promise.all([
-      fetchModel(baseUrl),
-      id ? fetchModel(baseUrl, id) : Promise.resolve(null),
-    ])
-    if (globalSel) setModelSel(globalSel)
-    if (!id || !sessionSel) return
-    setSessionModelSel((prev) => {
-      if (sessionSel.pinned === true) return { ...prev, [id]: sessionSel }
-      if (!(id in prev)) return prev
-      const next = { ...prev }
-      delete next[id]
-      return next
-    })
-  }, [])
 
-  /** Drop the attached session's stream AND everything scheduled around it, so
-   *  no in-flight commit can land on top of whatever replaces it. */
-  const stopStream = useCallback(() => {
-    streamAbort.current?.abort()
-    streamAbort.current = null
-    coalescer.current?.dispose()
-    coalescer.current = null
-    attachTimers.current?.()
-    attachTimers.current = null
-  }, [])
 
-  // ---- Live: refresh sessions for a repo (generation-guarded against tab races) ----
-  const refreshSessions = useCallback(
-    async (baseUrl: string, repoId: string | null = activeRepoIdRef.current) => {
-      const gen = ++repoListGen.current
-      const list = await listSessions(baseUrl, repoId)
-      if (gen !== repoListGen.current) return list
-      // Authoritative rows (they carry `busy`) — fold them into the shared map
-      // so a later streamed row can inherit what only a poll can know.
-      shellSummaries.current = absorbAuthoritative(shellSummaries.current, list)
-      repoSessionCache.current.set(repoId, list)
-      sessionCache.current.reconcileRepo(repoId, new Set(list.map((session) => session.sessionId)))
-      // Only apply if still viewing this repo (or boot with matching ref).
-      if (repoId != null && repoId !== activeRepoIdRef.current) return list
-      setSessions(list)
-      return list
-    },
-    [],
-  )
 
-  // ---- Live: attach SSE (abort on switch, reconcile cached projection with full replay) ----
-  const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean }) => {
-    const previousId = sessionIdRef.current
-    // Optimistic rows belong to the session they were typed into. A reattach to
-    // the SAME session (reconnect, rewind, server hand-over) keeps them: their
-    // sends are still in flight, and the replay that follows is what resolves
-    // them. Only a genuine switch drops them.
-    if (previousId !== id) setPendingSends([])
-    if (previousId) {
-      sessionCache.current.set(previousId, {
-        // The coalescer's working state is the reduction of EVERY event seen so
-        // far; `transcript` may still be a cadence behind it when the reader
-        // switches away mid-burst.
-        transcript: coalescer.current?.state ?? transcriptRef.current,
-        goal: goalRef.current,
-        repoId: activeRepoIdRef.current,
-        events: sessionCache.current.get(previousId)?.events ?? [],
-      })
-    }
-    stopStream()
-    const ac = new AbortController()
-    streamAbort.current = ac
-    const gen = ++attachGen.current
-
-    setSessionId(id)
-    // Both model provenance and complete mode/delegate state are server truth.
-    void hydrateSessionModel(baseUrl, id)
-    void getSessionAgentConfig(id).then((next) => {
-      if (gen !== attachGen.current) return
-      setSessionAgentConfig((prev) => ({ ...prev, [id]: next }))
-      setAdvisorStatus({ config: next.advisor, active: next.advisor.enabled && !!next.advisor.model })
-      setSidekickConfig(next.sidekick)
-    }).catch(() => {})
-    void getGoal(baseUrl, id).then((nextGoal) => {
-      if (gen !== attachGen.current) return
-      goalRef.current = nextGoal
-      setGoalState(nextGoal)
-      sessionCache.current.update(id, { goal: nextGoal })
-    }).catch(() => {})
-    const repoForSession = activeRepoIdRef.current
-    if (repoForSession) {
-      lastSessionByRepo.current[repoForSession] = id
-      rememberLastSession(repoForSession, id)
-    }
-    // Re-read on every (re)connection: a rebuild replaces the entry, and
-    // remember() extends whichever one is current.
-    let cached = sessionCache.current.get(id)
-    const replay = new ReplayReconciler(cached?.events)
-
-    // The projection is published on a cadence, NOT once per event: the server
-    // replays the whole history on every attach, and committing that per event
-    // is what left a backgrounded session stale on screen for seconds.
-    const live = new TranscriptCoalescer(cached?.transcript ?? initialState, (next) => {
-      if (gen !== attachGen.current) return
-      setTranscript(next)
-    })
-    coalescer.current = live
-
-    // ---- catch-up (replay in flight) ----
-    let catchUpActive = !opts?.fresh
-    let catchUpQuiet: number | null = null
-    let catchUpCap: number | null = null
-    const clearCatchUpTimers = () => {
-      if (catchUpQuiet != null) window.clearTimeout(catchUpQuiet)
-      if (catchUpCap != null) window.clearTimeout(catchUpCap)
-      catchUpQuiet = null
-      catchUpCap = null
-      if (settleTimer.current != null) {
-        clearTimeout(settleTimer.current)
-        settleTimer.current = null
-      }
-    }
-    attachTimers.current = clearCatchUpTimers
-    /** Replay is over: publish everything held back and stop deferring to the
-     *  session summary for this session's busy state. */
-    const finishCatchUp = () => {
-      clearCatchUpTimers()
-      catchUpActive = false
-      if (gen !== attachGen.current) return
-      live.flush()
-      setCatchingUp(false)
-      setTranscriptLoading(false)
-    }
-    /** Each replayed event pushes the settle out; the cap is what stops a
-     *  session that keeps streaming from claiming to replay forever. */
-    const noteReplayProgress = () => {
-      if (!catchUpActive || gen !== attachGen.current) return
-      if (catchUpQuiet != null) window.clearTimeout(catchUpQuiet)
-      catchUpQuiet = window.setTimeout(finishCatchUp, REPLAY_SETTLE_MS)
-      settleTimer.current = catchUpQuiet
-      if (catchUpCap == null) catchUpCap = window.setTimeout(finishCatchUp, CATCH_UP_MAX_MS)
-    }
-
-    const rememberEvent = (event: AgentEvent, nextTranscript = live.state) => {
-      sessionCache.current.remember(id, nextTranscript, goalRef.current, activeRepoIdRef.current, event)
-    }
-    setTranscript(cached?.transcript ?? initialState)
-    setGoalState(cached?.goal ?? null)
-    if (!cached) sessionCache.current.set(id, { transcript: initialState, goal: null, repoId: activeRepoIdRef.current, events: [] })
-    // A just-created session has no history to replay — don't flash the
-    // "Replaying session history…" state while its stream connects.
-    setTranscriptLoading(!opts?.fresh && !cached)
-    // A cache hit shows LAST-SEEN state until the replay passes it, which is
-    // exactly when the reader must not be told this is the live picture.
-    setCatchingUp(catchUpActive)
-    setSendError(null)
-    setConnError(null)
-
-    const onOpen = () => {
-      if (gen !== attachGen.current) return
-      setConnectionState("connected")
-      setAppMode("live")
-      // Arms the settle even for a session with NO history, whose stream sends
-      // nothing at all until its first turn.
-      noteReplayProgress()
-    }
-
-    let attempt = 0
-    const onEvent = (ev: AgentEvent) => {
-      if (gen !== attachGen.current) return
-      attempt = 0
-      noteReplayProgress()
-      // The server always sends history from event zero and exposes no replay
-      // boundary/cursor. Silently discard the cached persisted prefix; the
-      // first new event is reduced onto the projection already on screen.
-      const decision = replay.next(ev)
-      if (decision.kind === "skip") {
-        // Everything the cache knew is accounted for: from here on this is
-        // news, and the screen is live again as soon as it is reduced.
-        if (decision.complete) finishCatchUp()
-        return
-      }
-      // Any prefix disagreement means the cache cannot safely be extended, so
-      // the projection is rebuilt from event zero in the WORKING state while
-      // the previous one stays on screen. The hold ends on burst-quiet or at
-      // its cap, so a still-running session can no longer freeze the view.
-      if (decision.kind === "rebuild") {
-        live.replaceState(rebuildTranscript(decision.prefix))
-        live.hold()
-        sessionCache.current.set(id, {
-          transcript: live.state,
-          goal: goalRef.current,
-          repoId: activeRepoIdRef.current,
-          events: decision.prefix,
-        })
-      }
-      // These arrive only on the live stream, never in Store.history. They
-      // must update the visible/cache projection but must never be replayed
-      // into it as history — hence the side effects firing here, in stream
-      // order, exactly as they did when every event committed on its own.
-      if (!isPersistedSessionEvent(ev)) {
-        if (ev.type === "session.rewound") {
-          sessionCache.current.delete(id)
-          // A rewind throws recent turns away, so the baseline any in-flight
-          // optimistic row was measured against no longer describes this
-          // history. Drop them here rather than leave a row that can never be
-          // matched (the reattach below keeps same-session rows otherwise).
-          setPendingSends([])
-          void attachSession(baseUrl, id)
-          return
-        }
-        // Live-only broadcast (never persisted, never a transcript item):
-        // another window/the TUI applied a mode, so re-read model + alias state.
-        if (ev.type === "mode.applied") {
-          rememberEvent(ev)
-          modeAppliedRef.current(ev.name, ev.spec, ev.sessionId)
-          return
-        }
-        // The agent asking for our browser pane. Also live-only: claimed here
-        // and never reduced, so it cannot become a rendered transcript item.
-        // Only http(s) actually opens the pane — openInAppBrowser owns that rule.
-        if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
-        rememberEvent(ev, live.push(ev))
-        return
-      }
-      rememberEvent(ev, live.push(ev))
-      if (ev.type === "goal.update") {
-        goalRef.current = ev.goal
-        setGoalState(ev.goal)
-        sessionCache.current.update(id, { goal: ev.goal })
-      }
-      // Surface title updates from session list by refreshing occasionally on status idle.
-      if (ev.type === "session.status" && ev.status === "idle") {
-        void refreshSessions(baseUrl, activeRepoIdRef.current).catch(() => {})
-      }
-    }
-
-    /** After a failed attachment: when the evidence says the server is gone or
-     *  retiring (not just a hiccup), resolve the connection again and reattach
-     *  to whatever is serving this workspace now. Returns true once this loop
-     *  has handed over — the replacement attachment owns the session from
-     *  there, and full-history replay restores the transcript. */
-    const handOverToReplacement = async (failure?: unknown): Promise<boolean> => {
-      if (!shouldReresolve({ attempts: attempt, error: failure })) return false
-      const next = await reresolveConnection()
-      if (!next || ac.signal.aborted || gen !== attachGen.current) return false
-      if (next.baseUrl === baseUrl) return false
-      // config first: every base-URL-derived caller reads it, and configApi's
-      // memo was already repointed inside reresolveConnection().
-      setConfig(next)
-      void attachSession(next.baseUrl, id)
-      return true
-    }
-
-    for (;;) {
-      try {
-        if (gen !== attachGen.current) return
-        setConnectionState(attempt === 0 ? "connecting" : "reconnecting")
-        await openEventStream(baseUrl, id, onEvent, ac.signal, onOpen)
-        if (ac.signal.aborted || gen !== attachGen.current) return
-        finishCatchUp()
-        setConnectionState("reconnecting")
-        attempt += 1
-        await sleep(reconnectDelay(attempt - 1), ac.signal)
-        if (await handOverToReplacement()) return
-      } catch (err) {
-        if (isIntentionalAbort(err, ac.signal) || gen !== attachGen.current) return
-        attempt += 1
-        setConnectionState("reconnecting")
-        // Publish whatever the working state holds: the stream is gone, so
-        // nothing else is going to arrive to trigger a cadence flush.
-        finishCatchUp()
-        try {
-          await sleep(reconnectDelay(attempt), ac.signal)
-        } catch {
-          return
-        }
-        if (await handOverToReplacement(err)) return
-      }
-      if (ac.signal.aborted || gen !== attachGen.current) return
-      // The protocol has no since/offset cursor: a new stream always starts at
-      // history event zero. Keep the current cached projection visible and
-      // discard its matching persisted prefix on the next connection.
-      setTranscriptLoading(false)
-      cached = sessionCache.current.get(id)
-      replay.reset(cached?.events)
-      catchUpActive = true
-      setCatchingUp(true)
-    }
-  }, [refreshSessions, hydrateSessionModel, stopStream])
 
   /** Load sessions for a repo and attach last/newest/created session. */
   const openRepoThreads = useCallback(
