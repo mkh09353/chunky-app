@@ -1,0 +1,312 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Chunky — Home feed, shared styles.
+
+   Used by home-feed.html (standalone surface) and home-feed-in-app.html
+   (the same feed sitting inside the app shell). Colour tokens are copied
+   verbatim from src/mainview/index.css — light on :root, dark on .dark.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: light;
+  --radius: 0.7rem;
+
+  --background: oklch(0.991 0.003 300);
+  --foreground: oklch(0.26 0.02 296);
+  --card: oklch(1 0 0);
+  --popover: oklch(1 0 0);
+
+  --primary: oklch(0.53 0.208 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+
+  --secondary: oklch(0.965 0.006 300);
+  --muted: oklch(0.968 0.005 300);
+  --muted-foreground: oklch(0.53 0.02 296);
+  --accent: oklch(0.955 0.012 298);
+
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.99 0.01 25);
+  --success: oklch(0.62 0.15 155);
+  --warning: oklch(0.7 0.16 70);
+  --info: oklch(0.6 0.16 250);
+
+  --border: oklch(0.92 0.008 298);
+  --input: oklch(0.9 0.01 298);
+  --ring: oklch(0.53 0.208 293);
+
+  --sidebar: oklch(0.972 0.005 300);
+  --sidebar-foreground: oklch(0.26 0.02 296);
+  --sidebar-border: oklch(0.92 0.008 298);
+  --sidebar-accent: oklch(0.94 0.014 298);
+
+  --shadow-color: 296 40% 30%;
+
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: oklch(0.176 0.014 292);
+  --foreground: oklch(0.965 0.004 300);
+  --card: oklch(0.205 0.016 292);
+  --popover: oklch(0.216 0.018 292);
+
+  --primary: oklch(0.635 0.204 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+
+  --secondary: oklch(1 0 0 / 5%);
+  --muted: oklch(1 0 0 / 4.5%);
+  --muted-foreground: oklch(0.72 0.02 296);
+  --accent: oklch(1 0 0 / 7%);
+
+  --destructive: oklch(0.66 0.2 25);
+  --destructive-foreground: oklch(0.99 0.01 25);
+  --success: oklch(0.72 0.15 158);
+  --warning: oklch(0.78 0.15 74);
+  --info: oklch(0.7 0.14 250);
+
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.635 0.204 293);
+
+  --sidebar: oklch(0.158 0.013 292);
+  --sidebar-foreground: oklch(0.965 0.004 300);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-accent: oklch(1 0 0 / 8%);
+
+  --shadow-color: 292 60% 4%;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.45;
+  font-feature-settings: "cv01", "cv02", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-size: 11px; letter-spacing: -0.01em; }
+::selection { background-color: color-mix(in oklch, var(--primary) 30%, transparent); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--foreground) 16%, transparent);
+  border-radius: 999px; border: 3px solid transparent; background-clip: content-box;
+}
+
+/* Per-repo accent, set on any row via `data-repo`. Cross-repo scanning leans on
+   this dot + the mono label rather than on grouping. */
+[data-repo="chunky-app"] { --repo-accent: oklch(0.7 0.16 300); }
+[data-repo="chunky"]     { --repo-accent: oklch(0.7 0.14 235); }
+[data-repo="zoo"]        { --repo-accent: oklch(0.72 0.15 158); }
+:root [data-repo="chunky-app"] { --repo-accent: oklch(0.55 0.19 300); }
+:root [data-repo="chunky"]     { --repo-accent: oklch(0.55 0.16 235); }
+:root [data-repo="zoo"]        { --repo-accent: oklch(0.55 0.14 158); }
+
+/* ── shared bits ─────────────────────────────────────────────────────────── */
+.btn {
+  font-family: inherit; font-size: 11px; font-weight: 500; padding: 3px 9px;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--secondary);
+  color: var(--foreground); cursor: pointer; white-space: nowrap; line-height: 1.4;
+}
+.btn:hover { background: var(--accent); }
+.btn-primary { background: var(--primary); border-color: transparent; color: var(--primary-foreground); }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-danger { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 30%, transparent); background: transparent; }
+.btn-danger:hover { background: color-mix(in oklch, var(--destructive) 14%, transparent); }
+.icon-btn {
+  width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center;
+  border: 1px solid transparent; background: transparent; color: var(--muted-foreground);
+  font-size: 12px; cursor: pointer; flex: none;
+}
+.icon-btn:hover { background: var(--accent); color: var(--foreground); }
+.dot { width: 7px; height: 7px; border-radius: 999px; flex: none; display: inline-block; }
+
+/* ── feed scaffolding ────────────────────────────────────────────────────── */
+/* The aurora is the app's .chunky-aurora, only behind the greeting. */
+.aurora {
+  background:
+    radial-gradient(58% 60% at 50% -6%, color-mix(in oklch, var(--primary) 20%, transparent), transparent 70%),
+    radial-gradient(40% 42% at 86% 4%, color-mix(in oklch, var(--info) 9%, transparent), transparent 62%);
+}
+.wrap {
+  width: 100%; max-width: 780px; margin: 0 auto; padding: 0 24px 56px;
+  container-type: inline-size;
+}
+
+/* ── greeting + omnibox (compact) ────────────────────────────────────────── */
+.hero { padding: 30px 0 20px; text-align: center; }
+.hero h1 { margin: 0 0 5px; font-size: 21px; font-weight: 600; letter-spacing: -0.024em; line-height: 1.2; }
+.hero .sub { margin: 0; color: var(--muted-foreground); font-size: 12px; }
+.hero .sub .sep { opacity: 0.4; margin: 0 6px; }
+.hero .sub b { font-weight: 500; color: color-mix(in oklab, var(--warning) 55%, var(--foreground)); }
+
+.omni {
+  margin-top: 14px; text-align: left;
+  background: var(--card); border: 1px solid var(--border); border-radius: calc(var(--radius) + 4px);
+  padding: 9px 10px 7px;
+  box-shadow:
+    0 1px 2px -1px hsl(var(--shadow-color) / 0.16),
+    0 14px 30px -26px hsl(var(--shadow-color) / 0.32);
+  transition: border-color 140ms ease;
+}
+.omni:hover, .omni:focus-within { border-color: color-mix(in oklab, var(--primary) 34%, var(--border)); }
+.omni .field {
+  min-height: 30px; padding: 3px 3px 6px; font-size: 13.5px; color: var(--muted-foreground);
+  letter-spacing: -0.005em;
+}
+.omni .field .caret {
+  display: inline-block; width: 1.5px; height: 15px; margin-left: 1px; vertical-align: -3px;
+  background: var(--primary); animation: caret 1.05s steps(1) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+.omni-foot { display: flex; align-items: center; gap: 6px; }
+.omni-foot .spacer { margin-left: auto; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--muted);
+  font-size: 11px; color: var(--muted-foreground); white-space: nowrap; cursor: pointer;
+}
+.chip:hover { background: var(--accent); color: var(--foreground); }
+.chip .chev { opacity: 0.55; font-size: 8px; }
+.hint { font-size: 11px; color: var(--muted-foreground); white-space: nowrap; }
+.hint b { font-weight: 500; color: color-mix(in oklch, var(--foreground) 82%, transparent); }
+.hint .sep { opacity: 0.4; margin: 0 5px; }
+.send {
+  width: 24px; height: 24px; border-radius: 999px; border: none; cursor: pointer; flex: none;
+  background: var(--primary); color: var(--primary-foreground);
+  display: grid; place-items: center; font-size: 12px; line-height: 1;
+}
+.send:hover { filter: brightness(1.08); }
+
+/* ── sections ────────────────────────────────────────────────────────────── */
+.section { margin-top: 22px; }
+.section-h { display: flex; align-items: center; gap: 8px; margin: 0 2px 7px; }
+.section-h h2 {
+  margin: 0; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted-foreground);
+}
+.section.urgent .section-h h2 { color: var(--foreground); }
+.count {
+  font-size: 10px; font-weight: 500; line-height: 1; padding: 2px 6px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--muted); color: var(--muted-foreground);
+}
+.count.hot {
+  color: var(--warning); background: color-mix(in oklch, var(--warning) 14%, transparent);
+  border-color: color-mix(in oklch, var(--warning) 32%, transparent);
+}
+.section-h .spacer { margin-left: auto; }
+.section-h a { font-size: 11px; color: var(--muted-foreground); text-decoration: none; }
+.section-h a:hover { color: var(--foreground); }
+
+/* ── dense rows ──────────────────────────────────────────────────────────── */
+.rows { display: flex; flex-direction: column; gap: 3px; }
+.row {
+  display: flex; align-items: center; gap: 9px; min-width: 0;
+  padding: 5px 9px; border-radius: 8px; cursor: default;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.row:hover { background: var(--muted); }
+
+/* Status glyph, fixed gutter so every row's repo column starts at the same x. */
+.glyph { flex: none; width: 12px; display: flex; align-items: center; justify-content: center; }
+.glyph .dot { width: 7px; height: 7px; }
+.dot-warn { background: var(--warning); box-shadow: 0 0 0 2.5px color-mix(in oklch, var(--warning) 20%, transparent); }
+.dot-ask { background: var(--info); box-shadow: 0 0 0 2.5px color-mix(in oklch, var(--info) 20%, transparent); }
+.dot-unread { background: var(--primary); box-shadow: 0 0 0 2.5px color-mix(in oklch, var(--primary) 20%, transparent); }
+.dot-ok { background: color-mix(in oklab, var(--success) 70%, var(--border)); }
+.dot-idle { background: color-mix(in oklch, var(--foreground) 22%, transparent); }
+
+/* Repo affiliation: coloured dot + mono name in a fixed column, so the eye can
+   scan one vertical strip for "which repo" across a flat, urgency-sorted list. */
+.repo {
+  flex: none; width: 98px; display: flex; align-items: center; gap: 6px; overflow: hidden;
+}
+.repo i { width: 6px; height: 6px; border-radius: 999px; flex: none; background: var(--repo-accent, var(--muted-foreground)); }
+.repo span {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: -0.01em;
+  color: color-mix(in oklab, var(--repo-accent, var(--muted-foreground)) 55%, var(--foreground));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.title {
+  flex: none; max-width: 44%; font-size: 12.5px; font-weight: 500; letter-spacing: -0.008em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx {
+  flex: 1; min-width: 0; color: var(--muted-foreground); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx code {
+  font-family: var(--font-mono); font-size: 10.5px;
+  color: color-mix(in oklch, var(--foreground) 74%, transparent);
+  background: var(--muted); border-radius: 4px; padding: 0 4px;
+}
+.when { flex: none; font-size: 11px; color: var(--muted-foreground); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.when.waiting { color: color-mix(in oklab, var(--warning) 62%, var(--foreground)); }
+.actions { flex: none; display: flex; align-items: center; gap: 5px; }
+.tag {
+  flex: none; font-size: 9.5px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px; white-space: nowrap;
+  color: var(--warning); background: color-mix(in oklch, var(--warning) 13%, transparent);
+  border: 1px solid color-mix(in oklch, var(--warning) 28%, transparent);
+}
+.tag.ask { color: var(--info); background: color-mix(in oklch, var(--info) 13%, transparent); border-color: color-mix(in oklch, var(--info) 28%, transparent); }
+.seat {
+  flex: none; font-size: 10px; color: var(--muted-foreground);
+  border: 1px solid var(--border); background: var(--muted);
+  border-radius: 999px; padding: 0 6px; white-space: nowrap;
+}
+
+/* Needs You is the only section that gets a filled surface. */
+.section.urgent .rows { gap: 4px; }
+.section.urgent .row {
+  padding: 6px 9px;
+  background: color-mix(in oklab, var(--warning) 6%, var(--card));
+  border-color: color-mix(in oklab, var(--warning) 26%, var(--border));
+}
+.section.urgent .row:hover { border-color: color-mix(in oklab, var(--warning) 46%, var(--border)); }
+.section.urgent .row.ask {
+  background: color-mix(in oklab, var(--info) 6%, var(--card));
+  border-color: color-mix(in oklab, var(--info) 26%, var(--border));
+}
+.section.urgent .row.ask:hover { border-color: color-mix(in oklab, var(--info) 46%, var(--border)); }
+
+/* Running rows: 3-bar equaliser in the glyph gutter. */
+.eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 10px; }
+.eq i {
+  width: 2px; border-radius: 2px; background: var(--repo-accent, var(--primary)); display: block;
+  transform-origin: bottom; animation: eq 1.15s ease-in-out infinite;
+}
+.eq i:nth-child(1) { height: 5px; animation-delay: -0.2s; }
+.eq i:nth-child(2) { height: 9px; animation-delay: -0.55s; }
+.eq i:nth-child(3) { height: 7px; animation-delay: -0.85s; }
+@keyframes eq { 0%, 100% { transform: scaleY(0.45); opacity: 0.55; } 50% { transform: scaleY(1); opacity: 1; } }
+
+/* Settled rows read quietest of all: hairline list, unread titles slightly bolder. */
+.section.settled .rows { gap: 0; }
+.section.settled .row { border-radius: 0; border-bottom: 1px solid var(--border); padding: 6px 9px; }
+.section.settled .row:last-child { border-bottom-color: transparent; }
+.section.settled .row.read .title { font-weight: 400; color: color-mix(in oklch, var(--foreground) 84%, transparent); }
+
+.footnote {
+  margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--border);
+  color: var(--muted-foreground); font-size: 11px; display: flex; gap: 12px; flex-wrap: wrap;
+}
+.footnote .kbd {
+  font-family: var(--font-mono); font-size: 10px; border: 1px solid var(--border);
+  background: var(--muted); border-radius: 4px; padding: 0 4px; color: var(--muted-foreground);
+}
+
+/* Container queries keep the feed honest inside a narrow content pane (the
+   in-app shell) as well as a narrow window. */
+@container (max-width: 620px) {
+  .ctx { display: none; }
+  .title { max-width: none; flex: 1; }
+}
+@container (max-width: 460px) {
+  .repo { width: 20px; }
+  .repo span { display: none; }
+  .seat, .tag { display: none; }
+}

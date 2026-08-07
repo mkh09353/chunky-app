@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* Tokens lifted from src/mainview/index.css (.dark theme). */
+:root {
+  --background: oklch(0.176 0.014 292);
+  --foreground: oklch(0.965 0.004 300);
+  --card: oklch(0.205 0.016 292);
+  --popover: oklch(0.216 0.018 292);
+  --sidebar: oklch(0.158 0.013 292);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --primary: oklch(0.635 0.204 293);
+  --primary-foreground: oklch(0.99 0.005 300);
+  --secondary: oklch(1 0 0 / 5%);
+  --muted: oklch(1 0 0 / 4.5%);
+  --muted-foreground: oklch(0.72 0.02 296);
+  --accent: oklch(1 0 0 / 7%);
+  --border: oklch(1 0 0 / 8%);
+  --destructive: oklch(0.66 0.2 25);
+  --success: oklch(0.72 0.15 158);
+  --warning: oklch(0.78 0.15 74);
+  --info: oklch(0.7 0.14 250);
+  --radius: 0.7rem;
+  --shadow-color: 292 60% 4%;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100%; background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); font-size: 13px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: -0.01em; }
+
+.wrap { max-width: 860px; margin: 0 auto; padding: 56px 24px 72px; }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 600; letter-spacing: -0.01em; }
+.brand .mark { width: 15px; height: 15px; border-radius: 4px; background: var(--primary); }
+h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 20px 0 8px; }
+.lede { color: var(--muted-foreground); margin: 0 0 6px; max-width: 62ch; }
+.meta { color: var(--muted-foreground); opacity: 0.8; font-size: 12px; margin: 0; }
+
+.grid { display: flex; flex-direction: column; gap: 12px; margin-top: 28px; }
+a.card {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 18px; transition: background 140ms ease, border-color 140ms ease;
+}
+a.card:hover { background: var(--accent); border-color: color-mix(in oklab, var(--primary) 32%, var(--border)); }
+.card-h { display: flex; align-items: baseline; gap: 10px; }
+.card-h h2 { margin: 0; font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; }
+.card-h .arrow { margin-left: auto; color: var(--muted-foreground); }
+.card p { margin: 7px 0 0; color: var(--muted-foreground); max-width: 66ch; }
+.new {
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; flex: none;
+  color: var(--primary-foreground); background: var(--primary);
+}
+.tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 11px; }
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--muted-foreground);
+  border: 1px solid var(--border); background: var(--muted);
+  border-radius: 999px; padding: 2px 8px;
+}
+.dot { width: 7px; height: 7px; border-radius: 999px; display: inline-block; flex: none; }
+.dot-ok { background: var(--success); }
+.dot-pend { background: var(--warning); }
+.dot-info { background: var(--info); }
+.dot-primary { background: var(--primary); }
+
+.notes {
+  margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+.notes h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; color: var(--foreground); text-transform: uppercase; letter-spacing: 0.06em; }
+.notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.notes li { max-width: 74ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brand"><span class="mark"></span><span>Chunky</span></div>
+
+  <h1>Design mockups</h1>
+  <p class="lede">
+    Static explorations of Chunky desktop surfaces. Everything here is plain HTML and CSS with
+    tokens lifted from <span class="mono">src/mainview/index.css</span> — no build step, nothing
+    wired to a server.
+  </p>
+  <p class="meta">Open any page directly, or serve the folder (<span class="mono">python3 -m http.server</span>) and browse from here.</p>
+
+  <div class="grid">
+
+    <a class="card" href="home-feed.html">
+      <div class="card-h">
+        <h2>Home feed &mdash; the surface</h2>
+        <span class="new">new</span>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        The first screen on launch, and the screen you fall back to with no session selected:
+        a compact greeting over a repo-less omnibox, then Needs You (approvals and questions
+        with inline actions), Still running, and Recently settled. Dense single-line rows tuned
+        for a real load &mdash; ~13 sessions across three repos, flat and sorted by urgency, with a
+        colour-coded repo column so cross-repo scanning is instant.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-pend"></span>inline approve / deny</span>
+        <span class="tag"><span class="dot dot-info"></span>clarifying questions</span>
+        <span class="tag"><span class="dot dot-primary"></span>repo-less composer</span>
+        <span class="tag">light + dark toggle</span>
+      </div>
+    </a>
+
+    <a class="card" href="home-feed-in-app.html">
+      <div class="card-h">
+        <h2>Home feed &mdash; in the app shell</h2>
+        <span class="new">new</span>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        The same feed in situ: sidebar with the active repo&rsquo;s session list, repo tabs and
+        branch pill in the 52px top strip, and a new Home button beside search and new-thread
+        in its active state. Shows the placement bet &mdash; Home swaps the workspace panel rather
+        than opening a separate window or a side pane.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-primary"></span>Home button, active state</span>
+        <span class="tag">sidebar + repo tabs</span>
+        <span class="tag">shared CSS with the standalone page</span>
+      </div>
+    </a>
+
+    <a class="card" href="pr-reviews/index.html">
+      <div class="card-h">
+        <h2>PR reviews</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        Three layouts for a GitHub PR surface — sidebar rail with a slide-over, a dedicated
+        board, and a persistent third pane — covering PRs you authored and PRs waiting on your
+        review, with Chunky sessions linked to both.
+      </p>
+      <div class="tags">
+        <span class="tag">3 variants</span>
+        <span class="tag"><span class="dot dot-ok"></span>CI + unresolved comment state</span>
+        <span class="tag">linked sessions</span>
+      </div>
+    </a>
+
+    <a class="card" href="header-space/index.html">
+      <div class="card-h">
+        <h2>Header space</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        What to do with the dead drag region on the right of the 52px top strip in fullscreen:
+        today&rsquo;s baseline plus two alternatives, shown at ~1900px with the sidebar in frame
+        so window-relative centering stays honest.
+      </p>
+      <div class="tags">
+        <span class="tag">baseline + 2 variants</span>
+        <span class="tag">annotated free space</span>
+      </div>
+    </a>
+
+    <a class="card" href="agent-rail.html">
+      <div class="card-h">
+        <h2>Agent rail</h2>
+        <span class="arrow">&rarr;</span>
+      </div>
+      <p>
+        A rail alongside the transcript for delegates and sidekick seats: live runs, tool
+        activity, and the wiring back to the messages that spawned them, with collapse and
+        idle-grouping behaviour.
+      </p>
+      <div class="tags">
+        <span class="tag"><span class="dot dot-primary"></span>live delegate runs</span>
+        <span class="tag">collapsible rail</span>
+      </div>
+    </a>
+
+  </div>
+
+  <div class="notes">
+    <h3>Conventions</h3>
+    <ul>
+      <li>Colour tokens are copied verbatim from <span class="mono">src/mainview/index.css</span>; nothing invents a palette.</li>
+      <li>DM Sans for UI, JetBrains Mono for repo names, paths, and commands — loaded from Google Fonts, with system fallbacks offline.</li>
+      <li>Dark is the default (<span class="mono">class="dark"</span> on <span class="mono">&lt;html&gt;</span>), matching the app; pages that support light flip the same class.</li>
+      <li>Static HTML and CSS only. Any JavaScript is cosmetic — toggles and hover wiring — never a framework or a build step.</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

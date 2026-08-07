@@ -157,8 +157,17 @@ import {
 import { isIntentionalAbort, reconnectDelay, sleep } from "./lib/reconnect"
 import type { AgentEvent, MessageDelivery, SessionDelta } from "@chunky/protocol"
 import { useTheme } from "./lib/theme"
-import { initialState, isStreaming, isTreeIdle, type TranscriptState } from "./lib/transcript"
+import { initialState, isStreaming, isTreeIdle, mainItems, type TranscriptState } from "./lib/transcript"
 import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "./lib/sessionCache"
+import {
+  createPendingSend,
+  dropPendingSend,
+  markPendingSendFailed,
+  samePendingSends,
+  shouldAppendOptimistically,
+  unresolvedPendingSends,
+  type PendingSend,
+} from "./lib/pendingSends"
 import { TranscriptCoalescer } from "./lib/replayCoalescer"
 import { ReplayReconciler } from "./lib/replayReconciler"
 import {
@@ -182,6 +191,13 @@ import {
   sameRepoRows,
 } from "./lib/repoActivity"
 import { ActivityOverlay } from "./components/ActivityOverlay"
+import {
+  buildHomeFeed,
+  homeGoalCandidates,
+  updateBusySince,
+  type FeedRepo,
+} from "./lib/homeFeed"
+import { HomeView } from "./components/HomeView"
 import hornUrl from "./assets/horn.wav"
 
 type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
@@ -212,6 +228,12 @@ const CLONE_LOG_LINES = 8
 /** How long a local apply suppresses the echoed mode.applied notice. */
 const SELF_APPLY_WINDOW_MS = 10_000
 const MIN_COMPLETION_NOTIFY_MS = 3_000
+/** Home's elapsed times are in seconds, so it keeps a faster clock than the
+ *  sidebar's minute heartbeat — but only while it is the surface on screen. */
+const HOME_CLOCK_MS = 5_000
+/** How often Home re-asks which sessions are blocked. One GET per candidate
+ *  session, so this is deliberately slow: a blocked goal is not a race. */
+const HOME_GOAL_SWEEP_MS = 45_000
 /** Let the app settle before looking for servers left over from a previous run. */
 const OLD_SERVER_SCAN_DELAY_MS = 8_000
 
@@ -335,10 +357,29 @@ export function App() {
   const backgroundTracker = useRef(createCompletionTracker())
   const [unreadRepoIds, setUnreadRepoIds] = useState<Set<string>>(new Set())
   // Every repository's rows, published from the same loop that feeds the
-  // sidebar (no extra requests). Only the far-left overview reads this.
+  // sidebar (no extra requests). The far-left overview and Home read this.
   const [repoRows, setRepoRows] = useState<ReadonlyMap<string, SessionSummary[]>>(new Map())
+  // Which surface owns the main panel. Session state, never persisted: Home is
+  // a thing you open, not a mode the app remembers for you. The chat column
+  // stays MOUNTED behind it so a round-trip cannot cost the reader their scroll
+  // position (or a re-attach).
+  const [mainView, setMainView] = useState<"chat" | "home">("chat")
+  // sessionId -> when THIS client first saw the session busy, for Home's
+  // elapsed times. Absent = we started watching mid-run and cannot say.
+  const [busySince, setBusySince] = useState<ReadonlyMap<string, number>>(new Map())
+  // sessionId -> goal, for the sessions Home has asked about. Only `blocked`
+  // produces a row; a failed sweep just leaves the section short.
+  const [homeGoals, setHomeGoals] = useState<ReadonlyMap<string, GoalSnapshot | null>>(new Map())
+  const [homeGoalsLoading, setHomeGoalsLoading] = useState(false)
+  // Home's own clock (seconds-grained, and only ticking while Home is up).
+  const [homeNow, setHomeNow] = useState(() => Date.now())
   const [transcript, setTranscript] = useState<TranscriptState>(initialState)
   const [transcriptLoading, setTranscriptLoading] = useState(false)
+  // Messages posted but not yet echoed by the server, shown straight away so a
+  // send never looks lost. Renderer-side presentation state ONLY: never reduced
+  // into the transcript, never written to the session cache's event log, never
+  // seen by the ReplayReconciler (see lib/pendingSends.ts).
+  const [pendingSends, setPendingSends] = useState<readonly PendingSend[]>([])
   // Replay is in flight: the projection on screen is last-seen state, not live
   // state. Everything that would otherwise claim "running" from the transcript
   // defers to the server's own summary while this is true.
@@ -489,6 +530,9 @@ export function App() {
   // lengthy history can be much larger than a sidebar row.
   const repoSessionCache = useRef(new Map<string | null, SessionSummary[]>())
   const sessionCache = useRef(new SessionCache(20))
+  /** Monotonic source of optimistic row ids. Distinct from mapTranscript's
+   *  `ev-N` ids, so a pending row can never collide with a mapped one. */
+  const pendingSendSeq = useRef(0)
   // Publishes the attached session's projection on a cadence instead of once
   // per event (see lib/replayCoalescer). Owned by the current attachment.
   const coalescer = useRef<TranscriptCoalescer | null>(null)
@@ -682,15 +726,30 @@ export function App() {
     return out
   }, [activeRepoId, sessions, unreadDone, unreadRepoIds, sessionId, settledThreadIds])
 
+  // Which optimistic rows are still worth showing, DERIVED from the transcript
+  // that is actually on screen. Deriving it (rather than deleting the row when
+  // `message.user` arrives) is what makes the swap atomic: the transcript is
+  // published on a cadence, so an event-driven delete would blank the row for
+  // up to a flush interval before the authoritative one appeared.
+  const visiblePendingSends = useMemo(
+    () => unresolvedPendingSends(pendingSends, mainItems(transcript), transcript.queue.entries),
+    [pendingSends, transcript],
+  )
+  // Resolved entries are pruned from state once the derivation says so. Guarded
+  // by identity, so this settles in one pass instead of re-rendering forever.
+  useEffect(() => {
+    if (!samePendingSends(pendingSends, visiblePendingSends)) setPendingSends(visiblePendingSends)
+  }, [pendingSends, visiblePendingSends])
+
   const activeThread: Thread = useMemo(() => {
     if (!live) {
       return demoThreads.find((t) => t.id === demoActiveId) ?? demoThreads[0]!
     }
     const session = sessions.find((s) => s.sessionId === sessionId)
-    const t = buildActiveThread(session, transcript, uiModel.name)
+    const t = buildActiveThread(session, transcript, uiModel.name, visiblePendingSends)
     if (activeRepo) t.projectId = `repo:${activeRepo.id}`
     return t
-  }, [live, demoThreads, demoActiveId, sessions, sessionId, transcript, uiModel.name, activeRepo])
+  }, [live, demoThreads, demoActiveId, sessions, sessionId, transcript, uiModel.name, activeRepo, visiblePendingSends])
 
   const liveStreamingId = useMemo(
     () => (live ? streamingMessageId(activeThread.messages, streaming) : demoStreamingId),
@@ -816,6 +875,11 @@ export function App() {
   // ---- Live: attach SSE (abort on switch, reconcile cached projection with full replay) ----
   const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean }) => {
     const previousId = sessionIdRef.current
+    // Optimistic rows belong to the session they were typed into. A reattach to
+    // the SAME session (reconnect, rewind, server hand-over) keeps them: their
+    // sends are still in flight, and the replay that follows is what resolves
+    // them. Only a genuine switch drops them.
+    if (previousId !== id) setPendingSends([])
     if (previousId) {
       sessionCache.current.set(previousId, {
         // The coalescer's working state is the reduction of EVERY event seen so
@@ -955,6 +1019,11 @@ export function App() {
       if (!isPersistedSessionEvent(ev)) {
         if (ev.type === "session.rewound") {
           sessionCache.current.delete(id)
+          // A rewind throws recent turns away, so the baseline any in-flight
+          // optimistic row was measured against no longer describes this
+          // history. Drop them here rather than leave a row that can never be
+          // matched (the reattach below keeps same-session rows otherwise).
+          setPendingSends([])
           void attachSession(baseUrl, id)
           return
         }
@@ -1602,6 +1671,8 @@ export function App() {
 
   // ---- Actions ----
   const handleNewThread = useCallback(async () => {
+    // A new thread is a transcript to type into; Home cannot show it.
+    setMainView("chat")
     if (!live) {
       stopDemoStream()
       const t: Thread = {
@@ -1838,6 +1909,9 @@ export function App() {
 
   const handleSelectThread = useCallback(
     (id: string) => {
+      // Picking a thread — from the sidebar, the palette or the voice agent —
+      // is a request to look at a transcript, so Home steps aside.
+      setMainView("chat")
       // Selecting a row is an explicit acknowledgement, including when the
       // already-open row was manually marked unread from its context menu.
       setUnreadDone((prev) => {
@@ -2000,6 +2074,101 @@ export function App() {
     [live, repos, repoRows, unreadDone],
   )
 
+  const feedRepos = useMemo<FeedRepo[]>(
+    () => repos.map((repo) => ({ id: repo.id, name: repo.name })),
+    [repos],
+  )
+
+  // The goal sweep runs on its own interval and must read the LATEST rows
+  // without restarting on every 250ms stream delta.
+  const repoRowsRef = useRef(repoRows)
+  useEffect(() => {
+    repoRowsRef.current = repoRows
+  }, [repoRows])
+
+  /** Watch every repository's busy states so Home can say how long a run has
+   *  been going. The completion tracker records the same instant, but only for
+   *  UNSELECTED repos — this covers all of them, and costs no requests. */
+  useEffect(() => {
+    if (!live) return
+    const entries: { sessionId: string; busy: boolean }[] = []
+    for (const rows of repoRows.values()) {
+      for (const session of rows) {
+        entries.push({ sessionId: session.sessionId, busy: isSessionBusy(session) })
+      }
+    }
+    if (entries.length === 0) return
+    setBusySince((prev) => updateBusySince(prev, entries, Date.now()))
+  }, [live, repoRows])
+
+  /** A faster clock than the shelf's, but only while Home is on screen: its
+   *  elapsed times are measured in seconds, and a stopped surface has no
+   *  business running a timer. */
+  useEffect(() => {
+    if (mainView !== "home") return
+    setHomeNow(Date.now())
+    const timer = setInterval(() => setHomeNow(Date.now()), HOME_CLOCK_MS)
+    return () => clearInterval(timer)
+  }, [mainView])
+
+  /** Needs You, v1: sessions whose GOAL is blocked.
+   *
+   *  The protocol has no tool-approval or ask-user state, so a blocked goal is
+   *  the only thing that honestly means "the agent stopped and needs you". It
+   *  is a per-session GET, so this only runs while Home is open, only for idle
+   *  and recent sessions, and re-sweeps on a slow interval. Every request is
+   *  independent: one failing session leaves the others intact and simply
+   *  shortens the section. */
+  useEffect(() => {
+    if (!live || !config || mainView !== "home") return
+    const baseUrl = config.baseUrl
+    let stopped = false
+
+    const sweep = async () => {
+      const candidates = homeGoalCandidates(feedRepos, repoRowsRef.current, { now: Date.now() })
+      if (candidates.length === 0) {
+        if (!stopped) setHomeGoals((prev) => (prev.size === 0 ? prev : new Map()))
+        return
+      }
+      setHomeGoalsLoading(true)
+      const results = await Promise.all(
+        candidates.map(async (candidate) => {
+          try {
+            return [candidate.sessionId, await getGoal(baseUrl, candidate.sessionId)] as const
+          } catch {
+            // A single unreachable session must not blank the section.
+            return null
+          }
+        }),
+      )
+      if (stopped) return
+      setHomeGoals(
+        new Map(results.filter((entry): entry is NonNullable<typeof entry> => entry !== null)),
+      )
+      setHomeGoalsLoading(false)
+    }
+
+    void sweep()
+    const timer = setInterval(() => void sweep(), HOME_GOAL_SWEEP_MS)
+    return () => {
+      stopped = true
+      setHomeGoalsLoading(false)
+      clearInterval(timer)
+    }
+  }, [live, config, mainView, feedRepos])
+
+  /** The Home feed itself — pure shaping over state that already exists. */
+  const homeFeed = useMemo(
+    () =>
+      buildHomeFeed(feedRepos, repoRows, {
+        unread: unreadDone,
+        goals: homeGoals,
+        busySince,
+        now: homeNow,
+      }),
+    [feedRepos, repoRows, unreadDone, homeGoals, busySince, homeNow],
+  )
+
   /** Jump to any session in any repository from the overview.
    *
    *  Acknowledging the row is unconditional: the reader has now seen that it
@@ -2007,6 +2176,9 @@ export function App() {
   const handleOpenActivitySession = useCallback(
     async (id: string, repoId: string) => {
       if (!config) return
+      // Opening a row is leaving Home, whether the click came from the feed or
+      // from the far-left overview.
+      setMainView("chat")
       setUnreadDone((prev) => clearUnreadSession(prev, id))
       if (repoId && repoId !== activeRepoIdRef.current) {
         await handleSelectRepo(repoId, id)
@@ -2086,21 +2258,37 @@ export function App() {
         setSendError("No active session.")
         return
       }
+      // On screen NOW, before the round-trip. A queued send is deliberately not
+      // optimistic: the server holds it without a `message.user` until the
+      // drainer reaches it, and the composer's queue chips already show it.
+      const optimistic = shouldAppendOptimistically(opts.delivery)
+        ? createPendingSend({
+            id: `pending-${++pendingSendSeq.current}`,
+            text,
+            imageCount: opts.images?.length ?? 0,
+            items: mainItems(transcriptRef.current),
+          })
+        : null
+      if (optimistic) setPendingSends((prev) => [...prev, optimistic])
       setSending(true)
       try {
         const blocked = await sendMessage(config.baseUrl, sessionId, text, opts)
         if (blocked?.blocked === "cache-cold") {
+          // The turn did NOT run and nothing was billed, so no echo is ever
+          // coming: drop the row rather than leave it pending forever. The
+          // confirm bar owns the text now, and re-adds a row if it is sent.
+          if (optimistic) setPendingSends((prev) => dropPendingSend(prev, optimistic.id))
           // Explicit confirm bar in the Composer (no silent force-resend).
           setCacheGuard({ text, images: opts.images ?? [], approxTokens: blocked.warning.approxTokens, reason: blocked.warning.reason, delivery: opts.delivery })
         }
         // Refresh session list so title/activity update soon.
         void refreshSessions(config.baseUrl, activeRepoIdRef.current).catch(() => {})
       } catch (err) {
-        if (err instanceof QueueFullError) {
-          setSendError(err.message)
-        } else {
-          setSendError((err as Error).message)
-        }
+        const message = err instanceof QueueFullError ? err.message : (err as Error).message
+        setSendError(message)
+        // The row stays put, marked failed: a message that never reached the
+        // server must not silently vanish from the transcript.
+        if (optimistic) setPendingSends((prev) => markPendingSendFailed(prev, optimistic.id, message))
       } finally {
         setSending(false)
       }
@@ -2494,12 +2682,27 @@ export function App() {
     if (!cacheGuard || !config || !sessionId) return
     const pending = cacheGuard
     setCacheGuard(null)
+    // The confirmed re-send is a send like any other: it gets its optimistic row.
+    const optimistic = shouldAppendOptimistically(pending.delivery)
+      ? createPendingSend({
+          id: `pending-${++pendingSendSeq.current}`,
+          text: pending.text,
+          imageCount: pending.images.length,
+          items: mainItems(transcriptRef.current),
+        })
+      : null
+    if (optimistic) setPendingSends((prev) => [...prev, optimistic])
     setSending(true)
     try {
       const blocked = await sendMessage(config.baseUrl, sessionId, pending.text, { force: true, delivery: pending.delivery, images: pending.images })
-      if (blocked) setSendError("Send blocked by cache guard even after confirmation.")
+      if (blocked) {
+        setSendError("Send blocked by cache guard even after confirmation.")
+        if (optimistic) setPendingSends((prev) => dropPendingSend(prev, optimistic.id))
+      }
     } catch (err) {
-      setSendError((err as Error).message)
+      const message = (err as Error).message
+      setSendError(message)
+      if (optimistic) setPendingSends((prev) => markPendingSendFailed(prev, optimistic.id, message))
     } finally {
       setSending(false)
     }
@@ -2601,6 +2804,7 @@ export function App() {
 
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: "new", label: "New session", hint: "⌘N", group: "Session" },
+    { id: "home", label: "Go Home", hint: "⌘0", group: "Session" },
     ...repos.map((repo) => ({ id: `repo:${repo.id}`, label: `Switch repo: ${repo.name}`, group: "Repositories" })),
     ...sessions.map((session) => ({ id: `session:${session.sessionId}`, label: `Switch session: ${session.title || session.sessionId.slice(0, 8)}`, group: "Sessions" })),
     ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
@@ -2647,6 +2851,7 @@ export function App() {
   const runAction = useCallback(
     (a: PaletteAction) => {
       if (a.id === "new") dispatchAppAction({ type: "new-session" })
+      else if (a.id === "home") setMainView("home")
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
       else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open }) }
@@ -2701,6 +2906,11 @@ export function App() {
       } else if (meta && e.key.toLowerCase() === "n") {
         e.preventDefault()
         void handleNewThread()
+      } else if (meta && !e.shiftKey && !e.altKey && e.key === "0" && !overlayOpen) {
+        // ⌘0 toggles Home. Guarded by `overlayOpen` so a dialog or the palette
+        // keeps the keyboard it owns.
+        e.preventDefault()
+        setMainView((view) => (view === "home" ? "chat" : "home"))
       } else if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "`" || e.code === "Backquote")) {
         // Ctrl+` toggles the terminal drawer (Cmd+T is taken by thread folding).
         e.preventDefault()
@@ -2833,6 +3043,10 @@ export function App() {
           activeThreadId={live ? sessionId ?? "" : demoActiveId}
           onSelectThread={handleSelectThread}
           onNewThread={() => void handleNewThread()}
+          // Home is a live-only surface: there is no cross-repo feed to show
+          // without a server behind it.
+          onOpenHome={live ? () => setMainView("home") : undefined}
+          homeActive={mainView === "home"}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
@@ -2894,7 +3108,16 @@ export function App() {
           />
 
           <section className="content-panel flex min-h-0 min-w-0 flex-1">
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* The chat column stays MOUNTED while Home is up: hiding it costs
+                nothing and preserves the transcript's scroll/follow state, where
+                unmounting would drop the reader back to the bottom. */}
+            <div
+              className={cn(
+                "min-h-0 min-w-0 flex-1 flex-col",
+                mainView === "home" ? "hidden" : "flex",
+              )}
+              aria-hidden={mainView === "home"}
+            >
               {statusBanner}
               <ChatView
                 thread={activeThread}
@@ -2964,6 +3187,16 @@ export function App() {
                 />
               </div>
             </div>
+            {mainView === "home" && (
+              <HomeView
+                feed={homeFeed}
+                repos={feedRepos}
+                now={homeNow}
+                displayName={pickDisplayName(nameOverride, gitUserName)}
+                goalsLoading={homeGoalsLoading}
+                onOpenSession={(id, repoId) => void handleOpenActivitySession(id, repoId)}
+              />
+            )}
             {filesRepoId && !repos.some((repo) => repo.id === filesRepoId) ? null : filesRepoId ? (
               <RepoFilesPane
                 repo={repos.find((repo) => repo.id === filesRepoId)!}

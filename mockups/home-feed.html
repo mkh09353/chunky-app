@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — Home feed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="home-feed.css" />
+<style>
+/* Page-local chrome. The feed itself lives in home-feed.css, shared with
+   home-feed-in-app.html so the two pages cannot drift. */
+.page { height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--sidebar); }
+
+.topbar {
+  flex: none; height: 40px; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; color: var(--sidebar-foreground);
+}
+.lights { display: flex; gap: 7px; margin-right: 6px; }
+.lights i { width: 11px; height: 11px; border-radius: 999px; display: block; opacity: 0.85; }
+.lights i:nth-child(1) { background: oklch(0.66 0.19 25); }
+.lights i:nth-child(2) { background: oklch(0.8 0.15 80); }
+.lights i:nth-child(3) { background: oklch(0.72 0.16 145); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 600; letter-spacing: -0.01em; font-size: 12.5px; }
+.brand .mark { width: 13px; height: 13px; border-radius: 4px; background: var(--primary); }
+.topbar .tabs { display: flex; gap: 2px; margin-left: 10px; min-width: 0; }
+.topbar .tab {
+  padding: 3px 9px; border-radius: 7px; font-size: 12px; color: var(--muted-foreground); cursor: default;
+  white-space: nowrap;
+}
+.topbar .tab.active { color: var(--foreground); background: var(--sidebar-accent); font-weight: 500; }
+.topbar .spacer { margin-left: auto; }
+.ghost {
+  font-family: inherit; font-size: 11px; color: var(--muted-foreground);
+  background: transparent; border: 1px solid var(--border); border-radius: 7px;
+  padding: 2px 8px; cursor: pointer; white-space: nowrap;
+}
+.ghost:hover { background: var(--sidebar-accent); color: var(--foreground); }
+.avatar {
+  width: 21px; height: 21px; border-radius: 999px; display: grid; place-items: center; flex: none;
+  font-size: 10px; font-weight: 600;
+  background: color-mix(in oklch, var(--primary) 22%, transparent);
+  color: color-mix(in oklab, var(--primary) 60%, var(--foreground));
+  border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
+}
+
+/* Inset workspace, mirroring .content-panel in src/mainview/index.css. */
+.panel {
+  flex: 1; min-height: 0; overflow-y: auto;
+  background: var(--background); color: var(--foreground);
+  border-top-left-radius: 24px;
+  box-shadow:
+    inset 1px 1px 0 0 color-mix(in oklch, var(--foreground) 8%, transparent),
+    -8px -4px 24px -16px hsl(var(--shadow-color) / 0.35),
+    0 0 0 1px color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+
+@media (max-width: 720px) {
+  .topbar .tabs { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="topbar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="brand"><span class="mark"></span><span>Chunky</span></div>
+    <div class="tabs">
+      <span class="tab active">Home</span>
+      <span class="tab">chunky-app</span>
+      <span class="tab">chunky</span>
+      <span class="tab">zoo</span>
+    </div>
+    <span class="spacer"></span>
+    <button class="ghost" data-theme-toggle>Light</button>
+    <span class="avatar">MH</span>
+  </div>
+
+  <div class="panel">
+   <div class="aurora">
+    <div class="wrap">
+
+      <!-- 1 · greeting + repo-less omnibox ─────────────────────────────── -->
+      <div class="hero">
+        <h1>What&rsquo;s next, Max?</h1>
+        <p class="sub">
+          Wednesday, 5 August<span class="sep">&middot;</span><b>3 need you</b><span class="sep">&middot;</span>4 running<span class="sep">&middot;</span>3 repos
+        </p>
+
+        <div class="omni">
+          <div class="field">Ask or start work in any repo&hellip;<span class="caret"></span></div>
+          <div class="omni-foot">
+            <span class="chip"><span class="dot" style="background: var(--repo-accent)" data-repo="chunky-app"></span><span class="mono">chunky-app</span><span class="chev">&#9660;</span></span>
+            <button class="icon-btn" title="Attach">&#128206;</button>
+            <button class="icon-btn" title="Voice">&#127908;</button>
+            <span class="spacer"></span>
+            <span class="hint"><b>Build</b><span class="sep">&middot;</span>Sonnet 4.5<span class="sep">&middot;</span>high</span>
+            <button class="send" title="Send">&#8593;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2 · needs you ───────────────────────────────────────────────── -->
+      <div class="section urgent">
+        <div class="section-h">
+          <h2>Needs you</h2>
+          <span class="count hot">3</span>
+          <span class="spacer"></span>
+          <a href="#">Review all &rarr;</a>
+        </div>
+        <div class="rows">
+
+          <div class="row" data-repo="chunky-app">
+            <span class="glyph"><i class="dot dot-warn"></i></span>
+            <span class="repo"><i></i><span>chunky-app</span></span>
+            <span class="title">Relay reconnect fix</span>
+            <span class="tag">Approval</span>
+            <span class="ctx">Run <code>git push --force-with-lease</code> &mdash; rewrites 2 pushed commits</span>
+            <span class="when waiting">4m</span>
+            <span class="actions">
+              <button class="btn btn-primary">Approve</button>
+              <button class="btn btn-danger">Deny</button>
+            </span>
+          </div>
+
+          <div class="row ask" data-repo="chunky">
+            <span class="glyph"><i class="dot dot-ask"></i></span>
+            <span class="repo"><i></i><span>chunky</span></span>
+            <span class="title">Release v0.9.4</span>
+            <span class="tag ask">Question</span>
+            <span class="ctx">&ldquo;Bump <code>@chunky/protocol</code> to 0.9.4 too, or keep it pinned?&rdquo;</span>
+            <span class="when waiting">12m</span>
+            <span class="actions"><button class="btn btn-primary">Reply</button></span>
+          </div>
+
+          <div class="row" data-repo="zoo">
+            <span class="glyph"><i class="dot dot-warn"></i></span>
+            <span class="repo"><i></i><span>zoo</span></span>
+            <span class="title">Inbox triage rules</span>
+            <span class="tag">Approval</span>
+            <span class="ctx">Delete 3 files under <code>src/mainview/lib/zoo/</code> after a merge</span>
+            <span class="when waiting">26m</span>
+            <span class="actions">
+              <button class="btn btn-primary">Approve</button>
+              <button class="btn btn-danger">Deny</button>
+            </span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 3 · still running ───────────────────────────────────────────── -->
+      <div class="section">
+        <div class="section-h">
+          <h2>Still running</h2>
+          <span class="count">4</span>
+        </div>
+        <div class="rows">
+
+          <div class="row" data-repo="chunky-app">
+            <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+            <span class="repo"><i></i><span>chunky-app</span></span>
+            <span class="title">Home feed mockups</span>
+            <span class="seat">frontend</span>
+            <span class="ctx">Writing <code>mockups/home-feed.html</code> &mdash; 4 tool calls</span>
+            <span class="when">3m 12s</span>
+          </div>
+
+          <div class="row" data-repo="chunky">
+            <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+            <span class="repo"><i></i><span>chunky</span></span>
+            <span class="title">Scoreboard seat grouping</span>
+            <span class="seat">backend</span>
+            <span class="ctx">Running <code>bun test src/server/delegation</code> &mdash; 38 / 61</span>
+            <span class="when">18m 04s</span>
+          </div>
+
+          <div class="row" data-repo="zoo">
+            <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+            <span class="repo"><i></i><span>zoo</span></span>
+            <span class="title">Artifact hopper ingest</span>
+            <span class="seat">research</span>
+            <span class="ctx">Normalising 42 screenshots into artifacts &mdash; 31 done</span>
+            <span class="when">6m 48s</span>
+          </div>
+
+          <div class="row" data-repo="chunky-app">
+            <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+            <span class="repo"><i></i><span>chunky-app</span></span>
+            <span class="title">Esc-to-stop focus guard</span>
+            <span class="seat">default</span>
+            <span class="ctx">Typechecking after the composer guard edit</span>
+            <span class="when">51s</span>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- 4 · recently settled ────────────────────────────────────────── -->
+      <div class="section settled">
+        <div class="section-h">
+          <h2>Recently settled</h2>
+          <span class="count">6</span>
+          <span class="spacer"></span>
+          <a href="#">Full history &rarr;</a>
+        </div>
+        <div class="rows">
+
+          <div class="row" data-repo="chunky-app">
+            <span class="glyph"><i class="dot dot-unread"></i></span>
+            <span class="repo"><i></i><span>chunky-app</span></span>
+            <span class="title">Composer status line</span>
+            <span class="ctx">Seat details moved into a tooltip; typecheck clean, 42 tests pass</span>
+            <span class="when">24m ago</span>
+          </div>
+
+          <div class="row" data-repo="chunky">
+            <span class="glyph"><i class="dot dot-unread"></i></span>
+            <span class="repo"><i></i><span>chunky</span></span>
+            <span class="title">SSE replay dedupe</span>
+            <span class="ctx">Duplicate tool events fixed by keying the reducer on runId + seq</span>
+            <span class="when">1h ago</span>
+          </div>
+
+          <div class="row" data-repo="zoo">
+            <span class="glyph"><i class="dot dot-unread"></i></span>
+            <span class="repo"><i></i><span>zoo</span></span>
+            <span class="title">Needs-you inbox default</span>
+            <span class="ctx">Needs You is the landing tab, with backlinks to source artifacts</span>
+            <span class="when">3h ago</span>
+          </div>
+
+          <div class="row read" data-repo="chunky-app">
+            <span class="glyph"><i class="dot dot-ok"></i></span>
+            <span class="repo"><i></i><span>chunky-app</span></span>
+            <span class="title">Traffic light reposition</span>
+            <span class="ctx">Native positions reapply on resize and fullscreen; failures swallowed</span>
+            <span class="when">5h ago</span>
+          </div>
+
+          <div class="row read" data-repo="chunky">
+            <span class="glyph"><i class="dot dot-ok"></i></span>
+            <span class="repo"><i></i><span>chunky</span></span>
+            <span class="title">Seat scoreboard migration</span>
+            <span class="ctx">Nullable seat column added; 61 server tests green</span>
+            <span class="when">Yesterday</span>
+          </div>
+
+          <div class="row read" data-repo="zoo">
+            <span class="glyph"><i class="dot dot-idle"></i></span>
+            <span class="repo"><i></i><span>zoo</span></span>
+            <span class="title">Source artifact backlinks</span>
+            <span class="ctx">Insight quotes link back to the transcript span they came from</span>
+            <span class="when">Yesterday</span>
+          </div>
+
+        </div>
+      </div>
+
+      <div class="footnote">
+        <span><span class="kbd">&#8984;K</span> command palette</span>
+        <span><span class="kbd">&#8984;&#8629;</span> send from anywhere</span>
+        <span><span class="kbd">A</span> approve the top request</span>
+        <span>See it in the shell &rarr; <a href="home-feed-in-app.html" style="color: var(--primary)">home-feed-in-app.html</a></span>
+      </div>
+
+    </div>
+   </div>
+  </div>
+
+</div>
+
+<script>
+// Cosmetic only: flip the .dark class the way lib/theme.ts does in the app.
+(function () {
+  var btn = document.querySelector("[data-theme-toggle]");
+  btn.addEventListener("click", function () {
+    var dark = document.documentElement.classList.toggle("dark");
+    btn.textContent = dark ? "Light" : "Dark";
+  });
+})();
+</script>
+</body>
+</html>

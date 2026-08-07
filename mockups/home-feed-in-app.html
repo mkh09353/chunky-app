@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Chunky — Home feed in the app shell</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="home-feed.css" />
+<style>
+/* ── app shell ───────────────────────────────────────────────────────────────
+   Loose restatement of the real shell: L-shaped sidebar + top strip in the
+   sidebar surface (.shell-chrome), with the workspace inset on top of it
+   (.content-panel, 24px top-left radius). Home swaps that workspace. */
+.frame { height: 100%; display: flex; flex-direction: column; overflow: hidden; background: var(--sidebar); }
+.shell {
+  flex: 1; min-height: 0; display: flex; overflow: hidden;
+  background: var(--sidebar); color: var(--sidebar-foreground);
+}
+
+/* ── sidebar ─────────────────────────────────────────────────────────────── */
+.side { width: 272px; flex: none; display: flex; flex-direction: column; min-height: 0; }
+
+.side-head {
+  flex: none; padding: 10px 12px 6px; display: flex; align-items: center; gap: 8px;
+  background-image:
+    radial-gradient(115% 90% at 22% -30%, color-mix(in oklch, var(--primary) 30%, transparent), transparent 62%),
+    radial-gradient(90% 80% at 92% -20%, color-mix(in oklch, var(--info) 18%, transparent), transparent 58%);
+  -webkit-mask-image: linear-gradient(to bottom, black 0%, black 30%, transparent 96%);
+  mask-image: linear-gradient(to bottom, black 0%, black 30%, transparent 96%);
+}
+.lights { display: flex; gap: 7px; }
+.lights i { width: 11px; height: 11px; border-radius: 999px; display: block; opacity: 0.9; }
+.lights i:nth-child(1) { background: oklch(0.66 0.19 25); }
+.lights i:nth-child(2) { background: oklch(0.8 0.15 80); }
+.lights i:nth-child(3) { background: oklch(0.72 0.16 145); }
+
+.side-brand { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 14px 8px; }
+.side-brand .mark {
+  width: 26px; height: 26px; border-radius: 8px; background: var(--primary);
+  box-shadow: 0 2px 5px color-mix(in oklch, var(--primary) 28%, transparent);
+}
+.side-brand .name { font-weight: 600; font-size: 14px; letter-spacing: -0.015em; }
+.side-brand .beta {
+  font-size: 9.5px; font-weight: 500; padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in oklch, var(--primary) 15%, transparent);
+  color: color-mix(in oklab, var(--primary) 72%, var(--foreground));
+}
+
+/* Search + Home + new thread. The Home button is the new control: it sits in the
+   same cluster and is shown active, because Home has replaced the workspace. */
+.side-tools { flex: none; display: flex; align-items: center; gap: 7px; padding: 2px 12px 10px; }
+.search {
+  position: relative; flex: 1; min-width: 0; height: 30px;
+  display: flex; align-items: center; gap: 6px; padding: 0 8px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in oklch, var(--background) 55%, transparent);
+  color: color-mix(in oklch, var(--muted-foreground) 90%, transparent); font-size: 12px;
+}
+.search .kbd {
+  margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; padding: 1px 4px;
+  border: 1px solid var(--border); border-radius: 4px; color: var(--muted-foreground);
+}
+.tool-btn {
+  width: 30px; height: 30px; flex: none; border-radius: 8px; cursor: pointer;
+  display: grid; place-items: center; font-size: 13px;
+  border: 1px solid var(--border); background: color-mix(in oklch, var(--background) 55%, transparent);
+  color: var(--muted-foreground);
+}
+.tool-btn:hover { background: var(--sidebar-accent); color: var(--foreground); }
+.tool-btn.active {
+  background: color-mix(in oklch, var(--primary) 18%, transparent);
+  border-color: color-mix(in oklch, var(--primary) 45%, transparent);
+  color: color-mix(in oklab, var(--primary) 70%, var(--foreground));
+}
+.tool-btn.active::after {
+  content: ""; position: absolute; width: 4px; height: 4px; border-radius: 999px;
+  background: var(--primary); transform: translate(11px, 11px);
+}
+
+.side-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 12px; }
+/* Home is up, so nothing in the repo-scoped list is selected and the whole list
+   recedes a step — it is context, not the thing you are looking at. */
+.side-list.unfocused { opacity: 0.62; }
+.side-list.unfocused:hover { opacity: 0.9; }
+.side-note {
+  margin: 2px 6px 6px; padding: 5px 8px; border-radius: 7px;
+  border: 1px dashed color-mix(in oklch, var(--primary) 30%, var(--border));
+  color: var(--muted-foreground); font-size: 10.5px; line-height: 1.35;
+}
+.side-label {
+  padding: 10px 6px 5px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted-foreground);
+  display: flex; align-items: center; gap: 6px;
+}
+.side-label .n { font-weight: 500; letter-spacing: 0; opacity: 0.7; }
+.thread {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px;
+  cursor: default; min-width: 0;
+}
+.thread:hover { background: var(--sidebar-accent); }
+.thread .t-body { flex: 1; min-width: 0; }
+.thread .t-title {
+  font-size: 12.5px; letter-spacing: -0.008em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread .t-sub {
+  font-size: 10.5px; color: var(--muted-foreground);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread .t-when { flex: none; font-size: 10px; color: var(--muted-foreground); font-variant-numeric: tabular-nums; }
+.thread.dim .t-title { color: color-mix(in oklch, var(--foreground) 82%, transparent); }
+.archived {
+  margin-top: 8px; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  font-size: 11.5px; color: var(--muted-foreground); border-radius: 8px; cursor: default;
+}
+.archived:hover { background: var(--sidebar-accent); }
+
+/* ── right column: top strip + workspace ─────────────────────────────────── */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.topbar {
+  flex: none; height: 52px; display: flex; align-items: center; gap: 10px;
+  padding: 0 14px; min-width: 0;
+}
+.rtabs { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.rtab {
+  display: flex; align-items: center; gap: 6px; max-width: 11rem; padding: 4px 10px;
+  border-radius: 8px; font-size: 12px; color: var(--muted-foreground); cursor: default;
+  white-space: nowrap; overflow: hidden;
+}
+.rtab i { width: 6px; height: 6px; border-radius: 999px; flex: none; background: var(--repo-accent, var(--muted-foreground)); opacity: 0.85; }
+.rtab span { overflow: hidden; text-overflow: ellipsis; }
+.rtab:hover { background: var(--sidebar-accent); }
+.rtab.active {
+  position: relative; background: var(--sidebar-accent); color: var(--foreground); font-weight: 500;
+}
+.rtab.active::after {
+  content: ""; position: absolute; left: 10px; right: 10px; bottom: 1px; height: 2px;
+  border-radius: 2px; background: var(--primary);
+}
+/* While Home owns the panel the repo tab is still "where you were", so its
+   underline is muted rather than lit. */
+.rtabs.home .rtab.active { background: color-mix(in oklch, var(--sidebar-accent) 55%, transparent); color: var(--muted-foreground); }
+.rtabs.home .rtab.active::after { background: color-mix(in oklch, var(--primary) 34%, transparent); }
+.rtab.add { color: var(--muted-foreground); padding: 4px 8px; }
+.branch {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; padding: 3px 9px;
+  border-radius: 999px; border: 1px solid var(--border); background: var(--sidebar-accent);
+  font-size: 11px; color: var(--muted-foreground); white-space: nowrap; flex: none;
+}
+.branch .mono { font-size: 10.5px; color: color-mix(in oklch, var(--foreground) 82%, transparent); }
+.topbar .spacer { margin-left: auto; }
+.top-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.top-actions .icon-btn { width: 28px; height: 28px; font-size: 13px; }
+.top-actions .icon-btn:hover { background: var(--sidebar-accent); color: var(--foreground); }
+
+/* The workspace Home swaps into. */
+.panel {
+  flex: 1; min-height: 0; overflow-y: auto;
+  background: var(--background); color: var(--foreground);
+  border-top-left-radius: 24px;
+  box-shadow:
+    inset 1px 1px 0 0 color-mix(in oklch, var(--foreground) 8%, transparent),
+    -8px -4px 24px -16px hsl(var(--shadow-color) / 0.35),
+    0 0 0 1px color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+
+/* Mockup annotation strip, pinned under the shell — commentary about the
+   mockup, deliberately not part of the app chrome above it. */
+.caption {
+  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 16px; border-top: 1px solid var(--border);
+  background: color-mix(in oklch, var(--primary) 6%, var(--sidebar));
+  color: var(--muted-foreground); font-size: 11.5px; line-height: 1.4;
+}
+.caption .key {
+  flex: none; display: inline-flex; align-items: center; gap: 6px; font-weight: 500;
+  color: color-mix(in oklab, var(--primary) 62%, var(--foreground));
+}
+.caption .key .glyph-box {
+  width: 18px; height: 18px; border-radius: 6px; display: grid; place-items: center; font-size: 11px;
+  background: color-mix(in oklch, var(--primary) 18%, transparent);
+  border: 1px solid color-mix(in oklch, var(--primary) 42%, transparent);
+}
+.caption p { margin: 0; min-width: 0; }
+.caption b { color: var(--foreground); font-weight: 500; }
+.caption .spacer { margin-left: auto; }
+.caption a { color: var(--primary); }
+
+/* The sidebar is the whole point of this page (repo-scoped list beside a
+   cross-repo panel), so it narrows rather than disappearing; it only drops out
+   when the window is too small to carry both columns at all. */
+@media (max-width: 1120px) { .side { width: 236px; } }
+@media (max-width: 900px) {
+  .side { width: 196px; }
+  .side-brand { padding: 6px 10px 8px; }
+  .side-tools { padding: 2px 8px 10px; }
+  .branch { display: none; }
+}
+@media (max-width: 820px) { .caption .spacer { display: none; } }
+@media (max-width: 640px) {
+  .side { display: none; }
+  .panel { border-top-left-radius: 0; }
+}
+</style>
+</head>
+<body>
+<div class="frame">
+<div class="shell">
+
+  <!-- ── sidebar: the active repo's sessions ───────────────────────────── -->
+  <aside class="side">
+    <div class="side-head"><div class="lights"><i></i><i></i><i></i></div></div>
+
+    <div class="side-brand">
+      <span class="mark"></span>
+      <span class="name">Chunky</span>
+      <span class="beta">beta</span>
+    </div>
+
+    <div class="side-tools">
+      <div class="search"><span>&#9906;</span><span>Search</span><span class="kbd">&#8984;K</span></div>
+      <button class="tool-btn active" title="Home — everything across repos" style="position: relative">&#8962;</button>
+      <button class="tool-btn" title="New thread &middot; &#8984;N">&#9998;</button>
+    </div>
+
+    <div class="side-list unfocused">
+      <p class="side-note">chunky-app &mdash; nothing selected while Home is up</p>
+      <div class="side-label">In progress <span class="n">3</span></div>
+
+      <div class="thread" data-repo="chunky-app">
+        <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+        <div class="t-body">
+          <div class="t-title">Home feed mockups</div>
+          <div class="t-sub">Writing mockups/home-feed.html</div>
+        </div>
+        <span class="t-when">3m</span>
+      </div>
+
+      <div class="thread" data-repo="chunky-app">
+        <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+        <div class="t-body">
+          <div class="t-title">Esc-to-stop focus guard</div>
+          <div class="t-sub">Typechecking composer guard</div>
+        </div>
+        <span class="t-when">51s</span>
+      </div>
+
+      <div class="thread" data-repo="chunky-app">
+        <span class="glyph"><i class="dot dot-warn"></i></span>
+        <div class="t-body">
+          <div class="t-title">Relay reconnect fix</div>
+          <div class="t-sub">Waiting on your approval</div>
+        </div>
+        <span class="t-when">4m</span>
+      </div>
+
+      <div class="side-label">Settled <span class="n">4</span></div>
+
+      <div class="thread" data-repo="chunky-app">
+        <span class="glyph"><i class="dot dot-unread"></i></span>
+        <div class="t-body">
+          <div class="t-title">Composer status line</div>
+          <div class="t-sub">Seat details moved to a tooltip</div>
+        </div>
+        <span class="t-when">24m</span>
+      </div>
+
+      <div class="thread dim" data-repo="chunky-app">
+        <span class="glyph"><i class="dot dot-ok"></i></span>
+        <div class="t-body">
+          <div class="t-title">Traffic light reposition</div>
+          <div class="t-sub">Reapplies on resize + fullscreen</div>
+        </div>
+        <span class="t-when">5h</span>
+      </div>
+
+      <div class="thread dim" data-repo="chunky-app">
+        <span class="glyph"><i class="dot dot-idle"></i></span>
+        <div class="t-body">
+          <div class="t-title">Repo tab overflow clamp</div>
+          <div class="t-sub">Tabs truncate at 11rem again</div>
+        </div>
+        <span class="t-when">1d</span>
+      </div>
+
+      <div class="thread dim" data-repo="chunky-app">
+        <span class="glyph"><i class="dot dot-idle"></i></span>
+        <div class="t-body">
+          <div class="t-title">Voice HUD polish</div>
+          <div class="t-sub">Client secret refresh on wake</div>
+        </div>
+        <span class="t-when">2d</span>
+      </div>
+
+      <div class="archived"><span>&#9656;</span><span>Archived</span><span class="n">12</span></div>
+    </div>
+  </aside>
+
+  <!-- ── right column ──────────────────────────────────────────────────── -->
+  <div class="main">
+
+    <div class="topbar">
+      <div class="rtabs home">
+        <span class="rtab active" data-repo="chunky-app"><i></i><span>chunky-app</span></span>
+        <span class="rtab" data-repo="chunky"><i></i><span>chunky</span></span>
+        <span class="rtab" data-repo="zoo"><i></i><span>zoo</span></span>
+        <span class="rtab add">+</span>
+      </div>
+      <span class="branch"><span>&#9282;</span><span class="mono">main</span><span>&middot; clean</span></span>
+      <span class="spacer"></span>
+      <div class="top-actions">
+        <button class="icon-btn" title="Browser pane">&#9673;</button>
+        <button class="icon-btn" title="Terminal drawer">&#9647;</button>
+        <button class="icon-btn" data-theme-toggle title="Toggle theme">&#9789;</button>
+        <button class="icon-btn" title="Session menu">&#8943;</button>
+      </div>
+    </div>
+
+    <!-- Home has swapped the workspace; no thread is selected in the sidebar. -->
+    <div class="panel">
+     <div class="aurora">
+      <div class="wrap">
+
+        <div class="hero">
+          <h1>What&rsquo;s next, Max?</h1>
+          <p class="sub">
+            Wednesday, 5 August<span class="sep">&middot;</span><b>3 need you</b><span class="sep">&middot;</span>4 running<span class="sep">&middot;</span>3 repos
+          </p>
+
+          <div class="omni">
+            <div class="field">Ask or start work in any repo&hellip;<span class="caret"></span></div>
+            <div class="omni-foot">
+              <span class="chip"><span class="dot" style="background: var(--repo-accent)" data-repo="chunky-app"></span><span class="mono">chunky-app</span><span class="chev">&#9660;</span></span>
+              <button class="icon-btn" title="Attach">&#128206;</button>
+              <button class="icon-btn" title="Voice">&#127908;</button>
+              <span class="spacer"></span>
+              <span class="hint"><b>Build</b><span class="sep">&middot;</span>Sonnet 4.5<span class="sep">&middot;</span>high</span>
+              <button class="send" title="Send">&#8593;</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- needs you -->
+        <div class="section urgent">
+          <div class="section-h">
+            <h2>Needs you</h2>
+            <span class="count hot">3</span>
+            <span class="spacer"></span>
+            <a href="#">Review all &rarr;</a>
+          </div>
+          <div class="rows">
+
+            <div class="row" data-repo="chunky-app">
+              <span class="glyph"><i class="dot dot-warn"></i></span>
+              <span class="repo"><i></i><span>chunky-app</span></span>
+              <span class="title">Relay reconnect fix</span>
+              <span class="tag">Approval</span>
+              <span class="ctx">Run <code>git push --force-with-lease</code> &mdash; rewrites 2 pushed commits</span>
+              <span class="when waiting">4m</span>
+              <span class="actions">
+                <button class="btn btn-primary">Approve</button>
+                <button class="btn btn-danger">Deny</button>
+              </span>
+            </div>
+
+            <div class="row ask" data-repo="chunky">
+              <span class="glyph"><i class="dot dot-ask"></i></span>
+              <span class="repo"><i></i><span>chunky</span></span>
+              <span class="title">Release v0.9.4</span>
+              <span class="tag ask">Question</span>
+              <span class="ctx">&ldquo;Bump <code>@chunky/protocol</code> to 0.9.4 too, or keep it pinned?&rdquo;</span>
+              <span class="when waiting">12m</span>
+              <span class="actions"><button class="btn btn-primary">Reply</button></span>
+            </div>
+
+            <div class="row" data-repo="zoo">
+              <span class="glyph"><i class="dot dot-warn"></i></span>
+              <span class="repo"><i></i><span>zoo</span></span>
+              <span class="title">Inbox triage rules</span>
+              <span class="tag">Approval</span>
+              <span class="ctx">Delete 3 files under <code>src/mainview/lib/zoo/</code> after a merge</span>
+              <span class="when waiting">26m</span>
+              <span class="actions">
+                <button class="btn btn-primary">Approve</button>
+                <button class="btn btn-danger">Deny</button>
+              </span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- still running -->
+        <div class="section">
+          <div class="section-h">
+            <h2>Still running</h2>
+            <span class="count">4</span>
+          </div>
+          <div class="rows">
+
+            <div class="row" data-repo="chunky-app">
+              <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+              <span class="repo"><i></i><span>chunky-app</span></span>
+              <span class="title">Home feed mockups</span>
+              <span class="seat">frontend</span>
+              <span class="ctx">Writing <code>mockups/home-feed.html</code> &mdash; 4 tool calls</span>
+              <span class="when">3m 12s</span>
+            </div>
+
+            <div class="row" data-repo="chunky">
+              <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+              <span class="repo"><i></i><span>chunky</span></span>
+              <span class="title">Scoreboard seat grouping</span>
+              <span class="seat">backend</span>
+              <span class="ctx">Running <code>bun test src/server/delegation</code> &mdash; 38 / 61</span>
+              <span class="when">18m 04s</span>
+            </div>
+
+            <div class="row" data-repo="zoo">
+              <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+              <span class="repo"><i></i><span>zoo</span></span>
+              <span class="title">Artifact hopper ingest</span>
+              <span class="seat">research</span>
+              <span class="ctx">Normalising 42 screenshots into artifacts &mdash; 31 done</span>
+              <span class="when">6m 48s</span>
+            </div>
+
+            <div class="row" data-repo="chunky-app">
+              <span class="glyph"><span class="eq"><i></i><i></i><i></i></span></span>
+              <span class="repo"><i></i><span>chunky-app</span></span>
+              <span class="title">Esc-to-stop focus guard</span>
+              <span class="seat">default</span>
+              <span class="ctx">Typechecking after the composer guard edit</span>
+              <span class="when">51s</span>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- recently settled -->
+        <div class="section settled">
+          <div class="section-h">
+            <h2>Recently settled</h2>
+            <span class="count">6</span>
+            <span class="spacer"></span>
+            <a href="#">Full history &rarr;</a>
+          </div>
+          <div class="rows">
+
+            <div class="row" data-repo="chunky-app">
+              <span class="glyph"><i class="dot dot-unread"></i></span>
+              <span class="repo"><i></i><span>chunky-app</span></span>
+              <span class="title">Composer status line</span>
+              <span class="ctx">Seat details moved into a tooltip; typecheck clean, 42 tests pass</span>
+              <span class="when">24m ago</span>
+            </div>
+
+            <div class="row" data-repo="chunky">
+              <span class="glyph"><i class="dot dot-unread"></i></span>
+              <span class="repo"><i></i><span>chunky</span></span>
+              <span class="title">SSE replay dedupe</span>
+              <span class="ctx">Duplicate tool events fixed by keying the reducer on runId + seq</span>
+              <span class="when">1h ago</span>
+            </div>
+
+            <div class="row" data-repo="zoo">
+              <span class="glyph"><i class="dot dot-unread"></i></span>
+              <span class="repo"><i></i><span>zoo</span></span>
+              <span class="title">Needs-you inbox default</span>
+              <span class="ctx">Needs You is the landing tab, with backlinks to source artifacts</span>
+              <span class="when">3h ago</span>
+            </div>
+
+            <div class="row read" data-repo="chunky-app">
+              <span class="glyph"><i class="dot dot-ok"></i></span>
+              <span class="repo"><i></i><span>chunky-app</span></span>
+              <span class="title">Traffic light reposition</span>
+              <span class="ctx">Native positions reapply on resize and fullscreen; failures swallowed</span>
+              <span class="when">5h ago</span>
+            </div>
+
+            <div class="row read" data-repo="chunky">
+              <span class="glyph"><i class="dot dot-ok"></i></span>
+              <span class="repo"><i></i><span>chunky</span></span>
+              <span class="title">Seat scoreboard migration</span>
+              <span class="ctx">Nullable seat column added; 61 server tests green</span>
+              <span class="when">Yesterday</span>
+            </div>
+
+            <div class="row read" data-repo="zoo">
+              <span class="glyph"><i class="dot dot-idle"></i></span>
+              <span class="repo"><i></i><span>zoo</span></span>
+              <span class="title">Source artifact backlinks</span>
+              <span class="ctx">Insight quotes link back to the transcript span they came from</span>
+              <span class="when">Yesterday</span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+     </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Annotation strip: commentary on the mockup, not app chrome. -->
+<div class="caption">
+  <span class="key"><span class="glyph-box">&#8962;</span>Home</span>
+  <p>
+    <b>Home swaps the main panel only</b> &mdash; sidebar keeps your last repo; clicking a feed row
+    re-syncs tab + sidebar + transcript.
+  </p>
+  <span class="spacer"></span>
+  <span>Standalone surface: <a href="home-feed.html">home-feed.html</a></span>
+</div>
+</div>
+
+<script>
+// Cosmetic only: flip the .dark class the way lib/theme.ts does in the app.
+(function () {
+  var btn = document.querySelector("[data-theme-toggle]");
+  btn.addEventListener("click", function () {
+    document.documentElement.classList.toggle("dark");
+  });
+})();
+</script>
+</body>
+</html>
