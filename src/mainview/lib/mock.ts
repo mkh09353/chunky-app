@@ -91,6 +91,11 @@ export interface Message {
   model?: string
   /** Number of image attachments sent with a user message, when known. */
   imageCount?: number
+  /** Server-injected message on the user role that no human typed — a detached
+   *  spawn/sidekick/review reporting back, a monitor waking the session. The
+   *  wire item is still a user item; this only says "render it as a notice,
+   *  attributed to `from`", never as a "You" bubble. */
+  notice?: { from: string }
   /** Optimistic user row: posted, not yet echoed by the server. Renderer-side
    *  presentation only — see lib/pendingSends.ts. */
   sending?: boolean

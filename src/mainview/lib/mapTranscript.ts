@@ -150,7 +150,12 @@ export function itemsToMessages(
           id: nextId(),
           role: "user",
           ...(it.imageCount ? { imageCount: it.imageCount } : {}),
-          blocks: [{ type: "text", content: it.from ? `${it.text}\n\n— from ${it.from}` : it.text }],
+          // `from` marks an injection nobody typed (a detached child reporting
+          // back, a monitor waking us). It stays a user-role message on the
+          // wire; carrying the source as structured data lets the view render
+          // it as a muted notice instead of faking a human turn.
+          ...(it.from ? { notice: { from: it.from } } : {}),
+          blocks: [{ type: "text", content: it.text }],
         })
         break
       }
@@ -402,7 +407,10 @@ export function buildActiveThread(
     projectId: `ws:${session.workspace}`,
     title: threadLabel(session.title),
     updated: relativeTime(session.lastActivity),
-    preview: messages.find((m) => m.role === "user")?.blocks[0]?.content?.slice(0, 80) ?? "",
+    // Injected notices are not something a human said, so they never stand in
+    // as the thread's preview line.
+    preview:
+      messages.find((m) => m.role === "user" && !m.notice)?.blocks[0]?.content?.slice(0, 80) ?? "",
     status: streaming
       ? { kind: "working", label: "" }
       : { kind: "idle", ago: relativeTime(session.lastActivity) },

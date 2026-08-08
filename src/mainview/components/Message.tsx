@@ -1,4 +1,5 @@
 import {
+  Bell,
   Bot,
   Brain,
   Check,
@@ -613,7 +614,10 @@ export function MessageView({
   actionsPinned?: boolean
 }) {
   const [copied, setCopied] = useState(false)
-  const isUser = message.role === "user"
+  const notice = message.notice
+  // A notice is still a user-role item on the wire; it is just not something a
+  // human said, so it never wears the "You" bubble.
+  const isUser = message.role === "user" && !notice
   const blocks = message.blocks
 
   const copyAll = () => {
@@ -625,6 +629,28 @@ export function MessageView({
     }
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
+  }
+
+  if (notice) {
+    return (
+      <div className="flex min-w-0 px-1">
+        {/* Indented to the text column (avatar 2rem + gap 0.875rem) so it reads
+            as part of the conversation without claiming a speaker. */}
+        <div className="ml-[2.875rem] flex min-w-0 max-w-[min(72rem,100%)] items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[12.5px] leading-[1.5] text-muted-foreground">
+          <Bell className="mt-[3px] size-3.5 shrink-0 opacity-70" />
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="rounded-full border border-border bg-card/70 px-2 py-0.5 font-medium text-[10.5px] text-muted-foreground">
+              {notice.from}
+            </span>
+            {blocks.map((block, bi) => (
+              <p key={bi} className="min-w-0 whitespace-pre-wrap break-words">
+                {block.content}
+              </p>
+            ))}
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (

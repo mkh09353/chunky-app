@@ -5,7 +5,7 @@ import type { AgentEvent } from "@chunky/protocol"
 import { MAIN, initialState, reduce } from "./transcript"
 import type { TranscriptState } from "./transcript"
 import { anchoredItemIndices, runAnchors } from "./runs"
-import { applyRunAnchors, itemsToMessages, sessionToThread } from "./mapTranscript"
+import { applyRunAnchors, buildActiveThread, itemsToMessages, sessionToThread } from "./mapTranscript"
 import { groupByWorktree, groupKeyOf } from "./sessionGroups"
 import type { MessageBlock } from "./mock"
 
@@ -46,6 +46,51 @@ describe("tool grouping", () => {
         blocks: [{ type: "text", content: "" }],
       },
     ])
+  })
+
+  test("a `from`-tagged user item maps to a notice, not a human bubble", () => {
+    const state = play([
+      { type: "message.user", text: "hi" },
+      {
+        type: "message.user",
+        text: 'Detached child "Audit routes" (run_7) finished.',
+        from: "spawn_thread",
+      },
+    ])
+    const messages = itemsToMessages(state.threads[MAIN]!.items)
+
+    expect(messages).toEqual([
+      { id: "ev-0", role: "user", blocks: [{ type: "text", content: "hi" }] },
+      {
+        id: "ev-1",
+        role: "user",
+        // Still a user-role item on the wire; the source rides as structured
+        // data so the view can render a muted notice.
+        notice: { from: "spawn_thread" },
+        blocks: [{ type: "text", content: 'Detached child "Audit routes" (run_7) finished.' }],
+      },
+    ])
+    // The attribution is never string-appended into the visible text.
+    expect(messages[1]!.blocks[0]!.content).not.toContain("— from")
+  })
+
+  test("an injected notice never becomes the thread preview", () => {
+    const state = play([
+      {
+        type: "message.user",
+        text: 'Detached child "Audit routes" (run_7) finished.',
+        from: "spawn_thread",
+      },
+      { type: "message.user", text: "now ship it" },
+    ])
+    const session = {
+      sessionId: "s1",
+      workspace: "/tmp/repo",
+      title: "repo",
+      lastActivity: Date.now(),
+      running: false,
+    } as unknown as Parameters<typeof buildActiveThread>[0]
+    expect(buildActiveThread(session, state).preview).toBe("now ship it")
   })
 
   test("consecutive bash calls fold into one activity group", () => {

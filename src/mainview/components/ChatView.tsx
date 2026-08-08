@@ -462,7 +462,9 @@ export function ChatView({
   // server's, and only ever re-arms on a genuine append, so scrolling up
   // mid-stream still stays put.
   const userMessageCount = useMemo(
-    () => thread.messages.reduce((n, m) => (m.role === "user" ? n + 1 : n), 0),
+    // Server-injected notices ride the user role but nobody typed them, so they
+    // must not re-arm follow-the-bottom under a reader who scrolled up.
+    () => thread.messages.reduce((n, m) => (m.role === "user" && !m.notice ? n + 1 : n), 0),
     [thread.messages],
   )
   const prevUserMessageCount = useRef(userMessageCount)
