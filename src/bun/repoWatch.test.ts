@@ -139,6 +139,19 @@ describe("fetchRepoDelta", () => {
     expect(result.tags).toEqual(["v1", "v2"])
   })
 
+  it("reports the first tag after an initially tagless baseline", async () => {
+    const fetch = fakeFetch({ "/tags": [{ name: "v1" }] })
+    const result = await fetchRepoDelta({
+      ref: REF,
+      since: NOW - DAY,
+      seenTags: [],
+      deps: { fetch, now: () => NOW },
+    })
+    expect(result.status).toBe("ok")
+    if (result.status !== "ok") return
+    expect(result.delta.newTags).toEqual(["v1"])
+  })
+
   it("skips (never throws) when GitHub rate-limits the very first call", async () => {
     const result = await fetchRepoDelta({
       ref: REF,

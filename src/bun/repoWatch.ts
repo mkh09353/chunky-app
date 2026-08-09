@@ -208,9 +208,10 @@ export async function fetchRepoDelta(params: {
   const tagRows = await fetchList(`${base}/tags?per_page=${PER_PAGE}`)
   const tags = tagRows.map((row) => str(row.name, 200)).filter(Boolean)
   const seen = new Set(params.seenTags ?? [])
-  // First check: everything is "new", which would be noise. Tags only become a
-  // signal once we have a baseline to diff against.
-  const newTags = seen.size === 0 ? [] : tags.filter((tag) => !seen.has(tag))
+  // The successful-check cursor, rather than the tag list, identifies the
+  // first baseline. An initially tagless repository must still report its
+  // first tag on the next check.
+  const newTags = params.since === null ? [] : tags.filter((tag) => !seen.has(tag))
 
   const pullRows = await fetchList(
     `${base}/pulls?state=closed&sort=updated&direction=desc&per_page=${PER_PAGE}`,
