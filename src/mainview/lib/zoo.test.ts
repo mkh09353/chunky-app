@@ -4,6 +4,9 @@
 import { describe, expect, it } from "bun:test"
 import {
   parseAreaResponse,
+  parseWatchCheckResponse,
+  parseWatchesResponse,
+  parseWatchResponse,
   parseAreasResponse,
   parseArtifactResponse,
   parseArtifactsResponse,
@@ -137,9 +140,9 @@ describe("zoo response validation", () => {
     expect(parseArtifactResponse({ ok: true, artifact: { ...artifact, content: 5 } }).ok).toBe(false)
   })
 
-  it("requires a pass id and a non-empty bundle on export", () => {
+  it("requires a pass id and string bundle on export, including an empty watch delta", () => {
     expect(parseExportResponse({ ok: true, passId: "p-1", bundle: "text" }).ok).toBe(true)
-    expect(parseExportResponse({ ok: true, passId: "p-1", bundle: "" }).ok).toBe(false)
+    expect(parseExportResponse({ ok: true, passId: "p-1", bundle: "" }).ok).toBe(true)
     expect(parseExportResponse({ ok: true, bundle: "text" }).ok).toBe(false)
   })
 
@@ -310,5 +313,81 @@ describe("area validation", () => {
       insights: [{ id: "i-1", passId: "p-1", title: "t", summary: "s", evidence: [], areaId: "a-1", createdAt: 1 }],
     })
     expect(insights.ok && insights.insights[0]?.areaId).toBe("a-1")
+  })
+})
+
+// ---- Competitor watch: the wire contract ----------------------------------
+
+describe("watch validation", () => {
+  const watch = {
+    id: "w-1",
+    sourceId: "s-1",
+    owner: "sst",
+    name: "opencode",
+    label: "sst/opencode",
+    lastCheckAt: 5000,
+    lastStatus: "ok",
+    lastNote: "Recorded 1 release",
+    lastArtifactAt: 5000,
+    createdAt: 1000,
+  }
+
+  it("accepts a watch with and without check history", () => {
+    const result = parseWatchesResponse({
+      ok: true,
+      watches: [watch, { id: "w-2", sourceId: "s-2", owner: "openai", name: "codex", label: "openai/codex", createdAt: 2000 }],
+      hour: 8,
+      lastRunAt: 5000,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.watches[0]).toMatchObject({ label: "sst/opencode", lastStatus: "ok" })
+    expect(result.watches[1]?.lastStatus).toBeUndefined()
+    expect(result.hour).toBe(8)
+  })
+
+  it("tolerates a board that has never run a check", () => {
+    const result = parseWatchesResponse({ ok: true, watches: [], hour: 8, lastRunAt: null })
+    expect(result).toEqual({ ok: true, watches: [], hour: 8, lastRunAt: null })
+  })
+
+  it("rejects malformed watches and unknown statuses", () => {
+    const bad = (patch: Record<string, unknown>) => parseWatchResponse({ ok: true, watch: { ...watch, ...patch } }).ok
+    expect(parseWatchResponse({ ok: true, watch }).ok).toBe(true)
+    expect(bad({ label: "" })).toBe(false)
+    expect(bad({ createdAt: "1000" })).toBe(false)
+    expect(bad({ lastStatus: "pending" })).toBe(false)
+    expect(parseWatchesResponse({ ok: true, watches: [watch], hour: "8", lastRunAt: null }).ok).toBe(false)
+  })
+
+  it("validates a check pass, including skips", () => {
+    const result = parseWatchCheckResponse({
+      ok: true,
+      checkedAt: 9000,
+      results: [
+        { watchId: "w-1", label: "sst/opencode", status: "ok", added: 1, note: "Recorded 1 release" },
+        { watchId: "w-2", label: "openai/codex", status: "skipped", added: 0, note: "GitHub rate limit reached" },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.results.map((row) => row.status)).toEqual(["ok", "skipped"])
+    expect(parseWatchCheckResponse({ ok: true, checkedAt: 1, results: [{ watchId: "w", label: "l", status: "nope", added: 0 }] }).ok).toBe(false)
+    expect(parseWatchCheckResponse({ ok: false, error: "busy" })).toEqual({ ok: false, error: "busy" })
+  })
+
+  it("reads the source labels behind an insight's evidence", () => {
+    const result = parseInsightsResponse({
+      ok: true,
+      insights: [
+        { id: "i-1", passId: "p-1", title: "t", summary: "s", evidence: [], sourceLabels: ["sst/opencode"], createdAt: 1 },
+        { id: "i-2", passId: "p-1", title: "t", summary: "s", evidence: [], createdAt: 2 },
+      ],
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.insights[0]?.sourceLabels).toEqual(["sst/opencode"])
+    expect("sourceLabels" in result.insights[1]!).toBe(false)
+    expect(parseInsightsResponse({ ok: true, insights: [{ id: "i-1", passId: "p-1", title: "t", summary: "s", evidence: [], sourceLabels: [7], createdAt: 1 }] }).ok).toBe(false)
   })
 })

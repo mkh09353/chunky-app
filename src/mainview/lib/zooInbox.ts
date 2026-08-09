@@ -31,6 +31,8 @@ export type InboxEntry = {
   insights: ZooInsight[]
   /** Area this decision belongs to; absent means unassigned (shown everywhere). */
   areaId?: string
+  /** Sources the evidence came from — a competitor watch's repo, for instance. */
+  sourceLabels?: string[]
 }
 
 export type InboxInput = {
@@ -208,10 +210,17 @@ export function buildInbox(input: InboxInput): InboxEntry[] {
   for (const [passId, group] of byPass) {
     const at = group.reduce((newest, insight) => Math.max(newest, insight.createdAt), 0)
     const groupArea = group[0]?.areaId
+    // Distinct origins, so a watch's signals can be badged with the repository
+    // they are about rather than reading as anonymous "fresh signals".
+    const labels: string[] = []
+    for (const insight of group) {
+      for (const label of insight.sourceLabels ?? []) if (!labels.includes(label)) labels.push(label)
+    }
     entries.push({
       id: `insights:${passId}`,
       kind: "insights",
       ...(groupArea && group.every((insight) => insight.areaId === groupArea) ? { areaId: groupArea } : {}),
+      ...(labels.length ? { sourceLabels: labels.slice(0, 3) } : {}),
       title: `${plural(group.length, "fresh signal")} with nothing proposed yet`,
       why: "A run recorded these insights and no idea cites them. Synthesize them into proposals, or set them aside.",
       at,

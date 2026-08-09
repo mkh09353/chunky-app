@@ -270,10 +270,48 @@ describe("area repository binding", () => {
           baseUrl="http://localhost:4620"
           canTriage
           insightCount={0}
+          watches={[]}
+          areas={areas}
+          watchHour={8}
+          watchLastRunAt={null}
+          onAssignArea={() => {}}
         />
       </TooltipProvider>,
     )
     expect(html).toContain("Triage backlog")
     expect(html).not.toContain("Select a repository or configure this area&#x27;s repo path")
+  })
+})
+
+describe("competitor watch section", () => {
+  it("renders seeded watches with status, area assignment, and pending synthesis", () => {
+    const now = Date.now()
+    const html = renderToStaticMarkup(
+      <TooltipProvider>
+        <SourcesView
+          status={{ sources: [], artifactCount: 1, insightCount: 0, ideaCount: 0, itemCount: 0, passes: [] }}
+          sources={[]}
+          areaId={null}
+          areaName={null}
+          runs={IDLE_RUNS}
+          elapsed={0}
+          onRun={() => {}}
+          onRefresh={async () => {}}
+          baseUrl="http://localhost:4620"
+          canTriage
+          insightCount={0}
+          watches={[{ id: "w-1", sourceId: "s-1", owner: "pingdotgg", name: "t3code", label: "pingdotgg/t3code", areaId: "a-pay", lastCheckAt: now - 1000, lastStatus: "ok", lastNote: "Recorded 1 tag", lastArtifactAt: now - 1000, createdAt: now - 2000 }]}
+          areas={areas}
+          watchHour={8}
+          watchLastRunAt={now - 1000}
+          onAssignArea={() => {}}
+        />
+      </TooltipProvider>,
+    )
+    expect(html).toContain("Competitor watch")
+    expect(html).toContain("pingdotgg/t3code")
+    expect(html).toContain("Recorded 1 tag")
+    expect(html).toContain("Synthesize new activity")
+    expect(html).toContain("Area: Payments")
   })
 })

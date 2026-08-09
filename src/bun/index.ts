@@ -25,6 +25,7 @@ import {
 import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
+import { createWatchScheduler } from "./watchScheduler"
 import { setSetupStageReporter, SETUP_STAGE_MESSAGE, type SetupStage } from "./setupStatus"
 import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
 import { inspectServers, retireServer, stopServer, type ServerInspection } from "./serverInspection"
@@ -217,6 +218,18 @@ const zoo = createZooManager()
 // The token-guarded loopback service remains dormant until the renderer needs
 // to announce it to the local Chunky server.
 const zooService = createZooService({ manager: zoo })
+const watchScheduler = createWatchScheduler({
+  state: async () => {
+    const state = await zoo.watchState({})
+    return state.ok ? { hour: state.hour, lastCheckAt: state.lastCheckAt } : { hour: 8, lastCheckAt: null }
+  },
+  run: async () => {
+    const state = await zoo.watchState({})
+    if (!state.ok || state.watchCount === 0) return { ok: true as const, results: [], checkedAt: Date.now() }
+    return zoo.checkRepoWatches({})
+  },
+  onError: (error) => console.warn("[zoo] competitor watch check failed:", error),
+})
 
 /**
  * How the editor hand-off reaches the OS. Kept next to the RPC handler (rather
@@ -506,6 +519,26 @@ rpc = createRPC({
     zooUpdateArea: async (params: unknown) => zoo.updateArea(params),
     zooDeleteArea: async (params: unknown) => zoo.deleteArea(params),
     zooAssignArea: async (params: unknown) => zoo.assignArea(params),
+    zooListRepoWatches: async (params: unknown) => zoo.listRepoWatches(params),
+    zooAddRepoWatch: async (params: unknown) => {
+      const result = await zoo.addRepoWatch(params)
+      if (result.ok) void watchScheduler.start().catch(() => {})
+      return result
+    },
+    zooRemoveRepoWatch: async (params: unknown) => zoo.removeRepoWatch(params),
+    zooSetWatchSchedule: async (params: unknown) => {
+      const result = await zoo.setWatchSchedule(params)
+      if (result.ok) await watchScheduler.reschedule()
+      return result
+    },
+    zooCheckRepoWatches: async (params: unknown) => {
+      const body = params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : {}
+      if (typeof body.watchId === "string") return zoo.checkRepoWatches(body)
+      const outcome = await watchScheduler.checkNow()
+      return outcome.ran ? outcome.result : { ok: false as const, error: "A competitor-watch check is already running." }
+    },
+    zooMarkWatchExtracted: async (params: unknown) => zoo.markWatchExtracted(params),
+    zooWatchState: async (params: unknown) => zoo.watchState(params),
     zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),
     zooConnectTranscripts: async (params: unknown) => zoo.connectTranscripts(params),
     zooStartBackfill: async (params: unknown) => zoo.startBackfill(params),
@@ -545,6 +578,11 @@ rpc = createRPC({
     scmPublish: async (params: unknown) => git.scmPublish(params ?? {}),
   },
 })
+
+// Initializing the Zoo is also what creates the four first-run watch sources.
+// Existing stores are migrated in place and never seeded. The scheduler owns
+// catch-up and all later re-arming; GitHub remains entirely in this Bun process.
+void watchScheduler.start().catch((error) => console.warn("[zoo] competitor watch scheduler:", error))
 
 // First-run setup can take minutes (release download → bun install → server
 // start). Push each stage to the webview over the existing fire-and-forget
@@ -590,6 +628,8 @@ win.on("resize", () => {
 
 // Tear down native FFF handles when the process is leaving.
 const cleanup = () => {
+  watchScheduler.stop()
+  zoo.close()
   terminals.destroy()
   destroyFinders()
   void releaseChunkyConnection()

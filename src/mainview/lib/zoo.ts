@@ -8,6 +8,8 @@ import { getRpc, nativeRpcAvailable } from "./rpc"
 import type {
   ZooArea,
   ZooAreaKind,
+  ZooRepoWatch,
+  ZooWatchResult,
   ZooArtifactMeta,
   ZooDecision,
   ZooEvidence,
@@ -24,6 +26,10 @@ import type {
 export type {
   ZooArea,
   ZooAreaKind,
+  ZooRepoWatch,
+  ZooSourceKind,
+  ZooWatchResult,
+  ZooWatchStatus,
   ZooArtifactMeta,
   ZooBackfillState,
   ZooDecision,
@@ -104,8 +110,9 @@ function num(value: unknown): number | null {
 
 const BACKFILL_STATES = new Set(["idle", "running", "done", "error"])
 const PASS_STATES = new Set(["running", "done", "error"])
-const SOURCE_KINDS = new Set<string>(["linear", "transcripts"])
+const SOURCE_KINDS = new Set<string>(["linear", "transcripts", "repo-watch"])
 const IDEA_TYPE_SET = new Set<string>(IDEA_TYPES)
+const WATCH_STATUSES = new Set<string>(["ok", "skipped", "error"])
 const IDEA_STATUSES = new Set<string>(["proposed", "promoted", "dismissed"])
 const ITEM_STAGE_SET = new Set<string>(ITEM_STAGES)
 
@@ -200,6 +207,13 @@ function parseInsight(value: unknown): ZooInsight | null {
     if (!parsed) return null
     evidence.push(parsed)
   }
+  if (row.sourceLabels !== undefined && !Array.isArray(row.sourceLabels)) return null
+  const sourceLabels: string[] = []
+  for (const entry of Array.isArray(row.sourceLabels) ? row.sourceLabels : []) {
+    const label = str(entry)
+    if (!label) return null
+    sourceLabels.push(label)
+  }
   const priority = num(row.priority)
   return {
     id,
@@ -208,6 +222,7 @@ function parseInsight(value: unknown): ZooInsight | null {
     summary,
     ...(priority !== null ? { priority } : {}),
     evidence,
+    ...(sourceLabels.length ? { sourceLabels } : {}),
     ...areaOf(row),
     createdAt,
   }
@@ -355,6 +370,88 @@ export function parseStatusResponse(raw: unknown): ZooResult<ZooStatus> {
   return { ok: true, sources, artifactCount, insightCount, ideaCount, itemCount, passes }
 }
 
+function parseWatch(value: unknown): ZooRepoWatch | null {
+  const row = obj(value)
+  if (!row) return null
+  const id = str(row.id)
+  const sourceId = str(row.sourceId)
+  const owner = str(row.owner)
+  const name = str(row.name)
+  const label = str(row.label)
+  const createdAt = num(row.createdAt)
+  if (!id || !sourceId || !owner || !name || !label || createdAt === null) return null
+  const status = str(row.lastStatus)
+  if (row.lastStatus !== undefined && (!status || !WATCH_STATUSES.has(status))) return null
+  const areaId = str(row.areaId)
+  const lastCheckAt = num(row.lastCheckAt)
+  const lastArtifactAt = num(row.lastArtifactAt)
+  const lastExtractAt = num(row.lastExtractAt)
+  const lastNote = str(row.lastNote)
+  return {
+    id,
+    sourceId,
+    owner,
+    name,
+    label,
+    ...(areaId ? { areaId } : {}),
+    ...(lastCheckAt !== null ? { lastCheckAt } : {}),
+    ...(status ? { lastStatus: status as ZooRepoWatch["lastStatus"] } : {}),
+    ...(lastNote ? { lastNote } : {}),
+    ...(lastArtifactAt !== null ? { lastArtifactAt } : {}),
+    ...(lastExtractAt !== null ? { lastExtractAt } : {}),
+    createdAt,
+  }
+}
+
+function parseWatchResult(value: unknown): ZooWatchResult | null {
+  const row = obj(value)
+  if (!row) return null
+  const watchId = str(row.watchId)
+  const label = str(row.label)
+  const status = str(row.status)
+  const added = num(row.added)
+  if (!watchId || !label || !status || !WATCH_STATUSES.has(status) || added === null) return null
+  const note = str(row.note)
+  return { watchId, label, status: status as ZooWatchResult["status"], added, ...(note ? { note } : {}) }
+}
+
+export function parseWatchesResponse(
+  raw: unknown,
+): ZooResult<{ watches: ZooRepoWatch[]; hour: number; lastRunAt: number | null }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const watches = parseList(body.watches, parseWatch)
+  const hour = num(body.hour)
+  if (!watches || hour === null) return malformed()
+  const lastRunAt = num(body.lastRunAt)
+  return { ok: true, watches, hour, lastRunAt }
+}
+
+export function parseWatchResponse(raw: unknown): ZooResult<{ watch: ZooRepoWatch }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const watch = parseWatch(body.watch)
+  return watch ? { ok: true, watch } : malformed()
+}
+
+export function parseWatchCheckResponse(
+  raw: unknown,
+): ZooResult<{ results: ZooWatchResult[]; checkedAt: number }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const results = parseList(body.results, parseWatchResult)
+  const checkedAt = num(body.checkedAt)
+  if (!results || checkedAt === null) return malformed()
+  return { ok: true, results, checkedAt }
+}
+
+export function parseWatchScheduleResponse(raw: unknown): ZooResult<{ hour: number }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const hour = num(body.hour)
+  return hour === null ? malformed() : { ok: true, hour }
+}
+
 export function parseAreasResponse(raw: unknown): ZooResult<{ areas: ZooArea[] }> {
   const { body, failure } = envelope(raw)
   if (!body) return failure ?? malformed()
@@ -407,7 +504,9 @@ export function parseExportResponse(raw: unknown): ZooResult<{ passId: string; b
   if (!body) return failure ?? malformed()
   const passId = str(body.passId)
   const bundle = body.bundle
-  if (!passId || typeof bundle !== "string" || !bundle.trim()) return malformed()
+  // A source/time-scoped watch export can legitimately have no new artifacts;
+  // runExtraction closes that pass by recording zero insights.
+  if (!passId || typeof bundle !== "string") return malformed()
   return { ok: true, passId, bundle }
 }
 
@@ -518,6 +617,43 @@ export function zooAssignArea(
   return call("zooAssignArea", { kind, id, areaId }, parseOkResponse)
 }
 
+// ---- competitor watch -----------------------------------------------------
+// Every GitHub call happens in the Bun process; these are only the RPC edges.
+
+export function zooListRepoWatches(): Promise<
+  ZooResult<{ watches: ZooRepoWatch[]; hour: number; lastRunAt: number | null }>
+> {
+  return call("zooListRepoWatches", {}, parseWatchesResponse)
+}
+
+/** `repo` is "owner/name" or a GitHub URL; the Bun side is the validator. */
+export function zooAddRepoWatch(
+  repo: string,
+  areaId?: string | null,
+): Promise<ZooResult<{ watch: ZooRepoWatch }>> {
+  return call("zooAddRepoWatch", { repo, ...(areaId ? { areaId } : {}) }, parseWatchResponse)
+}
+
+export function zooRemoveRepoWatch(watchId: string): Promise<ZooResult<Record<never, never>>> {
+  return call("zooRemoveRepoWatch", { watchId }, parseOkResponse)
+}
+
+export function zooSetWatchSchedule(hour: number): Promise<ZooResult<{ hour: number }>> {
+  return call("zooSetWatchSchedule", { hour }, parseWatchScheduleResponse)
+}
+
+/** Check one watch, or every watch when no id is given. */
+export function zooCheckRepoWatches(
+  watchId?: string | null,
+): Promise<ZooResult<{ results: ZooWatchResult[]; checkedAt: number }>> {
+  return call("zooCheckRepoWatches", watchId ? { watchId } : {}, parseWatchCheckResponse)
+}
+
+/** Records that the extraction pass has read this watch's new artifacts. */
+export function zooMarkWatchExtracted(watchId: string): Promise<ZooResult<Record<never, never>>> {
+  return call("zooMarkWatchExtracted", { watchId }, parseOkResponse)
+}
+
 export function zooConnectLinear(
   apiKey: string,
   areaId?: string | null,
@@ -549,10 +685,17 @@ export function zooGetArtifact(id: string): Promise<ZooResult<{ artifact: ZooArt
 export function zooExportForExtraction(
   maxChars?: number,
   areaId?: string | null,
+  /** Narrow the bundle to one source and/or to artifacts newer than a moment. */
+  scope: { sourceId?: string; sinceFetchedAt?: number } = {},
 ): Promise<ZooResult<{ passId: string; bundle: string }>> {
   return call(
     "zooExportForExtraction",
-    { ...(maxChars === undefined ? {} : { maxChars }), ...(areaId ? { areaId } : {}) },
+    {
+      ...(maxChars === undefined ? {} : { maxChars }),
+      ...(areaId ? { areaId } : {}),
+      ...(scope.sourceId ? { sourceId: scope.sourceId } : {}),
+      ...(typeof scope.sinceFetchedAt === "number" ? { sinceFetchedAt: scope.sinceFetchedAt } : {}),
+    },
     parseExportResponse,
   )
 }

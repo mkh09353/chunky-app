@@ -140,6 +140,21 @@ describe("buildInbox", () => {
     ])
   })
 
+  it("carries the origin of a signal group so a watch's card can name the repo", () => {
+    const entries = buildInbox({
+      ideas: [],
+      items: [],
+      insights: [
+        insight({ id: "i-1", passId: "p-1", sourceLabels: ["sst/opencode"] }),
+        insight({ id: "i-2", passId: "p-1", sourceLabels: ["sst/opencode", "openai/codex"] }),
+        insight({ id: "i-3", passId: "p-2" }),
+      ],
+    })
+    const byId = new Map(entries.map((entry) => [entry.id, entry]))
+    expect(byId.get("insights:p-1")?.sourceLabels).toEqual(["sst/opencode", "openai/codex"])
+    expect(byId.get("insights:p-2")?.sourceLabels).toBeUndefined()
+  })
+
   it("returns nothing for an empty board", () => {
     expect(buildInbox({ ideas: [], items: [], insights: [] })).toEqual([])
   })

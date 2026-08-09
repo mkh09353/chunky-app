@@ -7,12 +7,13 @@ import { FolderOpen, LoaderCircle, Plug, RefreshCw, Sparkles } from "lucide-reac
 import { useState, type FormEvent } from "react"
 import { relativeTime } from "~/lib/format"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
-import { zooConnectLinear, zooConnectTranscripts, zooStartBackfill, type ZooSource, type ZooStatus } from "~/lib/zoo"
+import { zooConnectLinear, zooConnectTranscripts, zooStartBackfill, type ZooArea, type ZooRepoWatch, type ZooSource, type ZooStatus } from "~/lib/zoo"
 import type { AreaSelection } from "~/lib/zooAreas"
 import type { ExtractionPhase } from "~/lib/zooExtraction"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { EmptyState, Notice, ViewHeader } from "./parts"
+import { WatchList } from "./WatchList"
 
 export type RunKind = "extraction" | "synthesis" | "triage"
 
@@ -69,6 +70,11 @@ export function SourcesView({
   baseUrl,
   canTriage,
   insightCount,
+  watches,
+  areas,
+  watchHour,
+  watchLastRunAt,
+  onAssignArea,
 }: {
   status: ZooStatus | null
   /** Sources narrowed to the selected area (unassigned ones stay visible). */
@@ -84,6 +90,11 @@ export function SourcesView({
   /** A selected repo or an area repo path can bind the triage session. */
   canTriage: boolean
   insightCount: number
+  watches: ZooRepoWatch[]
+  areas: ZooArea[]
+  watchHour: number
+  watchLastRunAt: number | null
+  onAssignArea: (sourceId: string, areaId: string | null) => void
 }) {
   const [apiKey, setApiKey] = useState("")
   const [folder, setFolder] = useState("")
@@ -91,6 +102,7 @@ export function SourcesView({
   const [error, setError] = useState<string | null>(null)
 
   const artifactCount = status?.artifactCount ?? 0
+  const connected = sources.filter((source) => source.kind !== "repo-watch")
 
   const connectLinear = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -151,15 +163,26 @@ export function SourcesView({
           />
         )}
 
-        {sources.length === 0 ? (
+        <WatchList
+          watches={watches}
+          areas={areas}
+          hour={watchHour}
+          lastRunAt={watchLastRunAt}
+          areaId={areaId}
+          baseUrl={baseUrl}
+          onRefresh={onRefresh}
+          onAssignArea={onAssignArea}
+        />
+
+        {connected.length === 0 ? (
           <EmptyState
             icon={<Plug className="size-5" />}
             title="No sources connected"
-            body="Connect Linear or a folder of transcripts below — the factory reads evidence from them and nothing else."
+            body="Connect Linear, a folder of transcripts, or a competitor repository — the factory reads evidence from them and nothing else."
           />
         ) : (
           <ul className="flex min-w-0 flex-col gap-2">
-            {sources.map((source) => (
+            {connected.map((source) => (
               <li
                 key={source.id}
                 className="flex min-w-0 flex-col gap-1 rounded-xl border border-border/70 bg-card/60 p-3"

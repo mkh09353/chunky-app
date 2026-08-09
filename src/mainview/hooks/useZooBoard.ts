@@ -11,8 +11,10 @@ import {
   zooListIdeas,
   zooListInsights,
   zooListItems,
+  zooListRepoWatches,
   zooStatus,
   type ZooArea,
+  type ZooRepoWatch,
   type ZooIdea,
   type ZooInsight,
   type ZooItem,
@@ -28,6 +30,10 @@ export type ZooBoard = {
   status: ZooStatus | null
   /** Products sharing this one board. Empty is normal, not an error state. */
   areas: ZooArea[]
+  /** Watched competitor repositories, plus the daily check's schedule. */
+  watches: ZooRepoWatch[]
+  watchHour: number
+  watchLastRunAt: number | null
   insights: ZooInsight[]
   ideas: ZooIdea[]
   items: ZooItem[]
@@ -40,6 +46,9 @@ export function useZooBoard(): ZooBoard {
   const [available] = useState(zooAvailable)
   const [status, setStatus] = useState<ZooStatus | null>(null)
   const [areas, setAreas] = useState<ZooArea[]>([])
+  const [watches, setWatches] = useState<ZooRepoWatch[]>([])
+  const [watchHour, setWatchHour] = useState(8)
+  const [watchLastRunAt, setWatchLastRunAt] = useState<number | null>(null)
   const [insights, setInsights] = useState<ZooInsight[]>([])
   const [ideas, setIdeas] = useState<ZooIdea[]>([])
   const [items, setItems] = useState<ZooItem[]>([])
@@ -59,12 +68,13 @@ export function useZooBoard(): ZooBoard {
       setLoading(false)
       return
     }
-    const [next, insightList, ideaList, itemList, areaList] = await Promise.all([
+    const [next, insightList, ideaList, itemList, areaList, watchList] = await Promise.all([
       zooStatus(),
       zooListInsights(),
       zooListIdeas(),
       zooListItems(),
       zooListAreas(),
+      zooListRepoWatches(),
     ])
     if (!alive.current) return
     if (next.ok) {
@@ -84,6 +94,11 @@ export function useZooBoard(): ZooBoard {
     if (ideaList.ok) setIdeas(ideaList.ideas)
     if (itemList.ok) setItems(itemList.items)
     if (areaList.ok) setAreas(areaList.areas)
+    if (watchList.ok) {
+      setWatches(watchList.watches)
+      setWatchHour(watchList.hour)
+      setWatchLastRunAt(watchList.lastRunAt)
+    }
     setLoading(false)
   }, [])
 
@@ -99,5 +114,5 @@ export function useZooBoard(): ZooBoard {
     return () => clearInterval(timer)
   }, [available, backfilling, refresh])
 
-  return { available, status, areas, insights, ideas, items, error, loading, refresh }
+  return { available, status, areas, watches, watchHour, watchLastRunAt, insights, ideas, items, error, loading, refresh }
 }

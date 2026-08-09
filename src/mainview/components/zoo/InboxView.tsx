@@ -120,6 +120,11 @@ export function InboxView({
               )}
               {signals && <Badge className="border-primary/30 bg-primary/10 text-primary">Signals</Badge>}
               {showAreas && entryArea && <AreaBadge name={entryArea} />}
+              {(entry.sourceLabels ?? []).map((label) => (
+                <Badge key={label} className="border-border/70 bg-muted/40 font-mono text-muted-foreground">
+                  {label}
+                </Badge>
+              ))}
               <span className="text-[11px] text-muted-foreground/80">{relativeTime(entry.at)}</span>
             </span>
             <span className="min-w-0 whitespace-pre-wrap break-words font-medium text-[14.5px] text-foreground leading-snug">

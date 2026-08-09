@@ -97,7 +97,7 @@ function clampPriority(value: unknown): number | undefined {
  * half-understood evidence set is worse than none (contrast with the ideas
  * parser in lib/zooSynthesis.ts, which drops bad entries — see the note there).
  */
-export function parseFencedInsights(text: string): ParsedInsights {
+export function parseFencedInsights(text: string, opts: { allowEmpty?: boolean } = {}): ParsedInsights {
   const fenced = parseFencedRows(text)
   if (!fenced.ok) return fenced
   const insights: ZooInsightInput[] = []
@@ -128,7 +128,7 @@ export function parseFencedInsights(text: string): ParsedInsights {
     const priority = clampPriority(row.priority)
     insights.push({ title, summary, ...(priority !== undefined ? { priority } : {}), evidence })
   }
-  if (!insights.length) {
+  if (!insights.length && !opts.allowEmpty) {
     return { ok: false, error: "The model returned an empty insight array." }
   }
   return { ok: true, insights }
@@ -149,6 +149,40 @@ export function buildExtractionPrompt(bundle: string): string {
     "No prose before or after the block. Do not invent artifactIds.",
     "",
     "--- ARTIFACTS ---",
+    bundle,
+  ].join("\n")
+}
+
+/**
+ * The competitor-watch framing of the SAME pass.
+ *
+ * The artifacts are repository activity, so the insight worth recording is not
+ * "they released 1.2" but "they shipped X, here is the link, and here is
+ * whether it applies to us". One prompt swap — everything after it (fence
+ * parsing, evidence checks, recording) is the shared path.
+ */
+export function buildCompetitorPrompt(bundle: string): string {
+  return [
+    "You are reading what COMPARABLE open-source products shipped recently, to",
+    "decide whether any of it should change our plans. Each artifact below is one",
+    "repository's activity in one window, and carries an artifactId.",
+    "",
+    "Record one insight per distinct thing they shipped that a product owner",
+    "should know about. Skip housekeeping: dependency bumps, CI, refactors, typo",
+    "fixes, release chores.",
+    "",
+    'Title: "<owner/repo> shipped <the thing>".',
+    "Summary: what it actually does, the link to read more, and — explicitly —",
+    "whether it plausibly applies to our product and why or why not.",
+    "Priority 1 means we should react soon; 5 means it is context only.",
+    "",
+    "Reply with ONLY a fenced ```json block containing an array of objects:",
+    '{ "title": string, "summary": string, "priority": 1-5 (1 = highest),',
+    '  "evidence": [{ "artifactId": string, "quote": string }] }',
+    "Quote the artifact verbatim as evidence. Do not invent artifactIds.",
+    "If nothing in the window is worth a product decision, reply with [].",
+    "",
+    "--- COMPETITOR ACTIVITY ---",
     bundle,
   ].join("\n")
 }
@@ -293,14 +327,37 @@ export async function runSessionPrompt(opts: {
  * the store via zooFailPass so the pane and the durable record agree.
  */
 export async function runExtraction(
-  opts: { baseUrl?: string | null; maxChars?: number; areaId?: string | null; onPhase?: (phase: ExtractionPhase) => void } = {},
+  opts: {
+    baseUrl?: string | null
+    maxChars?: number
+    areaId?: string | null
+    /** Narrow the pass to one source (a competitor watch reads only itself). */
+    sourceId?: string | null
+    /** Only artifacts fetched after this moment — the watch's last pass. */
+    sinceFetchedAt?: number | null
+    /** Which framing to read the artifacts with. */
+    focus?: "general" | "competitor"
+    onPhase?: (phase: ExtractionPhase) => void
+  } = {},
 ): Promise<ExtractionResult> {
   const phase = (next: ExtractionPhase) => opts.onPhase?.(next)
 
   phase("exporting")
-  const exported = await zooExportForExtraction(opts.maxChars, opts.areaId)
+  const competitor = opts.focus === "competitor"
+  const exported = await zooExportForExtraction(opts.maxChars, opts.areaId, {
+    ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+    ...(typeof opts.sinceFetchedAt === "number" ? { sinceFetchedAt: opts.sinceFetchedAt } : {}),
+  })
   if (!exported.ok) return { ok: false, error: exported.error }
   const { passId, bundle } = exported
+  // Nothing new to read: close the pass cleanly instead of asking a model to
+  // summarize an empty bundle.
+  if (!bundle.trim()) {
+    const empty = await zooRecordInsights(passId, [], opts.areaId)
+    return empty.ok
+      ? { ok: true, passId, insightCount: 0 }
+      : { ok: false, error: empty.error, passId }
+  }
 
   const failPass = async (error: string): Promise<ExtractionResult> => {
     await zooFailPass(passId, error)
@@ -309,14 +366,14 @@ export async function runExtraction(
 
   phase("starting")
   const reply = await runSessionPrompt({
-    prompt: buildExtractionPrompt(bundle),
+    prompt: competitor ? buildCompetitorPrompt(bundle) : buildExtractionPrompt(bundle),
     baseUrl: opts.baseUrl ?? null,
     // The session exists, so the wait for the model starts here.
     onSession: () => phase("thinking"),
   })
   if (!reply.ok) return failPass(reply.error)
 
-  const parsed = parseFencedInsights(reply.text)
+  const parsed = parseFencedInsights(reply.text, { allowEmpty: competitor })
   if (!parsed.ok) return failPass(parsed.error)
 
   phase("recording")

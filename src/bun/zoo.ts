@@ -5,7 +5,15 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { Database } from "bun:sqlite"
 import { stateDir } from "./connectionManager"
-import type { ZooArea, ZooAreaKind, ZooArtifactMeta, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
+import {
+  fetchRepoDelta,
+  formatWatchArtifact,
+  parseRepoRef,
+  repoLabel,
+  type WatchCheckOutcome,
+} from "./repoWatch"
+import { DEFAULT_WATCH_HOUR } from "./watchScheduler"
+import type { ZooArea, ZooAreaKind, ZooArtifactMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
 
 const LINEAR_URL = "https://api.linear.app/graphql"
 const DEFAULT_EXPORT_CHARS = 150_000
@@ -20,10 +28,18 @@ const ITEM_STAGES = new Set<ZooItemStage>(["research", "decision", "building", "
  *  not shard it. */
 const AREA_TABLES: Record<ZooAreaKind, string> = { source: "sources", insight: "insights", idea: "ideas", item: "items" }
 const MAX_AREA_REPOS = 20
+/** Guard rail on a check: 60 unauthenticated GitHub calls/hour, ~6 per watch. */
+const MAX_WATCHES = 25
+export const DEFAULT_REPO_WATCHES = [
+  { owner: "pingdotgg", name: "t3code" },
+  { owner: "craft-ai-agents", name: "craft-agents-oss" },
+  { owner: "Emanuele-web04", name: "synara" },
+  { owner: "get-bb", name: "bb" },
+] as const
 
 type Row = Record<string, unknown>
 type Result<T extends object> = ({ ok: true } & T) | { ok: false; error: string }
-type ZooDependencies = { dbPath?: string; fetch?: typeof fetch }
+type ZooDependencies = { dbPath?: string; fetch?: typeof fetch; githubToken?: string | null; now?: () => number; seedDefaults?: boolean }
 type LinearIssue = { identifier: string; title: string; url?: string | null }
 
 function object(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null }
@@ -31,16 +47,34 @@ function emptyObject(value: unknown): boolean { const body = object(value); retu
 function text(value: unknown, max = 20_000): string | null { return typeof value === "string" && value.trim() && value.length <= max && !value.includes("\0") ? value.trim() : null }
 function number(value: unknown, fallback: number, cap: number): number { const n = typeof value === "number" ? value : Number(value); return Number.isFinite(n) ? Math.max(0, Math.min(Math.floor(n), cap)) : fallback }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : "Unexpected zoo error" }
+function artifactSummary(outcome: Extract<WatchCheckOutcome, { status: "ok" }>): string {
+  const { releases, newTags, pulls, commits } = outcome.delta
+  const parts: string[] = []
+  if (releases.length) parts.push(`${releases.length} release${releases.length === 1 ? "" : "s"}`)
+  if (newTags.length) parts.push(`${newTags.length} tag${newTags.length === 1 ? "" : "s"}`)
+  if (pulls.length) parts.push(`${pulls.length} merged PR${pulls.length === 1 ? "" : "s"}`)
+  if (commits.length) parts.push(`${commits.length} doc commit${commits.length === 1 ? "" : "s"}`)
+  return parts.join(", ") || "no change"
+}
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex") }
 
 export function createZooManager(deps: ZooDependencies = {}) {
   const dbPath = deps.dbPath || join(stateDir(process.env), "zoo.db")
   const request = deps.fetch || fetch
+  // Read once, kept in this closure: the token never leaves the Bun process and
+  // is never written to a note, an artifact, or an error.
+  const githubToken = deps.githubToken !== undefined ? deps.githubToken : process.env.GITHUB_TOKEN || null
+  const clock = deps.now || (() => Date.now())
   let db: Database | undefined
   const activeBackfills = new Set<string>()
+  let activeWatchCheck = false
 
   const database = () => {
     if (db) return db
+    // This is deliberately captured before SQLite opens the path. Defaults are
+    // for a genuinely new board only: an existing empty/migrated database is
+    // user state and must remain untouched.
+    const isNewStore = !existsSync(dbPath)
     mkdirSync(dirname(dbPath), { recursive: true })
     db = new Database(dbPath)
     db.run("PRAGMA journal_mode = WAL"); db.run("PRAGMA foreign_keys = ON")
@@ -76,19 +110,47 @@ export function createZooManager(deps: ZooDependencies = {}) {
     // so adding the column before it would silently drop it again.
     db.run("CREATE TABLE IF NOT EXISTS areas (id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_paths TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL)")
     for (const table of Object.values(AREA_TABLES)) { try { db.run(`ALTER TABLE ${table} ADD COLUMN area_id TEXT`) } catch {} }
+    // Competitor watches. A watch IS a source (kind 'repo-watch'), so its
+    // artifacts flow through the ordinary extraction pipeline; this table only
+    // holds what a source row cannot: the repo, the tag baseline, and the
+    // per-watch check outcome that the scheduler and the UI both read.
+    db.run("CREATE TABLE IF NOT EXISTS repo_watches (id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), owner TEXT NOT NULL, name TEXT NOT NULL, seen_tags TEXT NOT NULL DEFAULT '[]', last_check_at INTEGER, last_status TEXT, last_note TEXT, last_artifact_at INTEGER, last_extract_at INTEGER, created_at INTEGER NOT NULL)")
+    try { db.run("ALTER TABLE repo_watches ADD COLUMN last_attempt_at INTEGER") } catch {}
+    // Enforce the same identity rule as addRepoWatch at the database boundary.
+    // A development build may already have case-only duplicates under the old
+    // case-sensitive index. Keep the oldest active watch, retain every source
+    // and artifact, then install the stronger index without making that board
+    // impossible to open.
+    db.run("DELETE FROM repo_watches WHERE EXISTS (SELECT 1 FROM repo_watches older WHERE older.owner = repo_watches.owner COLLATE NOCASE AND older.name = repo_watches.name COLLATE NOCASE AND older.rowid < repo_watches.rowid)")
+    db.run("DROP INDEX IF EXISTS repo_watches_repo")
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS repo_watches_repo ON repo_watches(owner COLLATE NOCASE, name COLLATE NOCASE)")
+    db.run("CREATE TABLE IF NOT EXISTS zoo_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    if (isNewStore && deps.seedDefaults !== false) {
+      const now = clock()
+      db.transaction(() => {
+        for (const ref of DEFAULT_REPO_WATCHES) {
+          const sourceId = randomUUID(); const watchId = randomUUID(); const label = repoLabel(ref)
+          db!.query("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'repo-watch', ?, '', NULL, ?, 'idle', 0)").run(sourceId, label, now)
+          db!.query("INSERT INTO repo_watches (id, source_id, owner, name, seen_tags, created_at) VALUES (?, ?, ?, ?, '[]', ?)").run(watchId, sourceId, ref.owner, ref.name, now)
+        }
+      })()
+    }
     return db
   }
   const rows = (sql: string, ...args: unknown[]): Row[] => database().query(sql).all(...args) as Row[]
   const one = (sql: string, ...args: unknown[]): Row | undefined => database().query(sql).get(...args) as Row | undefined
   const run = (sql: string, ...args: unknown[]) => database().query(sql).run(...args)
-  const sourceFrom = (row: Row): ZooSource => ({ id: String(row.id), kind: row.kind === "transcripts" ? "transcripts" : "linear", label: String(row.label), ...areaOf(row), createdAt: Number(row.created_at), backfill: { state: row.backfill_state as ZooSource["backfill"]["state"], fetched: Number(row.backfill_fetched), ...(typeof row.backfill_error === "string" && row.backfill_error ? { error: row.backfill_error } : {}), ...(typeof row.backfill_completed_at === "number" ? { completedAt: row.backfill_completed_at } : {}) } })
+  const sourceFrom = (row: Row): ZooSource => ({ id: String(row.id), kind: row.kind === "transcripts" ? "transcripts" : row.kind === "repo-watch" ? "repo-watch" : "linear", label: String(row.label), ...areaOf(row), createdAt: Number(row.created_at), backfill: { state: row.backfill_state as ZooSource["backfill"]["state"], fetched: Number(row.backfill_fetched), ...(typeof row.backfill_error === "string" && row.backfill_error ? { error: row.backfill_error } : {}), ...(typeof row.backfill_completed_at === "number" ? { completedAt: row.backfill_completed_at } : {}) } })
   const artifactFrom = (row: Row): ZooArtifactMeta => ({ id: String(row.id), sourceId: String(row.source_id), kind: String(row.kind), externalId: String(row.external_id), title: String(row.title), ...(typeof row.url === "string" && row.url ? { url: row.url } : {}), fetchedAt: Number(row.fetched_at) })
   const latestArtifacts = (sourceId?: string) => rows(`SELECT a.* FROM artifacts a WHERE ${sourceId ? "a.source_id = ? AND" : ""} NOT EXISTS (SELECT 1 FROM artifacts n WHERE n.source_id = a.source_id AND n.external_id = a.external_id AND (n.fetched_at > a.fetched_at OR (n.fetched_at = a.fetched_at AND n.rowid > a.rowid)))`, ...(sourceId ? [sourceId] : []))
   const count = (table: string) => Number(one(`SELECT COUNT(*) AS count FROM ${table}`)?.count || 0)
-  const pass = (): string => { const id = randomUUID(); run("INSERT INTO passes (id, started_at, status) VALUES (?, ?, 'running')", id, Date.now()); return id }
-  const insertArtifact = (sourceId: string, kind: string, externalId: string, title: string, content: string, url?: string) => {
+  const pass = (): string => { const id = randomUUID(); run("INSERT INTO passes (id, started_at, status) VALUES (?, ?, 'running')", id, clock()); return id }
+  /** Returns false when an identical artifact is already stored (dedupe). */
+  const insertArtifact = (sourceId: string, kind: string, externalId: string, title: string, content: string, url?: string): boolean => {
     const contentHash = hash(content)
-    if (!one("SELECT id FROM artifacts WHERE source_id = ? AND external_id = ? AND content_hash = ?", sourceId, externalId, contentHash)) run("INSERT INTO artifacts (id, source_id, kind, external_id, title, url, content, content_hash, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", randomUUID(), sourceId, kind, externalId, title, url || null, content, contentHash, Date.now())
+    if (one("SELECT id FROM artifacts WHERE source_id = ? AND external_id = ? AND content_hash = ?", sourceId, externalId, contentHash)) return false
+    run("INSERT INTO artifacts (id, source_id, kind, external_id, title, url, content, content_hash, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", randomUUID(), sourceId, kind, externalId, title, url || null, content, contentHash, clock())
+    return true
   }
   /** area_id is nullable everywhere: absent means "unassigned", never an error. */
   const areaOf = (row: Row): { areaId?: string } => (typeof row.area_id === "string" && row.area_id ? { areaId: row.area_id } : {})
@@ -105,6 +167,31 @@ export function createZooManager(deps: ZooDependencies = {}) {
     const out: string[] = []
     for (const entry of value.slice(0, MAX_AREA_REPOS)) { const path = text(entry, 4096); if (!path) return null; out.push(path) }
     return out
+  }
+  const setting = (key: string): string | null => { const row = one("SELECT value FROM zoo_settings WHERE key = ?", key); return row && typeof row.value === "string" ? row.value : null }
+  const putSetting = (key: string, value: string) => run("INSERT INTO zoo_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value)
+  const watchHour = (): number => { const stored = setting("watchHour"); const raw = stored === null ? Number.NaN : Number(stored); return Number.isFinite(raw) && raw >= 0 && raw <= 23 ? Math.floor(raw) : DEFAULT_WATCH_HOUR }
+  const jsonList = (value: unknown): string[] => { try { const parsed: unknown = JSON.parse(String(value || "[]")); return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [] } catch { return [] } }
+  const watchFrom = (row: Row): ZooRepoWatch => ({
+    id: String(row.id),
+    sourceId: String(row.source_id),
+    owner: String(row.owner),
+    name: String(row.name),
+    label: `${String(row.owner)}/${String(row.name)}`,
+    ...(typeof row.area_id === "string" && row.area_id ? { areaId: row.area_id } : {}),
+    ...(typeof row.last_check_at === "number" ? { lastCheckAt: row.last_check_at } : {}),
+    ...(typeof row.last_status === "string" && row.last_status ? { lastStatus: row.last_status as ZooRepoWatch["lastStatus"] } : {}),
+    ...(typeof row.last_note === "string" && row.last_note ? { lastNote: row.last_note } : {}),
+    ...(typeof row.last_artifact_at === "number" ? { lastArtifactAt: row.last_artifact_at } : {}),
+    ...(typeof row.last_extract_at === "number" ? { lastExtractAt: row.last_extract_at } : {}),
+    createdAt: Number(row.created_at),
+  })
+  const watchRows = () => rows("SELECT w.*, s.area_id AS area_id FROM repo_watches w JOIN sources s ON s.id = w.source_id ORDER BY w.created_at, w.rowid")
+  /** Where an insight's evidence came from — a watch's insights can then be
+   *  badged with the repository they are about. */
+  const sourceLabelsOf = (insightId: string): { sourceLabels?: string[] } => {
+    const labels = rows("SELECT DISTINCT s.label AS label FROM evidence e JOIN artifacts a ON a.id = e.artifact_id JOIN sources s ON s.id = a.source_id WHERE e.insight_id = ? LIMIT 4", insightId).map((r) => String(r.label)).filter(Boolean)
+    return labels.length ? { sourceLabels: labels } : {}
   }
   const areaExists = (id: string) => !!one("SELECT id FROM areas WHERE id = ?", id)
   const insightIds = (ideaId: string) => rows("SELECT insight_id FROM idea_insights WHERE idea_id = ? ORDER BY rowid", ideaId).map((r) => String(r.insight_id))
@@ -152,18 +239,21 @@ export function createZooManager(deps: ZooDependencies = {}) {
           run("UPDATE sources SET backfill_fetched = ? WHERE id = ?", fetched, sourceId); if (hasNext && !after) throw new Error("Linear pagination cursor missing")
         }
       }
-      run("UPDATE sources SET backfill_state = 'done', backfill_fetched = ?, backfill_completed_at = ? WHERE id = ?", fetched, Date.now(), sourceId)
+      run("UPDATE sources SET backfill_state = 'done', backfill_fetched = ?, backfill_completed_at = ? WHERE id = ?", fetched, clock(), sourceId)
     } catch (error) { run("UPDATE sources SET backfill_state = 'error', backfill_error = ? WHERE id = ?", errorMessage(error).slice(0, 2000), sourceId) } finally { activeBackfills.delete(sourceId) }
   }
 
   return {
     close: () => { db?.close(); db = undefined },
+    /** Is there a board on disk at all? Lets a caller (the watch scheduler at
+     *  launch) skip work WITHOUT creating zoo.db as a side effect. */
+    hasStore: () => existsSync(dbPath),
     async listAreas(params: unknown): Promise<Result<{ areas: ZooArea[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid areas request" }; return { ok: true, areas: rows("SELECT * FROM areas ORDER BY created_at, rowid").map(areaFrom) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async createArea(params: unknown): Promise<Result<{ area: ZooArea }>> { try {
       const body = object(params); const name = text(body?.name, 200); if (!name) return { ok: false, error: "Invalid area name" }
       const repoPaths = repoPathsOf(body?.repoPaths); if (!repoPaths) return { ok: false, error: "Invalid area repo paths" }
       if (one("SELECT id FROM areas WHERE name = ? COLLATE NOCASE", name)) return { ok: false, error: "An area with that name already exists" }
-      const id = randomUUID(); run("INSERT INTO areas (id, name, repo_paths, created_at) VALUES (?, ?, ?, ?)", id, name, JSON.stringify(repoPaths), Date.now())
+      const id = randomUUID(); run("INSERT INTO areas (id, name, repo_paths, created_at) VALUES (?, ?, ?, ?)", id, name, JSON.stringify(repoPaths), clock())
       return { ok: true, area: areaFrom(one("SELECT * FROM areas WHERE id = ?", id)!) }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async updateArea(params: unknown): Promise<Result<{ area: ZooArea }>> { try {
@@ -200,6 +290,107 @@ export function createZooManager(deps: ZooDependencies = {}) {
       })()
       return { ok: true }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    // ---- competitor watch -------------------------------------------------
+    async listRepoWatches(params: unknown): Promise<Result<{ watches: ZooRepoWatch[]; hour: number; lastRunAt: number | null }>> { try {
+      if (!emptyObject(params)) return { ok: false, error: "Invalid watch list request" }
+      const lastRun = Number(setting("watchLastRunAt"))
+      return { ok: true, watches: watchRows().map(watchFrom), hour: watchHour(), lastRunAt: Number.isFinite(lastRun) && lastRun > 0 ? lastRun : null }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    /** Adding a watch creates its source too — one source per watched repo, so
+     *  its artifacts, its area, and its evidence stay attributable. */
+    async addRepoWatch(params: unknown): Promise<Result<{ watch: ZooRepoWatch }>> { try {
+      const body = object(params); const ref = parseRepoRef(text(body?.repo, 300))
+      if (!ref) return { ok: false, error: "Enter a repository as owner/name" }
+      const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
+      if (one("SELECT id FROM repo_watches WHERE owner = ? COLLATE NOCASE AND name = ? COLLATE NOCASE", ref.owner, ref.name)) return { ok: false, error: "That repository is already watched" }
+      if (Number(one("SELECT COUNT(*) AS count FROM repo_watches")?.count || 0) >= MAX_WATCHES) return { ok: false, error: `A watchlist tops out at ${MAX_WATCHES} repositories` }
+      const label = repoLabel(ref); const sourceId = randomUUID(); const id = randomUUID(); const now = clock()
+      database().transaction(() => {
+        run("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'repo-watch', ?, '', ?, ?, 'idle', 0)", sourceId, label, areaId || null, now)
+        run("INSERT INTO repo_watches (id, source_id, owner, name, seen_tags, created_at) VALUES (?, ?, ?, ?, '[]', ?)", id, sourceId, ref.owner, ref.name, now)
+      })()
+      return { ok: true, watch: watchFrom(one("SELECT w.*, s.area_id AS area_id FROM repo_watches w JOIN sources s ON s.id = w.source_id WHERE w.id = ?", id)!) }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    /** Stops watching but KEEPS the source and everything it taught us — the
+     *  insights already drawn from it still have their evidence. */
+    async removeRepoWatch(params: unknown): Promise<Result<{}>> { try {
+      const id = text(object(params)?.watchId, 200); if (!id || !one("SELECT id FROM repo_watches WHERE id = ?", id)) return { ok: false, error: id ? "Unknown watch" : "Invalid watch id" }
+      run("DELETE FROM repo_watches WHERE id = ?", id)
+      return { ok: true }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async setWatchSchedule(params: unknown): Promise<Result<{ hour: number }>> { try {
+      const raw = object(params)?.hour; const hour = typeof raw === "number" ? raw : Number(raw)
+      if (!Number.isFinite(hour) || hour < 0 || hour > 23) return { ok: false, error: "Pick an hour between 0 and 23" }
+      putSetting("watchHour", String(Math.floor(hour)))
+      return { ok: true, hour: Math.floor(hour) }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    /** State the scheduler arms itself from — persisted, so a relaunch mid-day
+     *  does not re-run a check that already happened. */
+    async watchState(params: unknown): Promise<Result<{ hour: number; lastCheckAt: number | null; watchCount: number }>> { try {
+      if (!emptyObject(params)) return { ok: false, error: "Invalid watch state request" }
+      const lastRun = Number(setting("watchLastRunAt"))
+      return { ok: true, hour: watchHour(), lastCheckAt: Number.isFinite(lastRun) && lastRun > 0 ? lastRun : null, watchCount: Number(one("SELECT COUNT(*) AS count FROM repo_watches")?.count || 0) }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    /**
+     * One check pass: fetch each watch's delta and store it as an artifact.
+     *
+     * A skip or an error records the attempt but LEAVES THE CURSOR ALONE, so a
+     * rate-limited morning is retried later without losing the window. Nothing
+     * here throws: the scheduler must survive every outcome.
+     */
+    async checkRepoWatches(params: unknown): Promise<Result<{ results: ZooWatchResult[]; checkedAt: number }>> { try {
+      if (activeWatchCheck) return { ok: false, error: "A competitor-watch check is already running." }
+      const body = object(params) || {}; const only = body.watchId === undefined ? null : text(body.watchId, 200)
+      if (body.watchId !== undefined && !only) return { ok: false, error: "Invalid watch id" }
+      const targets = watchRows().filter((row) => !only || String(row.id) === only)
+      if (only && !targets.length) return { ok: false, error: "Unknown watch" }
+      activeWatchCheck = true
+      const checkedAt = clock()
+      const results: ZooWatchResult[] = []
+      try { for (const row of targets) {
+        const watch = watchFrom(row)
+        const since = typeof row.last_check_at === "number" ? row.last_check_at : null
+        let outcome: WatchCheckOutcome
+        try {
+          outcome = await fetchRepoDelta({
+            ref: { owner: watch.owner, name: watch.name },
+            since,
+            seenTags: jsonList(row.seen_tags),
+            deps: { fetch: request, token: githubToken, now: clock },
+          })
+        } catch (error) {
+          outcome = { status: "error", note: errorMessage(error) }
+        }
+
+        if (outcome.status === "ok") {
+          let added = 0
+          if (outcome.changed) {
+            const artifact = formatWatchArtifact(outcome.delta)
+            if (insertArtifact(watch.sourceId, "repo-watch", artifact.externalId, artifact.title, artifact.content, `https://github.com/${watch.label}`)) added = 1
+          }
+          const note = outcome.changed ? `Recorded ${artifactSummary(outcome)}` : "No new activity"
+          run("UPDATE repo_watches SET last_check_at = ?, last_attempt_at = ?, last_status = 'ok', last_note = ?, seen_tags = ?" + (added ? ", last_artifact_at = ?" : "") + " WHERE id = ?", outcome.delta.until, checkedAt, note, JSON.stringify(outcome.tags), ...(added ? [outcome.delta.until] : []), watch.id)
+          run("UPDATE sources SET backfill_state = 'done', backfill_fetched = backfill_fetched + ?, backfill_error = NULL, backfill_completed_at = ? WHERE id = ?", added, checkedAt, watch.sourceId)
+          results.push({ watchId: watch.id, label: watch.label, status: "ok", added, note })
+        } else {
+          const status: ZooWatchStatus = outcome.status === "skipped" ? "skipped" : "error"
+          const note = outcome.status === "skipped" && outcome.retryAt ? `${outcome.note} — retry after ${new Date(outcome.retryAt).toISOString()}` : outcome.note
+          run("UPDATE repo_watches SET last_attempt_at = ?, last_status = ?, last_note = ? WHERE id = ?", checkedAt, status, note, watch.id)
+          if (status === "error") run("UPDATE sources SET backfill_state = 'error', backfill_error = ? WHERE id = ?", note.slice(0, 2000), watch.sourceId)
+          results.push({ watchId: watch.id, label: watch.label, status, added: 0, note })
+        }
+      } } finally { activeWatchCheck = false }
+      // Records the PASS, not the per-watch cursors: this is what the scheduler
+      // uses to decide whether a launch needs to catch up.
+      putSetting("watchLastRunAt", String(checkedAt))
+      return { ok: true, results, checkedAt }
+    } catch (e) { activeWatchCheck = false; return { ok: false, error: errorMessage(e) } } },
+    /** The renderer ran the extraction pass over this watch's new artifacts. */
+    async markWatchExtracted(params: unknown): Promise<Result<{}>> { try {
+      const id = text(object(params)?.watchId, 200); if (!id || !one("SELECT id FROM repo_watches WHERE id = ?", id)) return { ok: false, error: id ? "Unknown watch" : "Invalid watch id" }
+      run("UPDATE repo_watches SET last_extract_at = ? WHERE id = ?", clock(), id)
+      return { ok: true }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async status(params: unknown): Promise<Result<{ sources: ZooSource[]; artifactCount: number; insightCount: number; ideaCount: number; itemCount: number; passes: ZooPass[] }>> { try {
       if (!emptyObject(params)) return { ok: false, error: "Invalid status request" }
       const passes = rows("SELECT * FROM passes ORDER BY started_at DESC").map((r): ZooPass => ({ id: String(r.id), startedAt: Number(r.started_at), status: r.status as ZooPass["status"], ...(typeof r.note === "string" && r.note ? { note: r.note } : {}) }))
@@ -210,7 +401,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
       const areaId = text(object(params)?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
       const data = await gql(key, "query ZooViewer { viewer { name organization { name } } }"); const viewer = object(data.viewer); const organization = object(viewer?.organization); const label = text(organization?.name, 500) || text(viewer?.name, 500) || "Linear"
       const existing = one("SELECT * FROM sources WHERE kind = 'linear' ORDER BY created_at LIMIT 1"); const id = existing ? String(existing.id) : randomUUID()
-      if (existing) run("UPDATE sources SET api_key = ?, label = ? WHERE id = ?", key, label, id); else run("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'linear', ?, ?, ?, ?, 'idle', 0)", id, label, key, areaId || null, Date.now())
+      if (existing) run("UPDATE sources SET api_key = ?, label = ? WHERE id = ?", key, label, id); else run("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'linear', ?, ?, ?, ?, 'idle', 0)", id, label, key, areaId || null, clock())
       return { ok: true, source: sourceFrom(one("SELECT * FROM sources WHERE id = ?", id)!) }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async connectTranscripts(params: unknown): Promise<Result<{ source: ZooSource }>> { try {
@@ -218,10 +409,10 @@ export function createZooManager(deps: ZooDependencies = {}) {
       const areaId = text(object(params)?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
       if (!existsSync(path) || !statSync(path).isDirectory()) return { ok: false, error: "Transcript folder does not exist or is not a directory" }
       const existing = one("SELECT * FROM sources WHERE kind = 'transcripts' AND folder = ?", path); const id = existing ? String(existing.id) : randomUUID()
-      if (!existing) run("INSERT INTO sources (id, kind, label, api_key, folder, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'transcripts', ?, '', ?, ?, ?, 'idle', 0)", id, `${basename(path)} · ${path}`, path, areaId || null, Date.now())
+      if (!existing) run("INSERT INTO sources (id, kind, label, api_key, folder, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'transcripts', ?, '', ?, ?, ?, 'idle', 0)", id, `${basename(path)} · ${path}`, path, areaId || null, clock())
       return { ok: true, source: sourceFrom(one("SELECT * FROM sources WHERE id = ?", id)!) }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async startBackfill(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.sourceId, 200); if (!id || !one("SELECT id FROM sources WHERE id = ?", id)) return { ok: false, error: "Unknown source" }; void backfill(id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async startBackfill(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.sourceId, 200); const source = id ? one("SELECT id, kind FROM sources WHERE id = ?", id) : undefined; if (!source) return { ok: false, error: "Unknown source" }; if (source.kind === "repo-watch") return { ok: false, error: "Repository watches are checked, not backfilled" }; void backfill(id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async listArtifacts(params: unknown): Promise<Result<{ artifacts: ZooArtifactMeta[]; total: number }>> { try {
       const body = object(params); if (!body) return { ok: false, error: "Invalid artifact list request" }; const sourceId = body.sourceId === undefined ? undefined : text(body.sourceId, 200); if (body.sourceId !== undefined && !sourceId) return { ok: false, error: "Invalid sourceId" }
       const all = latestArtifacts(sourceId).sort((a, b) => Number(b.fetched_at) - Number(a.fetched_at)); const limit = number(body.limit, 100, 500) || 100; const offset = number(body.offset, 0, Number.MAX_SAFE_INTEGER)
@@ -234,18 +425,24 @@ export function createZooManager(deps: ZooDependencies = {}) {
       // belong to no product yet, so every area may still learn from them.
       const areaId = text(body.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
       const scoped = areaId ? new Set(rows("SELECT id FROM sources WHERE area_id = ? OR area_id IS NULL", areaId).map((r) => String(r.id))) : null
+      // A competitor-watch pass reads ONE source, and only what arrived since it
+      // was last extracted — otherwise every check would re-summarize the lot.
+      const sourceId = body.sourceId === undefined ? undefined : text(body.sourceId, 200)
+      if (body.sourceId !== undefined && !sourceId) return { ok: false, error: "Invalid sourceId" }
+      if (sourceId && !one("SELECT id FROM sources WHERE id = ?", sourceId)) return { ok: false, error: "Unknown source" }
+      const since = body.sinceFetchedAt === undefined ? null : number(body.sinceFetchedAt, 0, Number.MAX_SAFE_INTEGER)
       const passId = pass(); let bundle = ""
-      for (const row of latestArtifacts().filter((row) => !scoped || scoped.has(String(row.source_id))).sort((a, b) => Number(b.fetched_at) - Number(a.fetched_at))) { const header = `\n\n[artifactId: ${row.id}]\nTitle: ${row.title}\n`; const remaining = max - bundle.length - header.length; if (remaining <= 0) break; bundle += header + String(row.content).slice(0, remaining) }
+      for (const row of latestArtifacts(sourceId).filter((row) => (!scoped || scoped.has(String(row.source_id))) && (since === null || Number(row.fetched_at) > since)).sort((a, b) => Number(b.fetched_at) - Number(a.fetched_at))) { const header = `\n\n[artifactId: ${row.id}]\nTitle: ${row.title}\n`; const remaining = max - bundle.length - header.length; if (remaining <= 0) break; bundle += header + String(row.content).slice(0, remaining) }
       return { ok: true, passId, bundle }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async recordInsights(params: unknown): Promise<Result<{ insightCount: number }>> { try {
       const body = object(params); const passId = text(body?.passId, 200); if (!passId || !Array.isArray(body?.insights)) return { ok: false, error: "Invalid insights request" }; if (!one("SELECT id FROM passes WHERE id = ?", passId)) return { ok: false, error: "Unknown pass" }; let insightCount = 0
       const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
-      database().transaction(() => { for (const raw of body.insights as unknown[]) { const item = object(raw); const title = text(item?.title, 2000); const summary = text(item?.summary, 20_000); if (!title || !summary) continue; const id = randomUUID(); const priority = item?.priority === undefined ? null : number(item.priority, 0, 1_000_000); run("INSERT INTO insights (id, pass_id, title, summary, priority, area_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, passId, title, summary, priority, areaId || null, Date.now()); insightCount++; if (Array.isArray(item?.evidence)) for (const rawEvidence of item.evidence) { const evidence = object(rawEvidence); const artifactId = text(evidence?.artifactId, 200); const quote = text(evidence?.quote, 20_000); if (artifactId && quote && one("SELECT id FROM artifacts WHERE id = ?", artifactId)) run("INSERT OR IGNORE INTO evidence (insight_id, artifact_id, quote) VALUES (?, ?, ?)", id, artifactId, quote) } }; run("UPDATE passes SET status = 'done', note = NULL WHERE id = ?", passId) })()
+      database().transaction(() => { for (const raw of body.insights as unknown[]) { const item = object(raw); const title = text(item?.title, 2000); const summary = text(item?.summary, 20_000); if (!title || !summary) continue; const id = randomUUID(); const priority = item?.priority === undefined ? null : number(item.priority, 0, 1_000_000); run("INSERT INTO insights (id, pass_id, title, summary, priority, area_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", id, passId, title, summary, priority, areaId || null, clock()); insightCount++; if (Array.isArray(item?.evidence)) for (const rawEvidence of item.evidence) { const evidence = object(rawEvidence); const artifactId = text(evidence?.artifactId, 200); const quote = text(evidence?.quote, 20_000); if (artifactId && quote && one("SELECT id FROM artifacts WHERE id = ?", artifactId)) run("INSERT OR IGNORE INTO evidence (insight_id, artifact_id, quote) VALUES (?, ?, ?)", id, artifactId, quote) } }; run("UPDATE passes SET status = 'done', note = NULL WHERE id = ?", passId) })()
       return { ok: true, insightCount }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async failPass(params: unknown): Promise<Result<{}>> { try { const body = object(params); const id = text(body?.passId, 200); const note = text(body?.error, 2000); if (!id || !note) return { ok: false, error: "Invalid pass failure" }; if (!one("SELECT id FROM passes WHERE id = ?", id)) return { ok: false, error: "Unknown pass" }; run("UPDATE passes SET status = 'error', note = ? WHERE id = ?", note, id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async listInsights(params: unknown): Promise<Result<{ insights: ZooInsight[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid insights request" }; return { ok: true, insights: rows("SELECT i.* FROM insights i JOIN passes p ON p.id = i.pass_id ORDER BY p.started_at DESC, i.created_at DESC").map((r): ZooInsight => ({ id: String(r.id), passId: String(r.pass_id), title: String(r.title), summary: String(r.summary), ...(typeof r.priority === "number" ? { priority: r.priority } : {}), evidence: rows("SELECT artifact_id, quote FROM evidence WHERE insight_id = ?", r.id).map((e): ZooEvidence => ({ artifactId: String(e.artifact_id), quote: String(e.quote) })), ...areaOf(r), createdAt: Number(r.created_at) })) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async listInsights(params: unknown): Promise<Result<{ insights: ZooInsight[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid insights request" }; return { ok: true, insights: rows("SELECT i.* FROM insights i JOIN passes p ON p.id = i.pass_id ORDER BY p.started_at DESC, i.created_at DESC").map((r): ZooInsight => ({ id: String(r.id), passId: String(r.pass_id), title: String(r.title), summary: String(r.summary), ...(typeof r.priority === "number" ? { priority: r.priority } : {}), evidence: rows("SELECT artifact_id, quote FROM evidence WHERE insight_id = ?", r.id).map((e): ZooEvidence => ({ artifactId: String(e.artifact_id), quote: String(e.quote) })), ...sourceLabelsOf(String(r.id)), ...areaOf(r), createdAt: Number(r.created_at) })) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async exportInsightsForSynthesis(params: unknown): Promise<Result<{ passId: string; bundle: string }>> { try {
       const body = object(params); if (!body) return { ok: false, error: "Invalid synthesis export request" }; const max = number(body.maxChars, DEFAULT_EXPORT_CHARS, MAX_EXPORT_CHARS); if (max < 1) return { ok: false, error: "maxChars must be positive" }
       const areaId = text(body.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
@@ -257,16 +454,16 @@ export function createZooManager(deps: ZooDependencies = {}) {
       const body = object(params); const passId = text(body?.passId, 200); if (!passId || !Array.isArray(body?.ideas)) return { ok: false, error: "Invalid ideas request" }; if (!one("SELECT id FROM passes WHERE id = ?", passId)) return { ok: false, error: "Unknown pass" }; let ideaCount = 0
       const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
       for (const raw of body.ideas as unknown[]) { const idea = object(raw); const type = idea?.type; const title = text(idea?.title, 2000); const rationale = text(idea?.rationale, 20_000); if (typeof type !== "string" || !IDEA_TYPES.has(type as ZooIdeaType)) return { ok: false, error: "Invalid idea type" }; if (!title || !rationale || !Array.isArray(idea?.insightIds)) return { ok: false, error: "Invalid idea" } }
-      database().transaction(() => { for (const raw of body.ideas as unknown[]) { const input = object(raw)!; const id = randomUUID(); run("INSERT INTO ideas (id, pass_id, type, title, rationale, status, area_id, created_at) VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)", id, passId, input.type, text(input.title)!, text(input.rationale)!, areaId || null, Date.now()); ideaCount++; for (const rawId of input.insightIds as unknown[]) { const insightId = text(rawId, 200); if (insightId && one("SELECT id FROM insights WHERE id = ?", insightId)) run("INSERT OR IGNORE INTO idea_insights (idea_id, insight_id) VALUES (?, ?)", id, insightId) } }; run("UPDATE passes SET status = 'done', note = NULL WHERE id = ?", passId) })()
+      database().transaction(() => { for (const raw of body.ideas as unknown[]) { const input = object(raw)!; const id = randomUUID(); run("INSERT INTO ideas (id, pass_id, type, title, rationale, status, area_id, created_at) VALUES (?, ?, ?, ?, ?, 'proposed', ?, ?)", id, passId, input.type, text(input.title)!, text(input.rationale)!, areaId || null, clock()); ideaCount++; for (const rawId of input.insightIds as unknown[]) { const insightId = text(rawId, 200); if (insightId && one("SELECT id FROM insights WHERE id = ?", insightId)) run("INSERT OR IGNORE INTO idea_insights (idea_id, insight_id) VALUES (?, ?)", id, insightId) } }; run("UPDATE passes SET status = 'done', note = NULL WHERE id = ?", passId) })()
       return { ok: true, ideaCount }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async listIdeas(params: unknown): Promise<Result<{ ideas: ZooIdea[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid ideas request" }; return { ok: true, ideas: rows("SELECT * FROM ideas ORDER BY created_at DESC, rowid DESC").map(ideaFrom) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async setIdeaStatus(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const id = text(body?.ideaId, 200); const status = body?.status; if (!id || typeof status !== "string" || !IDEA_STATUSES.has(status as ZooIdeaStatus)) return { ok: false, error: "Invalid idea status" }; if (!one("SELECT id FROM ideas WHERE id = ?", id)) return { ok: false, error: "Unknown idea" }; run("UPDATE ideas SET status = ? WHERE id = ?", status, id); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async createItem(params: unknown): Promise<Result<{ item: ZooItem }>> { try { const ideaId = text(object(params)?.ideaId, 200); const idea = ideaId ? one("SELECT * FROM ideas WHERE id = ?", ideaId) : undefined; if (!idea) return { ok: false, error: "Unknown idea" }; if (idea.item_id) return { ok: false, error: "Idea already has an item" }; const id = randomUUID(); const now = Date.now(); database().transaction(() => { run("INSERT INTO items (id, idea_id, title, stage, area_id, created_at, updated_at) VALUES (?, ?, ?, 'research', ?, ?, ?)", id, ideaId, idea.title, typeof idea.area_id === "string" && idea.area_id ? idea.area_id : null, now, now); run("UPDATE ideas SET status = 'promoted', item_id = ? WHERE id = ?", id, ideaId) })(); return { ok: true, item: itemFrom(one("SELECT * FROM items WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async createItem(params: unknown): Promise<Result<{ item: ZooItem }>> { try { const ideaId = text(object(params)?.ideaId, 200); const idea = ideaId ? one("SELECT * FROM ideas WHERE id = ?", ideaId) : undefined; if (!idea) return { ok: false, error: "Unknown idea" }; if (idea.item_id) return { ok: false, error: "Idea already has an item" }; const id = randomUUID(); const now = clock(); database().transaction(() => { run("INSERT INTO items (id, idea_id, title, stage, area_id, created_at, updated_at) VALUES (?, ?, ?, 'research', ?, ?, ?)", id, ideaId, idea.title, typeof idea.area_id === "string" && idea.area_id ? idea.area_id : null, now, now); run("UPDATE ideas SET status = 'promoted', item_id = ? WHERE id = ?", id, ideaId) })(); return { ok: true, item: itemFrom(one("SELECT * FROM items WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async updateItem(params: unknown): Promise<Result<{ item: ZooItem }>> { try {
       const body = object(params); const id = text(body?.itemId, 200); if (!id || !one("SELECT id FROM items WHERE id = ?", id)) return { ok: false, error: id ? "Unknown item" : "Invalid item id" }; const stage = body?.stage; const session = body?.addSessionId; const decision = body?.addDecision === undefined ? undefined : object(body.addDecision)
       if (stage !== undefined && (typeof stage !== "string" || !ITEM_STAGES.has(stage as ZooItemStage))) return { ok: false, error: "Invalid item stage" }; if (session !== undefined && !text(session, 500)) return { ok: false, error: "Invalid session id" }; const actor = decision?.actor; const note = decision ? text(decision.note, 20_000) : null; if (decision && ((actor !== "user" && actor !== "agent") || !note)) return { ok: false, error: "Invalid decision" }; if (stage === undefined && session === undefined && !decision) return { ok: false, error: "No item update supplied" }
-      database().transaction(() => { if (stage !== undefined) run("UPDATE items SET stage = ? WHERE id = ?", stage, id); if (session !== undefined) run("INSERT OR IGNORE INTO item_sessions (item_id, session_id) VALUES (?, ?)", id, text(session, 500)!); if (decision) run("INSERT INTO item_decisions (id, item_id, at, actor, note) VALUES (?, ?, ?, ?, ?)", randomUUID(), id, Date.now(), actor, note!); run("UPDATE items SET updated_at = ? WHERE id = ?", Date.now(), id) })()
+      database().transaction(() => { if (stage !== undefined) run("UPDATE items SET stage = ? WHERE id = ?", stage, id); if (session !== undefined) run("INSERT OR IGNORE INTO item_sessions (item_id, session_id) VALUES (?, ?)", id, text(session, 500)!); if (decision) run("INSERT INTO item_decisions (id, item_id, at, actor, note) VALUES (?, ?, ?, ?, ?)", randomUUID(), id, clock(), actor, note!); run("UPDATE items SET updated_at = ? WHERE id = ?", clock(), id) })()
       return { ok: true, item: itemFrom(one("SELECT * FROM items WHERE id = ?", id)!) }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async listItems(params: unknown): Promise<Result<{ items: ZooItem[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid items request" }; return { ok: true, items: rows("SELECT * FROM items ORDER BY updated_at DESC, rowid DESC").map(itemFrom) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
@@ -290,7 +487,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
     async moveItem(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const stage = body?.stage; const reason = text(body?.reason, 20_000); if (typeof stage !== "string" || !ITEM_STAGES.has(stage as ZooItemStage) || !reason) return { ok: false, error: "Invalid item move" }; return this.updateItem({ itemId: body?.itemId, stage, addDecision: { actor: "agent", note: `Moved to ${stage}: ${reason}` } }) },
     async promoteIdea(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const reason = text(body?.reason, 20_000); if (!reason) return { ok: false, error: "Invalid promotion reason" }; const created = await this.createItem({ ideaId: body?.ideaId }); if (!created.ok) return created; return this.updateItem({ itemId: created.item.id, addDecision: { actor: "agent", note: `Promoted: ${reason}` } }) },
     async dismissIdea(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const id = text(body?.ideaId, 200); const reason = text(body?.reason, 20_000); if (!id || !reason) return { ok: false, error: "Invalid dismissal" }; if (!one("SELECT id FROM ideas WHERE id = ?", id)) return { ok: false, error: "Unknown idea" }; run("UPDATE ideas SET status = 'dismissed', dismiss_reason = ? WHERE id = ?", reason, id); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async createIdea(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const type = body?.type; const title = text(body?.title, 2000); const rationale = text(body?.rationale, 20_000); if (typeof type !== "string" || !IDEA_TYPES.has(type as ZooIdeaType) || !title || !rationale) return { ok: false, error: "Invalid idea" }; const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }; const id = randomUUID(); database().transaction(() => { run("INSERT INTO ideas (id, pass_id, type, title, rationale, status, area_id, created_at) VALUES (?, NULL, ?, ?, ?, 'proposed', ?, ?)", id, type, title, rationale, areaId || null, Date.now()); if (Array.isArray(body?.insightIds)) for (const raw of body.insightIds) { const insightId = text(raw, 200); if (insightId && one("SELECT id FROM insights WHERE id = ?", insightId)) run("INSERT OR IGNORE INTO idea_insights (idea_id, insight_id) VALUES (?, ?)", id, insightId) } })(); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async createIdea(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const type = body?.type; const title = text(body?.title, 2000); const rationale = text(body?.rationale, 20_000); if (typeof type !== "string" || !IDEA_TYPES.has(type as ZooIdeaType) || !title || !rationale) return { ok: false, error: "Invalid idea" }; const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }; const id = randomUUID(); database().transaction(() => { run("INSERT INTO ideas (id, pass_id, type, title, rationale, status, area_id, created_at) VALUES (?, NULL, ?, ?, ?, 'proposed', ?, ?)", id, type, title, rationale, areaId || null, clock()); if (Array.isArray(body?.insightIds)) for (const raw of body.insightIds) { const insightId = text(raw, 200); if (insightId && one("SELECT id FROM insights WHERE id = ?", insightId)) run("INSERT OR IGNORE INTO idea_insights (idea_id, insight_id) VALUES (?, ?)", id, insightId) } })(); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async addNote(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const note = text(body?.note, 20_000); if (!note) return { ok: false, error: "Invalid note" }; return this.updateItem({ itemId: body?.itemId, addDecision: { actor: "agent", note } }) },
   }
 }
