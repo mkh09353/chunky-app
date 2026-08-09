@@ -13,16 +13,19 @@
 //
 // All arithmetic and chart geometry lives in lib/usage.ts; this file fetches,
 // arranges, and formats.
-import { BarChart3, Loader2, RefreshCw } from "lucide-react"
+import { BarChart3, Clock3, Loader2, RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
+  getProviderQuotas,
   getUsageBreakdown,
   getUsageSeries,
   type UsageFetch,
   type UsageQuery,
 } from "~/lib/api"
 import { cn } from "~/lib/cn"
+import { relativeTime } from "~/lib/format"
 import {
+  asProviderQuotas,
   asUsageBreakdown,
   asUsageSeries,
   bigCostLabel,
@@ -33,6 +36,7 @@ import {
   percent,
   scoreLabel,
   shareLabel,
+  type ProviderQuota,
   type UsageBreakdownResponse,
   type UsageModelRow,
   type UsageSeriesResponse,
@@ -40,12 +44,19 @@ import {
 import {
   chartProviderKeys,
   isSubscription,
-  orderProviders,
+  mergeProviderCards,
+  quotaBarPercent,
+  quotaHasMeters,
+  quotaPercentLabel,
+  quotaResetLabel,
+  quotaTone,
+  quotaWindowLabel,
   rangeFor,
   rangeSubtitle,
   seriesCost,
   usageStrip,
   USAGE_RANGES,
+  type ProviderCard as ProviderCardModel,
   type UsageMetric,
   type UsageRangeDays,
 } from "~/lib/usage"
@@ -98,6 +109,9 @@ export function UsageView({
   const [metric, setMetric] = useState<UsageMetric>("cost")
   const [scope, setScope] = useState<Scope>("all")
   const [state, setState] = useState<LoadState>(EMPTY)
+  // null = this server has no quota endpoint (or it failed): the whole meters
+  // section disappears rather than showing an apology next to the cost numbers.
+  const [quotas, setQuotas] = useState<ProviderQuota[] | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadedOnce, setLoadedOnce] = useState(false)
   // Bumped by the refresh button; also the effect's re-run trigger.
@@ -142,10 +156,60 @@ export function UsageView({
     )
   }, [baseUrl, days, effectiveScope, sessionId, nonce])
 
+  // Quotas are global and cheap, so they ride the refresh button and the base
+  // URL only — not the range or scope, which cannot change what a subscription
+  // window says.
+  useEffect(() => {
+    if (!baseUrl) {
+      setQuotas(null)
+      return
+    }
+    let live = true
+    void getProviderQuotas(baseUrl).then((result) => {
+      if (!live) return
+      setQuotas(result.status === "ok" ? asProviderQuotas(result.body).providers : null)
+    })
+    return () => {
+      live = false
+    }
+  }, [baseUrl, nonce])
+
+  // Countdown clock for "resets in…". One interval for the whole page, stopped
+  // while the window is hidden so a backgrounded tab isn't re-rendering all day.
+  const [now, setNow] = useState(() => Date.now())
+  const hasResets = useMemo(
+    () => (quotas ?? []).some((q) => q.windows.some((w) => w.resetAt != null)),
+    [quotas],
+  )
+  useEffect(() => {
+    if (!hasResets) return
+    let timer: number | undefined
+    const stop = () => {
+      if (timer != null) window.clearInterval(timer)
+      timer = undefined
+    }
+    const start = () => {
+      stop()
+      setNow(Date.now())
+      timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    }
+    const onVisibility = () => (document.hidden ? stop() : start())
+    if (!document.hidden) start()
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      stop()
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [hasResets])
+
   const buckets = useMemo(() => state.series?.buckets ?? NO_BUCKETS, [state.series])
+  const cards = useMemo(
+    () => mergeProviderCards(state.breakdown?.providers ?? [], quotas ?? []),
+    [state.breakdown, quotas],
+  )
   const providers = useMemo(
-    () => orderProviders(state.breakdown?.providers ?? []),
-    [state.breakdown],
+    () => cards.spending.map((card) => card.rollup!).filter(Boolean),
+    [cards],
   )
   const keys = useMemo(() => chartProviderKeys(providers, buckets), [providers, buckets])
   const strip = useMemo(() => usageStrip(buckets), [buckets])
@@ -242,46 +306,29 @@ export function UsageView({
                   </p>
                 </Card>
 
-                {providers.length === 0 ? (
+                {cards.spending.length === 0 && cards.quotaOnly.length === 0 ? (
                   <Card className="px-3 py-4 text-center text-[11.5px] text-muted-foreground">
                     No provider activity in this range.
                   </Card>
                 ) : (
-                  providers.map((provider, i) => (
-                    <Card key={provider.provider} className="min-w-0 p-3">
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        {/* Same colour the provider has in the chart: `keys`
-                            starts from this same ordered list, so the index
-                            normally matches — the fallback only matters if the
-                            two endpoints disagree about who exists. */}
-                        <span
-                          aria-hidden="true"
-                          className="size-2 shrink-0 rounded-full"
-                          style={{
-                            backgroundColor: seriesColor(
-                              keys.indexOf(provider.provider) >= 0 ? keys.indexOf(provider.provider) : i,
-                            ),
-                          }}
-                        />
-                        <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
-                          {provider.provider}
-                        </span>
-                        {isSubscription(provider.billing) && (
-                          <span className="shrink-0 rounded-full border border-success/35 bg-success/10 px-1.5 py-px text-[9.5px] text-success">
-                            sub
-                          </span>
+                  <>
+                    {cards.spending.map((card, i) => (
+                      <ProviderCard
+                        key={card.provider}
+                        card={card}
+                        now={now}
+                        color={seriesColor(
+                          keys.indexOf(card.provider) >= 0 ? keys.indexOf(card.provider) : i,
                         )}
-                      </div>
-                      <p className="mt-1.5 font-semibold text-[16px] leading-none tabular-nums">
-                        {costLabel(provider.estimatedApiCost)}
-                      </p>
-                      <p className="mt-1.5 text-[11px] text-muted-foreground tabular-nums">
-                        {shareLabel(provider.share)}
-                        <span className="mx-1.5 opacity-40">·</span>
-                        {compactTokens(provider.tokens)} tokens
-                      </p>
-                    </Card>
-                  ))
+                      />
+                    ))}
+                    {/* Subscriptions with a limit but no spend this range sit
+                        last: worth seeing, never worth displacing the providers
+                        that actually cost something. */}
+                    {cards.quotaOnly.map((card) => (
+                      <ProviderCard key={card.provider} card={card} now={now} color={null} />
+                    ))}
+                  </>
                 )}
               </div>
 
@@ -404,6 +451,173 @@ function Panel({ children }: { children: React.ReactNode }) {
 function Card({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <div className={cn("rounded-xl border border-border bg-card/40", className)}>{children}</div>
+  )
+}
+
+/** One provider in the left column: spend (when there was any) with its
+ *  subscription meters underneath. `color` matches the chart series; quota-only
+ *  cards have no series, so they get a neutral dot and a slimmer body. */
+function ProviderCard({
+  card,
+  now,
+  color,
+}: {
+  card: ProviderCardModel
+  now: number
+  color: string | null
+}) {
+  const { rollup, quota } = card
+  // Quota-only cards exist because the merge already decided they are
+  // subscriptions; a spending card asks its own rollup.
+  const subscription = rollup ? isSubscription(rollup.billing) : true
+  return (
+    <Card className={cn("min-w-0", rollup ? "p-3" : "px-3 py-2.5")}>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span
+          aria-hidden="true"
+          className="size-2 shrink-0 rounded-full"
+          style={{ backgroundColor: color ?? "var(--muted-foreground)", opacity: color ? 1 : 0.5 }}
+        />
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{card.provider}</span>
+        {subscription && (
+          <span className="shrink-0 rounded-full border border-success/35 bg-success/10 px-1.5 py-px text-[9.5px] text-success">
+            sub
+          </span>
+        )}
+      </div>
+      {rollup && (
+        <>
+          <p className="mt-1.5 font-semibold text-[16px] leading-none tabular-nums">
+            {costLabel(rollup.estimatedApiCost)}
+          </p>
+          <p className="mt-1.5 text-[11px] text-muted-foreground tabular-nums">
+            {shareLabel(rollup.share)}
+            <span className="mx-1.5 opacity-40">·</span>
+            {compactTokens(rollup.tokens)} tokens
+          </p>
+        </>
+      )}
+      {subscription && quota && <QuotaMeters quota={quota} now={now} spending={!!rollup} />}
+    </Card>
+  )
+}
+
+/** The meters themselves — secondary to the cost above them, so: small type,
+ *  thin bars, and every not-available status collapses to one quiet line. */
+function QuotaMeters({
+  quota,
+  now,
+  spending,
+}: {
+  quota: ProviderQuota
+  now: number
+  /** The card above has cost numbers, so the meters need a separating rule. */
+  spending: boolean
+}) {
+  const wrapper = cn("min-w-0", spending ? "mt-2.5 border-border/60 border-t pt-2" : "mt-1.5")
+
+  if (quota.status === "not-authenticated") {
+    return <p className={cn(wrapper, "text-[10.5px] text-muted-foreground/70")}>sign in to see limits</p>
+  }
+  if (quota.status === "unsupported" || quota.status === "error" || !quotaHasMeters(quota)) {
+    return (
+      <div className={wrapper}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="cursor-default text-[10.5px] text-muted-foreground/60 underline decoration-dotted underline-offset-2" />
+            }
+          >
+            limits unavailable
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-[240px]">
+            {quota.error ||
+              (quota.status === "unsupported"
+                ? "This provider does not report subscription limits."
+                : "The server could not read this provider's limits.")}
+          </TooltipPopup>
+        </Tooltip>
+      </div>
+    )
+  }
+
+  return (
+    <div className={cn(wrapper, "flex flex-col gap-1.5")}>
+      {quota.status === "stale" && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="flex w-fit cursor-default items-center gap-1 text-[10px] text-muted-foreground/60" />
+            }
+          >
+            <Clock3 className="size-2.5" />
+            <span>last known</span>
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-[240px]">
+            {quota.fetchedAt
+              ? `Limits last read ${relativeTime(quota.fetchedAt, now)} ago — the provider is not answering right now.`
+              : "Limits are stale — the provider is not answering right now."}
+          </TooltipPopup>
+        </Tooltip>
+      )}
+      {quota.windows.map((w, i) => {
+        const tone = quotaTone(w.usedPercent)
+        const reset = quotaResetLabel(w.resetAt, now)
+        const indeterminate = w.usedPercent == null
+        return (
+          <div key={`${w.kind}-${w.model ?? w.label ?? i}`} className="min-w-0">
+            <div className="flex min-w-0 items-baseline gap-1.5">
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-muted-foreground"
+                title={quotaWindowLabel(w)}
+              >
+                {quotaWindowLabel(w)}
+              </span>
+              <span
+                className={cn(
+                  "shrink-0 text-[10.5px] tabular-nums",
+                  tone === "danger"
+                    ? "text-destructive"
+                    : tone === "warn"
+                      ? "text-warning"
+                      : "text-muted-foreground",
+                )}
+              >
+                {quotaPercentLabel(w.usedPercent)}
+              </span>
+            </div>
+            <div
+              role="progressbar"
+              aria-label={`${quota.provider} ${quotaWindowLabel(w)} usage`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              {...(indeterminate ? {} : { "aria-valuenow": Math.round(w.usedPercent!) })}
+              className={cn(
+                "mt-1 h-1 w-full overflow-hidden rounded-full",
+                indeterminate ? "border border-border/70 border-dashed" : "bg-muted",
+              )}
+            >
+              {!indeterminate && (
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-[width] duration-300",
+                    tone === "danger"
+                      ? "bg-destructive"
+                      : tone === "warn"
+                        ? "bg-warning"
+                        : "bg-muted-foreground/55",
+                  )}
+                  style={{ width: `${quotaBarPercent(w.usedPercent)}%` }}
+                />
+              )}
+            </div>
+            {reset && (
+              <p className="mt-0.5 truncate text-[10px] text-muted-foreground/70">{reset}</p>
+            )}
+          </div>
+        )
+      })}
+    </div>
   )
 }
 

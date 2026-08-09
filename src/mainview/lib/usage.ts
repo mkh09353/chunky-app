@@ -8,7 +8,12 @@
 // Wire shapes come from lib/stats.ts (see the GAP note there); this file
 // assumes they have already been through the defensive parsers, so it can trust
 // the fields to be finite numbers.
-import type { UsageProviderRollup, UsageSeriesBucket } from "./stats"
+import type {
+  ProviderQuota,
+  ProviderQuotaWindow,
+  UsageProviderRollup,
+  UsageSeriesBucket,
+} from "./stats"
 
 /** Range presets offered by the header toggle. */
 export const USAGE_RANGES = [7, 30, 90] as const
@@ -310,4 +315,120 @@ export function usageStrip(buckets: readonly UsageSeriesBucket[]): UsageStrip {
 /** Total estimated cost across the window (the hero number). */
 export function seriesCost(buckets: readonly UsageSeriesBucket[]): number {
   return buckets.reduce((acc, b) => acc + b.estimatedApiCost, 0)
+}
+
+/* ---------------------------------------------------------------------------
+ * Subscription quota meters.
+ *
+ * These sit *under* the cost numbers on each provider card, so everything here
+ * is deliberately terse: a window is one short label, one bar, one percentage
+ * and one countdown. The arithmetic lives here so the card stays declarative.
+ * ------------------------------------------------------------------------- */
+
+/** "5h", "Week", or the model a per-model weekly cap belongs to. Falls back to
+ *  whatever the server called the window, then to something neutral. */
+export function quotaWindowLabel(w: ProviderQuotaWindow): string {
+  if (w.kind === "five-hour") return "5h"
+  if (w.kind === "weekly") return "Week"
+  if (w.kind === "weekly-model") return w.model || w.label || "Week"
+  return w.label || w.model || "Window"
+}
+
+export type QuotaTone = "calm" | "warn" | "danger"
+
+/** Bars stay calm until a window is genuinely worth noticing. */
+export function quotaTone(usedPercent: number | null): QuotaTone {
+  if (usedPercent == null || !Number.isFinite(usedPercent)) return "calm"
+  if (usedPercent > 90) return "danger"
+  if (usedPercent > 75) return "warn"
+  return "calm"
+}
+
+/** Fill width in percent. The parser clamps too, but a bar drawn from a stale
+ *  render must still never escape its track. */
+export function quotaBarPercent(usedPercent: number | null): number {
+  if (usedPercent == null || !Number.isFinite(usedPercent)) return 0
+  return Math.min(100, Math.max(0, usedPercent))
+}
+
+/** "62%" / "—" — the meter's own number, never invented. */
+export function quotaPercentLabel(usedPercent: number | null): string {
+  if (usedPercent == null || !Number.isFinite(usedPercent)) return "—"
+  return `${Math.round(usedPercent)}%`
+}
+
+/**
+ * "resets in 4h 12m" / "resets in 8m" / "resetting now".
+ *
+ * Null when the provider gave no reset time — the row then simply omits the
+ * countdown rather than guessing one. Sub-minute and past resets both read as
+ * "resetting now": a negative countdown is a clock skew, not information.
+ */
+export function quotaResetLabel(resetAt: number | null, now: number): string | null {
+  if (resetAt == null || !Number.isFinite(resetAt)) return null
+  const ms = resetAt - now
+  if (ms <= 60_000) return "resetting now"
+  const minutes = Math.floor(ms / 60_000)
+  const days = Math.floor(minutes / (60 * 24))
+  const hours = Math.floor(minutes / 60) % 24
+  const mins = minutes % 60
+  if (days > 0) return `resets in ${days}d ${hours}h`
+  if (hours > 0) return `resets in ${hours}h ${String(mins).padStart(2, "0")}m`
+  return `resets in ${mins}m`
+}
+
+/** True when a quota row has nothing to draw a meter from. */
+export function quotaHasMeters(quota: ProviderQuota | null | undefined): boolean {
+  return !!quota && quota.windows.length > 0 && (quota.status === "available" || quota.status === "stale")
+}
+
+export interface ProviderCard {
+  provider: string
+  /** Spend rollup for the range; null for a quota-only card. */
+  rollup: UsageProviderRollup | null
+  /** Quota row for this provider; null when the endpoint didn't mention it. */
+  quota: ProviderQuota | null
+}
+
+/** True for a quota row that describes a subscription seat, by either the quota
+ *  row's own billing field or the spend rollup's. */
+function quotaIsSubscription(quota: ProviderQuota): boolean {
+  return quota.billing === "subscription" || isSubscription(quota.billing)
+}
+
+/**
+ * The provider column: every provider that spent something this range (in the
+ * rollup's own order), each carrying its quota row, followed by subscription
+ * providers the quota endpoint knows about that have no spend to show.
+ *
+ * The trailing group is the point of the merge — a subscription you did not
+ * touch this week still has a limit worth seeing, and it must not be able to
+ * push the providers that DID cost money down the page.
+ */
+export function mergeProviderCards(
+  providers: readonly UsageProviderRollup[],
+  quotas: readonly ProviderQuota[],
+): { spending: ProviderCard[]; quotaOnly: ProviderCard[] } {
+  const byProvider = new Map<string, ProviderQuota>()
+  for (const quota of quotas) {
+    // First row wins: a duplicated provider is a server bug, not a reason to
+    // render the same meter twice.
+    if (quota.provider && !byProvider.has(quota.provider)) byProvider.set(quota.provider, quota)
+  }
+  const spending = orderProviders(providers).map((rollup) => ({
+    provider: rollup.provider,
+    rollup,
+    quota: byProvider.get(rollup.provider) ?? null,
+  }))
+  const seen = new Set(spending.map((card) => card.provider))
+  const quotaOnly = quotas
+    .filter(
+      (quota) =>
+        !seen.has(quota.provider) &&
+        quotaIsSubscription(quota) &&
+        // Nothing to say about a provider that reports no windows and no reason.
+        (quota.windows.length > 0 || quota.status === "not-authenticated" || quota.status === "error"),
+    )
+    .map((quota) => ({ provider: quota.provider, rollup: null, quota }))
+  return { spending, quotaOnly }
 }

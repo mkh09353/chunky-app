@@ -570,6 +570,28 @@ export const getUsageBreakdown = (baseUrl: string, query: UsageQuery) =>
   usageRequest(baseUrl, "/api/usage/breakdown", query)
 
 /**
+ * Subscription quota meters (/api/provider-quotas). Global, no parameters.
+ *
+ * Same three-way result as the usage history above, and the same reason for a
+ * literal path: the route exists only in unlanded protocol work, and a server
+ * without it must make the meters disappear — not fail the build or the page.
+ */
+export async function getProviderQuotas(baseUrl: string): Promise<UsageFetch> {
+  if (!baseUrl) return { status: "error", message: "Chunky server is unavailable" }
+  try {
+    const res = await fetch(`${baseUrl}/api/provider-quotas`)
+    if (res.status === 404 || res.status === 501) return { status: "unsupported" }
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    if (!res.ok) {
+      return { status: "error", message: body?.error || `request failed (${res.status})` }
+    }
+    return { status: "ok", body }
+  } catch (err) {
+    return { status: "error", message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
  * Open a session's SSE stream. Resolves when the server closes it.
  * `onOpen` fires once the response is accepted (the only "connected" signal —
  * empty sessions send no events until the first turn).

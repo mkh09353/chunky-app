@@ -1,12 +1,28 @@
 import { describe, expect, test } from "bun:test"
-import { asUsageBreakdown, asUsageSeries, scoreLabel, shareLabel } from "./stats"
+import {
+  asProviderQuotas,
+  asUsageBreakdown,
+  asUsageSeries,
+  scoreLabel,
+  shareLabel,
+  type ProviderQuota,
+  type ProviderQuotaWindow,
+  type UsageProviderRollup,
+} from "./stats"
 import {
   axisScale,
   bucketAtX,
   chartData,
   chartProviderKeys,
   isSubscription,
+  mergeProviderCards,
   orderProviders,
+  quotaBarPercent,
+  quotaHasMeters,
+  quotaPercentLabel,
+  quotaResetLabel,
+  quotaTone,
+  quotaWindowLabel,
   rangeFor,
   stackedPaths,
   tickIndexes,
@@ -219,5 +235,168 @@ describe("labels", () => {
     expect(shareLabel(42)).toBe("42%")
     expect(shareLabel(0.0002)).toBe("<0.1%")
     expect(shareLabel(null)).toBe("—")
+  })
+})
+
+/* --- subscription quota meters ------------------------------------------- */
+
+const quotaWindow = (over: Partial<ProviderQuotaWindow> = {}): ProviderQuotaWindow => ({
+  kind: "five-hour",
+  label: "5 hour",
+  usedPercent: 10,
+  resetAt: null,
+  ...over,
+})
+const quotaRow = (over: Partial<ProviderQuota> = {}): ProviderQuota => ({
+  provider: "codex",
+  billing: "subscription",
+  status: "available",
+  source: "codex-usage",
+  fetchedAt: 1,
+  windows: [quotaWindow()],
+  ...over,
+})
+
+describe("asProviderQuotas", () => {
+  test("a 404-shaped or junk body yields nothing to render", () => {
+    expect(asProviderQuotas(null).providers).toEqual([])
+    expect(asProviderQuotas({ providers: "nope" }).providers).toEqual([])
+    expect(asProviderQuotas(undefined).fetchedAt).toBe(0)
+  })
+  test("drops rows without a provider and windows with no identity", () => {
+    const body = asProviderQuotas({
+      fetchedAt: 5,
+      providers: [
+        { status: "available" },
+        { provider: "codex", windows: [{ kind: "other" }, { kind: "five-hour", label: "5h" }] },
+      ],
+    })
+    expect(body.providers).toHaveLength(1)
+    expect(body.providers[0]!.windows).toHaveLength(1)
+    expect(body.providers[0]!.windows[0]!.kind).toBe("five-hour")
+  })
+  test("clamps percentages into 0-100 and rejects impossible resets", () => {
+    const body = asProviderQuotas({
+      providers: [
+        { provider: "a", status: "available", windows: [
+          { kind: "weekly", label: "w", usedPercent: 143, resetAt: 0 },
+          { kind: "five-hour", label: "5h", usedPercent: -8, resetAt: 1000 },
+          { kind: "weekly", label: "w2", usedPercent: "62.5", resetAt: "2000" },
+          { kind: "weekly", label: "w3", usedPercent: "not a number" },
+        ] },
+      ],
+    })
+    const w = body.providers[0]!.windows
+    expect(w.map((x) => x.usedPercent)).toEqual([100, 0, 62.5, null])
+    expect(w[0]!.resetAt).toBe(null)
+    expect(w[2]!.resetAt).toBe(2000)
+  })
+  test("unknown status/billing/source degrade instead of leaking through", () => {
+    const body = asProviderQuotas({
+      providers: [
+        { provider: "a", status: "weird", billing: "invoice", source: "mystery", windows: [{ kind: "weekly", label: "w" }] },
+        { provider: "b", status: "weird", windows: [] },
+      ],
+    })
+    expect(body.providers[0]!.status).toBe("available")
+    expect(body.providers[0]!.billing).toBe(null)
+    expect(body.providers[0]!.source).toBe(null)
+    // Nothing to show and no usable status: not something we claim works.
+    expect(body.providers[1]!.status).toBe("unsupported")
+  })
+})
+
+describe("quota labels and tone", () => {
+  test("window labels are short, and per-model caps name the model", () => {
+    expect(quotaWindowLabel(quotaWindow({ kind: "five-hour" }))).toBe("5h")
+    expect(quotaWindowLabel(quotaWindow({ kind: "weekly" }))).toBe("Week")
+    expect(quotaWindowLabel(quotaWindow({ kind: "weekly-model", model: "gpt-5-codex" }))).toBe("gpt-5-codex")
+    expect(quotaWindowLabel(quotaWindow({ kind: "weekly-model", model: undefined, label: "Weekly (Opus)" }))).toBe("Weekly (Opus)")
+    expect(quotaWindowLabel(quotaWindow({ kind: "other", label: "" }))).toBe("Window")
+  })
+  test("tone only escalates past 75% and 90%", () => {
+    expect(quotaTone(0)).toBe("calm")
+    expect(quotaTone(75)).toBe("calm")
+    expect(quotaTone(75.1)).toBe("warn")
+    expect(quotaTone(90)).toBe("warn")
+    expect(quotaTone(92)).toBe("danger")
+    expect(quotaTone(null)).toBe("calm")
+  })
+  test("bar width and percent text never invent a level", () => {
+    expect(quotaBarPercent(null)).toBe(0)
+    expect(quotaBarPercent(140)).toBe(100)
+    expect(quotaBarPercent(-3)).toBe(0)
+    expect(quotaPercentLabel(null)).toBe("—")
+    expect(quotaPercentLabel(62.4)).toBe("62%")
+  })
+})
+
+describe("quotaResetLabel", () => {
+  const now = 1_000_000_000_000
+  test("formats hours, minutes and days", () => {
+    expect(quotaResetLabel(now + 4 * 3600_000 + 12 * 60_000, now)).toBe("resets in 4h 12m")
+    expect(quotaResetLabel(now + 8 * 60_000, now)).toBe("resets in 8m")
+    expect(quotaResetLabel(now + 26 * 3600_000, now)).toBe("resets in 1d 2h")
+    expect(quotaResetLabel(now + 3600_000 + 60_000 * 5, now)).toBe("resets in 1h 05m")
+  })
+  test("past, imminent and absent resets never show a negative countdown", () => {
+    expect(quotaResetLabel(now - 5000, now)).toBe("resetting now")
+    expect(quotaResetLabel(now + 30_000, now)).toBe("resetting now")
+    expect(quotaResetLabel(null, now)).toBe(null)
+    expect(quotaResetLabel(Number.NaN, now)).toBe(null)
+  })
+})
+
+describe("quotaHasMeters", () => {
+  test("only available/stale rows with windows draw bars", () => {
+    expect(quotaHasMeters(quotaRow())).toBe(true)
+    expect(quotaHasMeters(quotaRow({ status: "stale" }))).toBe(true)
+    expect(quotaHasMeters(quotaRow({ status: "error" }))).toBe(false)
+    expect(quotaHasMeters(quotaRow({ windows: [] }))).toBe(false)
+    expect(quotaHasMeters(null)).toBe(false)
+  })
+})
+
+describe("mergeProviderCards", () => {
+  const rollup = (provider: string, billing: string | null, cost: number): UsageProviderRollup => ({
+    provider, billing, estimatedApiCost: cost, tokens: 1, share: 0.5,
+  })
+  test("spending providers keep rollup order and pick up their quota", () => {
+    const { spending, quotaOnly } = mergeProviderCards(
+      [rollup("zen", "usage", 10), rollup("codex", "subscription", 1)],
+      [quotaRow({ provider: "codex" })],
+    )
+    // Subscription first (orderProviders), each carrying its own quota row.
+    expect(spending.map((c) => c.provider)).toEqual(["codex", "zen"])
+    expect(spending[0]!.quota?.provider).toBe("codex")
+    expect(spending[1]!.quota).toBe(null)
+    expect(quotaOnly).toEqual([])
+  })
+  test("subscriptions with no spend become quota-only cards at the end", () => {
+    const { spending, quotaOnly } = mergeProviderCards(
+      [rollup("zen", "usage", 10)],
+      [quotaRow({ provider: "anthropic" }), quotaRow({ provider: "codex", status: "not-authenticated", windows: [] })],
+    )
+    expect(spending.map((c) => c.provider)).toEqual(["zen"])
+    expect(quotaOnly.map((c) => c.provider)).toEqual(["anthropic", "codex"])
+    expect(quotaOnly[0]!.rollup).toBe(null)
+  })
+  test("api-key providers with no spend are not promoted, and silence is not a card", () => {
+    const { quotaOnly } = mergeProviderCards(
+      [],
+      [
+        quotaRow({ provider: "openai", billing: "api-key" }),
+        quotaRow({ provider: "quiet", windows: [], status: "unsupported" }),
+      ],
+    )
+    expect(quotaOnly).toEqual([])
+  })
+  test("a duplicated provider row is used once", () => {
+    const { spending } = mergeProviderCards(
+      [rollup("codex", "subscription", 1)],
+      [quotaRow({ provider: "codex", status: "available" }), quotaRow({ provider: "codex", status: "error" })],
+    )
+    expect(spending).toHaveLength(1)
+    expect(spending[0]!.quota?.status).toBe("available")
   })
 })

@@ -123,6 +123,50 @@ export interface UsageBreakdownResponse {
   providers: UsageProviderRollup[]
 }
 
+/**
+ * GAP (same story again): GET /api/provider-quotas reports how much of each
+ * subscription window a provider has burned. The sibling protocol checkout has
+ * `ROUTES.providerQuotas` and these interfaces in its working tree, but the
+ * commit release CI pins does NOT (verified: zero matches at the pinned rev),
+ * so importing them would break the release typecheck. Local copies until that
+ * lands — then delete these and re-export, keeping the parser.
+ *
+ * A server without the route 404s; the Usage page hides the whole section.
+ */
+export type ProviderQuotaStatus =
+  | "available"
+  | "stale"
+  | "not-authenticated"
+  | "unsupported"
+  | "error"
+export type ProviderQuotaWindowKind = "five-hour" | "weekly" | "weekly-model" | "other"
+
+export interface ProviderQuotaWindow {
+  kind: ProviderQuotaWindowKind
+  label: string
+  /** 0..100. Null when the provider reports a window but not a level. */
+  usedPercent: number | null
+  /** Epoch ms when the window rolls over; null when the provider won't say. */
+  resetAt: number | null
+  windowMinutes?: number
+  model?: string
+}
+
+export interface ProviderQuota {
+  provider: string
+  billing: "subscription" | "api-key" | null
+  status: ProviderQuotaStatus
+  source: "codex-usage" | "response-headers" | "anthropic-sdk" | null
+  fetchedAt: number | null
+  windows: ProviderQuotaWindow[]
+  error?: string
+}
+
+export interface ProviderQuotasResponse {
+  fetchedAt: number
+  providers: ProviderQuota[]
+}
+
 /** Compact token count: 1234 → "1.2k", 1_500_000 → "1.5M" (TUI parity). */
 export function compactTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0"
@@ -364,6 +408,86 @@ export function shareLabel(v: number | null): string {
   const pct = (v > 1 ? v : v * 100)
   if (pct > 0 && pct < 0.1) return "<0.1%"
   return `${pct.toFixed(pct >= 10 ? 0 : 1)}%`
+}
+
+const QUOTA_STATUSES: readonly ProviderQuotaStatus[] = [
+  "available",
+  "stale",
+  "not-authenticated",
+  "unsupported",
+  "error",
+]
+const QUOTA_KINDS: readonly ProviderQuotaWindowKind[] = [
+  "five-hour",
+  "weekly",
+  "weekly-model",
+  "other",
+]
+
+function asQuotaWindow(data: unknown): ProviderQuotaWindow | null {
+  const row = (data ?? {}) as Record<string, unknown>
+  const kindRaw = str(row.kind)
+  const kind = (QUOTA_KINDS as readonly string[]).includes(kindRaw)
+    ? (kindRaw as ProviderQuotaWindowKind)
+    : "other"
+  const model = strOrNull(row.model)
+  const label = str(row.label)
+  // A window with nothing to name itself by is noise, not a meter.
+  if (!label && !model && kind === "other") return null
+  const percent = numOrNull(row.usedPercent)
+  const reset = numOrNull(row.resetAt)
+  return {
+    kind,
+    label,
+    // The bar cannot render a negative or >100 fill, and a server that reports
+    // a rate (0..1) instead of a percentage is still shown, just at the bottom.
+    usedPercent: percent == null ? null : Math.min(100, Math.max(0, percent)),
+    // A non-positive epoch is "no reset", not 1970.
+    resetAt: reset != null && reset > 0 ? reset : null,
+    ...(numOrNull(row.windowMinutes) != null ? { windowMinutes: num(row.windowMinutes) } : {}),
+    ...(model ? { model } : {}),
+  }
+}
+
+function asProviderQuota(data: unknown): ProviderQuota | null {
+  const row = (data ?? {}) as Record<string, unknown>
+  const provider = str(row.provider)
+  if (!provider) return null
+  const windows = arr(row.windows)
+    .map(asQuotaWindow)
+    .filter((w): w is ProviderQuotaWindow => w !== null)
+  const statusRaw = str(row.status)
+  const status: ProviderQuotaStatus = (QUOTA_STATUSES as readonly string[]).includes(statusRaw)
+    ? (statusRaw as ProviderQuotaStatus)
+    // No usable status: having windows is itself evidence the read worked.
+    : windows.length > 0
+      ? "available"
+      : "unsupported"
+  const billingRaw = str(row.billing)
+  const sourceRaw = str(row.source)
+  const error = strOrNull(row.error)
+  return {
+    provider,
+    billing: billingRaw === "subscription" || billingRaw === "api-key" ? billingRaw : null,
+    status,
+    source:
+      sourceRaw === "codex-usage" || sourceRaw === "response-headers" || sourceRaw === "anthropic-sdk"
+        ? sourceRaw
+        : null,
+    fetchedAt: numOrNull(row.fetchedAt),
+    windows,
+    ...(error ? { error } : {}),
+  }
+}
+
+export function asProviderQuotas(data: unknown): ProviderQuotasResponse {
+  const body = (data ?? {}) as Record<string, unknown>
+  return {
+    fetchedAt: num(body.fetchedAt),
+    providers: arr(body.providers)
+      .map(asProviderQuota)
+      .filter((row): row is ProviderQuota => row !== null),
+  }
 }
 
 /** "8.4 (12)" — average plus the sample count that earned it; "—" when unrated. */
