@@ -289,6 +289,27 @@ function rowsToModels(rows: ModelRow[]): Model[] {
   }))
 }
 
+/**
+ * The message that seeds a "set this provider up for me" session (Settings →
+ * Providers → + Custom → "Set it up with a chat").
+ *
+ * Plain text on purpose: it is a real user message in the transcript, not a
+ * hidden system prompt. It never carries a credential — the agent is told to
+ * send the user back to the form for that, because keys must not land in a
+ * transcript.
+ */
+function providerSetupBrief(providerName: string, baseURL?: string): string {
+  const where = baseURL ? ` Its base URL is ${baseURL}.` : ""
+  return (
+    `I want to add ${providerName} as a model provider in Chunky.${where} ` +
+    `Work out how ${providerName} exposes an OpenAI-compatible API — the base URL and chat-completions route — ` +
+    `and whether it authenticates with an API key or with OAuth, then tell me in a sentence or two what you found. ` +
+    `Use the tools and settings you have (for example manage_models or the Chunky server configuration) to add it where you can, ` +
+    `and otherwise walk me through getting credentials. ` +
+    `Don't ask me to paste an API key into this chat — send me to Settings → Providers → + Custom to enter it.`
+  )
+}
+
 /** One repository's qualifying completions from a single fold.
  *
  *  `done` is what lets the far-left overview say WHICH sessions just finished
@@ -1459,6 +1480,36 @@ export function App() {
       setConnError((err as Error).message)
     }
   }, [live, stopDemoStream, activeThread.projectId, config, refreshSessions, attachSession])
+
+  /**
+   * Settings → Providers → "Set it up with a chat": the user knows the name of
+   * a provider but not its endpoint or how it authenticates, so hand the
+   * problem to an agent instead of to a form. The Composer has no draft field,
+   * so the brief has to be a real message — it is sent before attaching, which
+   * means the run is already under way when the transcript opens.
+   */
+  const handleSetupProviderChat = useCallback(
+    async (providerName: string, baseURL?: string) => {
+      if (!config) return
+      setSettingsOpen(false)
+      setMainView("chat")
+      const repoId = activeRepoIdRef.current
+      try {
+        const created = await createSession(config.baseUrl, repoId)
+        if (repoId != null && repoId !== activeRepoIdRef.current) return
+        await sendMessage(config.baseUrl, created.sessionId, providerSetupBrief(providerName, baseURL))
+        // Attach right away; the sidebar list can catch up in the background.
+        void attachSession(config.baseUrl, created.sessionId, { fresh: true })
+        void refreshSessions(config.baseUrl, repoId).catch(() => {})
+      } catch (err) {
+        setConnError((err as Error).message)
+        // Rethrown so the card that started this can show it too, if it is
+        // somehow still mounted.
+        throw err
+      }
+    },
+    [config, refreshSessions, attachSession],
+  )
 
   /** Switch the visible repository.
    *
@@ -3037,6 +3088,9 @@ export function App() {
             void refreshModes()
             void refreshAgents()
           }}
+          // Demo mode / no server has no session to open, so the option is
+          // withheld rather than rendered dead.
+          onSetupProviderChat={live && config ? handleSetupProviderChat : undefined}
           connection={{
             state: live ? connectionState : "offline",
             baseUrl: config?.baseUrl ?? "http://localhost:4620",

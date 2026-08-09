@@ -22,7 +22,7 @@ import { GeneralSection } from "./GeneralSection"
 import { ModelsSection } from "./ModelsSection"
 import { ModesSection } from "./ModesSection"
 import { PrReviewsSection } from "./PrReviewsSection"
-import { ProvidersSection } from "./ProvidersSection"
+import { ProvidersSection, type SetupProviderChat } from "./ProvidersSection"
 import { RelaySection } from "./RelaySection"
 import { SidekickSection } from "./SidekickSection"
 import { SkillsSection } from "./SkillsSection"
@@ -86,10 +86,11 @@ function renderSection(
   connection?: SettingsConnectionInfo,
   onModesChanged?: () => void,
   identity?: SettingsIdentityInfo,
+  onSetupProviderChat?: SetupProviderChat,
 ) {
   switch (id) {
     case "providers":
-      return <ProvidersSection />
+      return <ProvidersSection onSetupProviderChat={onSetupProviderChat} />
     case "models":
       return <ModelsSection />
     case "advisor":
@@ -130,6 +131,7 @@ export function SettingsCenter({
   connection,
   identity,
   onModesChanged,
+  onSetupProviderChat,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -139,6 +141,10 @@ export function SettingsCenter({
   identity?: SettingsIdentityInfo
   /** Called after a mode is applied/saved/deleted (refresh models + aliases). */
   onModesChanged?: () => void
+  /** Providers → "Set it up with a chat": App closes this dialog and opens a
+   *  new session seeded with a provider-setup brief. Omitted (e.g. demo mode,
+   *  no server) hides the option instead of rendering a dead button. */
+  onSetupProviderChat?: SetupProviderChat
 }) {
   const [section, setSection] = useState<SectionId>(
     isSectionId(initialSection) ? initialSection : "providers",
@@ -194,7 +200,7 @@ export function SettingsCenter({
           </nav>
 
           <ScrollArea className="min-w-0 flex-1" viewportClassName="p-5">
-            {renderSection(section, connection, onModesChanged, identity)}
+            {renderSection(section, connection, onModesChanged, identity, onSetupProviderChat)}
           </ScrollArea>
         </div>
       </DialogPopup>

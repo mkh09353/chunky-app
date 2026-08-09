@@ -1,5 +1,17 @@
-import { Check, ExternalLink, LogOut, MoreHorizontal, Plus, RotateCw, X } from "lucide-react"
+import {
+  ArrowLeft,
+  Check,
+  ExternalLink,
+  KeyRound,
+  LogOut,
+  MessageSquare,
+  MoreHorizontal,
+  Plus,
+  RotateCw,
+  X,
+} from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
+import { cn } from "~/lib/cn"
 import { addCustomProvider, listProviders, logoutProvider, selectProvider, testProviderAuth } from "~/lib/configApi"
 import type { CustomProviderInput, ProviderInfo } from "~/lib/configApi"
 import { confirm } from "~/lib/confirm"
@@ -38,6 +50,13 @@ function isOAuthProvider(p: ProviderInfo): boolean {
   return p.custom !== true && p.billing === "subscription"
 }
 
+/**
+ * Hand a provider off to a chat session that will work out how to add it.
+ * Supplied by the host (App wires it to a fresh session + setup brief); when
+ * it is absent the chat path is hidden rather than rendered dead.
+ */
+export type SetupProviderChat = (providerName: string, baseURL?: string) => Promise<void>
+
 /** A stale credential usually says so; point those at Re-authenticate. */
 function looksStale(message: string): boolean {
   return /revok|expir|invalid[_ ]?grant|unauthor|401|re-?auth/i.test(message)
@@ -51,11 +70,35 @@ type TestState =
 /** How long a successful test stays on the card before fading out. */
 const TEST_OK_MS = 6000
 
-export function ProvidersSection() {
+// ---- Trailing action column ---------------------------------------------
+// Every row renders the SAME slots in the same order — [Log in] · Test ·
+// Set active/Active · overflow — so the cards read as a table instead of a
+// ragged pile. Two rules keep the columns still:
+//   1. Each slot has a fixed min width, so a label swap (Test <-> spinner,
+//      "Set active" <-> "Active") can never resize its column.
+//   2. The group is right-anchored (justify-between on the row), so the
+//      optional "Log in" button grows LEFTWARD into free space and leaves the
+//      three trailing columns exactly where they are on every row.
+
+// Widths measured against DM Sans 500 at text-xs (12px) plus the size="sm"
+// padding/border (22px), with slack for a fallback font:
+//   "Log in" 56px · "Test" 47px · "Active" 58px · "Set active" 79px.
+
+/** Fits "Log in" and the spinner that replaces it while polling. */
+const LOGIN_SLOT = "min-w-16"
+/** Fits "Test" and the spinner that replaces it while running. */
+const TEST_SLOT = "min-w-14"
+/** Fits the wider label ("Set active") with room to spare, so the swap to
+ *  "Active" — and to the busy spinner — leaves the column alone. */
+const SELECT_SLOT = "min-w-24"
+/** Matches Button size="icon-sm" (size-7), for the overflow placeholder. */
+const OVERFLOW_SLOT = "size-7 shrink-0"
+
+export function ProvidersSection({ onSetupProviderChat }: { onSetupProviderChat?: SetupProviderChat }) {
   const providers = useAsync<ProviderInfo[]>(() => listProviders(), [])
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [showCustom, setShowCustom] = useState(false)
+  const [showAdd, setShowAdd] = useState(false)
   const [tests, setTests] = useState<Record<string, TestState>>({})
   const { login, startLogin, clearLogin } = useProviderLogin(providers.reload)
   const okTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
@@ -176,7 +219,7 @@ export function ProvidersSection() {
       title="Providers"
       description="Log in to model providers and choose the active one. Add your own OpenAI-compatible endpoint too."
       actions={
-        <Button variant="outline" size="sm" onClick={() => setShowCustom((v) => !v)}>
+        <Button variant="outline" size="sm" onClick={() => setShowAdd((v) => !v)}>
           <Plus className="size-3.5" />
           Custom
         </Button>
@@ -217,19 +260,11 @@ export function ProvidersSection() {
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-muted-foreground hover:text-foreground"
-                    disabled={test?.status === "running" || busy === p.id}
-                    onClick={() => void handleTest(p.id, p.ready)}
-                  >
-                    {test?.status === "running" ? <Spinner /> : "Test"}
-                  </Button>
                   {!p.ready && (
                     <Button
                       variant="secondary"
                       size="sm"
+                      className={LOGIN_SLOT}
                       disabled={login?.provider === p.id && login.polling}
                       onClick={() => void handleLogin(p.id)}
                     >
@@ -237,14 +272,24 @@ export function ProvidersSection() {
                     </Button>
                   )}
                   <Button
+                    variant="ghost"
+                    size="sm"
+                    className={cn(TEST_SLOT, "text-muted-foreground hover:text-foreground")}
+                    disabled={test?.status === "running" || busy === p.id}
+                    onClick={() => void handleTest(p.id, p.ready)}
+                  >
+                    {test?.status === "running" ? <Spinner /> : "Test"}
+                  </Button>
+                  <Button
                     variant={p.active ? "outline" : "default"}
                     size="sm"
+                    className={SELECT_SLOT}
                     disabled={p.active || !p.ready || busy === p.id}
                     onClick={() => void handleSelect(p.id)}
                   >
                     {busy === p.id ? <Spinner /> : p.active ? "Active" : "Set active"}
                   </Button>
-                  {isOAuthProvider(p) && (
+                  {isOAuthProvider(p) ? (
                     <DropdownMenu>
                       <DropdownMenuTrigger
                         render={<Button variant="ghost" size="icon-sm" aria-label={`More ${p.label} actions`} />}
@@ -265,6 +310,12 @@ export function ProvidersSection() {
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
+                  ) : (
+                    // Nothing to offer on this row (custom / API-key providers
+                    // have no re-auth or disconnect action). Hold the column
+                    // open with an inert placeholder rather than a dead button:
+                    // a control that is rendered has to work.
+                    <div aria-hidden className={OVERFLOW_SLOT} />
                   )}
                 </div>
               </div>
@@ -379,25 +430,99 @@ export function ProvidersSection() {
         </div>
       )}
 
-      {showCustom && (
-        <CustomProviderForm
+      {showAdd && (
+        <AddProviderCard
+          onSetupProviderChat={onSetupProviderChat}
           onDone={() => {
-            setShowCustom(false)
+            setShowAdd(false)
             providers.reload()
           }}
-          onCancel={() => setShowCustom(false)}
+          onCancel={() => setShowAdd(false)}
         />
       )}
     </SectionShell>
   )
 }
 
-function CustomProviderForm({ onDone, onCancel }: { onDone: () => void; onCancel: () => void }) {
+/** Provider ids are lowercase alphanumerics and dashes, so a typed name can
+ *  seed one: "Together AI" -> "together-ai". Editable afterwards. */
+function deriveProviderId(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+}
+
+/**
+ * Adding a provider, in two steps.
+ *
+ * Step one asks only what the user actually knows: the provider's name, and
+ * its base URL if they have it. From there the flow forks:
+ *   A. "I have an API key" reveals the fields the server's custom-provider
+ *      route already takes (id seeded from the name, label, base URL, key) and
+ *      posts them with addCustomProvider.
+ *   B. "Set it up with a chat" hands the name to a fresh session with a setup
+ *      brief, for a provider whose endpoint/auth story nobody here knows yet.
+ *      Hidden entirely when the host supplied no handler.
+ */
+function AddProviderCard({
+  onDone,
+  onCancel,
+  onSetupProviderChat,
+}: {
+  onDone: () => void
+  onCancel: () => void
+  onSetupProviderChat?: SetupProviderChat
+}) {
+  const [step, setStep] = useState<"intro" | "key">("intro")
+  const [name, setName] = useState("")
+  const [baseURL, setBaseURL] = useState("")
+  // The key lives here and nowhere else: it goes up with the POST and is never
+  // read back, persisted, or logged.
   const [form, setForm] = useState<CustomProviderInput>({ id: "", label: "", baseURL: "", apiKey: "" })
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [handoff, setHandoff] = useState(false)
 
   const set = (k: keyof CustomProviderInput, v: string) => setForm((f) => ({ ...f, [k]: v }))
+
+  /** Path A: carry step one's answers into the full form. */
+  const toKeyStep = () => {
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError("Enter the provider's name first.")
+      return
+    }
+    setError(null)
+    setForm((f) => ({
+      ...f,
+      id: f.id || deriveProviderId(trimmed),
+      label: f.label || trimmed,
+      baseURL: f.baseURL || baseURL.trim(),
+    }))
+    setStep("key")
+  }
+
+  /** Path B: the host closes Settings and opens the seeded chat. */
+  const startChat = async () => {
+    if (!onSetupProviderChat) return
+    const trimmed = name.trim()
+    if (!trimmed) {
+      setError("Enter the provider's name first.")
+      return
+    }
+    setError(null)
+    setHandoff(true)
+    try {
+      await onSetupProviderChat(trimmed, baseURL.trim() || undefined)
+      // Nothing was added here, so close without re-reading the list.
+      onCancel()
+    } catch (err) {
+      setError((err as Error).message)
+      setHandoff(false)
+    }
+  }
 
   const submit = async () => {
     if (!form.id.trim() || !form.baseURL.trim()) {
@@ -419,6 +544,59 @@ function CustomProviderForm({ onDone, onCancel }: { onDone: () => void; onCancel
     } finally {
       setSaving(false)
     }
+  }
+
+  if (step === "intro") {
+    return (
+      <Card className="border-primary/25">
+        <SubLabel>Add a provider</SubLabel>
+        <div className="flex flex-col gap-2.5 pt-1">
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">Provider name</span>
+            <TextInput
+              value={name}
+              onChange={setName}
+              placeholder="Together, Fireworks, my-llm-host…"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") toKeyStep()
+              }}
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">Base URL (optional)</span>
+            <TextInput
+              value={baseURL}
+              onChange={setBaseURL}
+              placeholder="https://api.example.com/v1"
+              monospace
+            />
+          </div>
+          <p className="text-[11.5px] text-muted-foreground">
+            Chunky talks to OpenAI-compatible endpoints. Have the URL and a key? Add it directly.
+            {onSetupProviderChat
+              ? " Otherwise a chat can work out the endpoint and how it authenticates."
+              : ""}
+          </p>
+          {error && <InlineError>{error}</InlineError>}
+          <div className="flex flex-wrap justify-end gap-1.5 pt-1">
+            <Button variant="ghost" size="sm" onClick={onCancel} disabled={handoff}>
+              Cancel
+            </Button>
+            {onSetupProviderChat && (
+              <Button variant="outline" size="sm" disabled={handoff} onClick={() => void startChat()}>
+                {handoff ? <Spinner /> : <MessageSquare className="size-3.5" />}
+                Set it up with a chat
+              </Button>
+            )}
+            <Button size="sm" disabled={handoff} onClick={toKeyStep}>
+              <KeyRound className="size-3.5" />
+              I have an API key
+            </Button>
+          </div>
+        </div>
+      </Card>
+    )
   }
 
   return (
@@ -454,7 +632,19 @@ function CustomProviderForm({ onDone, onCancel }: { onDone: () => void; onCancel
         </div>
       </div>
       {error && <div className="pt-2"><InlineError>{error}</InlineError></div>}
-      <div className="flex justify-end gap-1.5 pt-3">
+      <div className="flex flex-wrap justify-end gap-1.5 pt-3">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={saving}
+          onClick={() => {
+            setError(null)
+            setStep("intro")
+          }}
+        >
+          <ArrowLeft className="size-3.5" />
+          Back
+        </Button>
         <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
           Cancel
         </Button>
