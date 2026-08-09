@@ -12,10 +12,12 @@ export type ZooInsight = { id: string; passId: string; title: string; summary: s
 export type ZooPass = { id: string; startedAt: number; status: "running" | "done" | "error"; note?: string }
 export type ZooIdeaType = "close" | "investigate" | "build" | "needs-detail"
 export type ZooIdeaStatus = "proposed" | "promoted" | "dismissed"
-export type ZooIdea = { id: string; type: ZooIdeaType; title: string; rationale: string; status: ZooIdeaStatus; insightIds: string[]; areaId?: string; createdAt: number; itemId?: string; dismissReason?: string }
+export type ZooJamSession = { sessionId: string; createdAt: number; outcomeAt?: number }
+export type ZooIdeaDecision = { at: number; actor: "user" | "agent"; note: string; sessionId?: string }
+export type ZooIdea = { id: string; type: ZooIdeaType; title: string; rationale: string; status: ZooIdeaStatus; insightIds: string[]; jamSessions?: ZooJamSession[]; decisions?: ZooIdeaDecision[]; areaId?: string; createdAt: number; itemId?: string; dismissReason?: string }
 export type ZooItemStage = "research" | "decision" | "building" | "review" | "shipped" | "dropped"
 export type ZooDecision = { at: number; actor: "user" | "agent"; note: string }
-export type ZooItem = { id: string; ideaId: string; title: string; stage: ZooItemStage; sessionIds: string[]; decisions: ZooDecision[]; areaId?: string; createdAt: number; updatedAt: number }
+export type ZooItem = { id: string; ideaId: string; title: string; stage: ZooItemStage; sessionIds: string[]; jamSessions?: ZooJamSession[]; decisions: ZooDecision[]; areaId?: string; createdAt: number; updatedAt: number }
 
 /** A watched competitor repository. The watch owns the check state; the source
  *  row it points at owns the area and the artifacts the check produced. */

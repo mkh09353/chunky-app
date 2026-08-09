@@ -10,11 +10,12 @@ import {
   parseRecordIdeasResponse,
   type ZooIdea,
   type ZooInsight,
+  type ZooItem,
 } from "./zoo"
 import { parseFencedIdeas } from "./zooSynthesis"
-import { buildResearchBrief, nextStage } from "./zooItemFlow"
+import { buildResearchBrief, nextStage, startResearchSessionWithDeps } from "./zooItemFlow"
 
-const idea = {
+const idea: ZooIdea = {
   id: "d-1",
   type: "build",
   title: "Retry failed payments",
@@ -24,7 +25,7 @@ const idea = {
   createdAt: 1000,
 }
 
-const item = {
+const item: ZooItem = {
   id: "t-1",
   ideaId: "d-1",
   title: "Retry failed payments",
@@ -42,6 +43,11 @@ describe("idea and item response validation", () => {
     if (!result.ok) return
     expect("itemId" in result.ideas[0]!).toBe(false)
     expect(result.ideas[1]?.itemId).toBe("t-9")
+  })
+
+  it("accepts jam session and idea outcome metadata", () => {
+    const result = parseIdeaResponse({ ok: true, idea: { ...idea, jamSessions: [{ sessionId: "jam-1", createdAt: 1, outcomeAt: 2 }], decisions: [{ at: 2, actor: "agent", note: "Outcome", sessionId: "jam-1" }] } })
+    expect(result).toMatchObject({ ok: true, idea: { jamSessions: [{ sessionId: "jam-1" }], decisions: [{ note: "Outcome" }] } })
   })
 
   it("rejects an idea with an unknown type, status, or non-string insightIds", () => {
@@ -230,5 +236,28 @@ describe("nextStage", () => {
     expect(nextStage("review")).toBe("shipped")
     expect(nextStage("shipped")).toBeNull()
     expect(nextStage("dropped")).toBeNull()
+  })
+})
+
+describe("startResearchSession", () => {
+  it("starts and links a full-evidence goal for an un-sessioned research item", async () => {
+    let objective = ""
+    const result = await startResearchSessionWithDeps({ ...item, stage: "research" as const, sessionIds: [], decisions: [] }, { ...idea, status: "promoted" }, "repo-1", { baseUrl: "http://chunky" }, {
+      resolveBaseUrl: async (url) => url ?? null,
+      listInsights: async () => ({ ok: true, insights: [{ id: "i-1", passId: "p", title: "Signal", summary: "Summary", evidence: [{ artifactId: "a", quote: "Quote" }], createdAt: 1 }] }),
+      create: async (_url, repo) => ({ sessionId: `session-${repo}`, incognito: false }),
+      goal: async (_url, _id, body) => { objective = body.objective ?? ""; return null },
+      update: async (_id, update) => ({ ok: true, item: { ...item, stage: "research", sessionIds: [String(update.addSessionId)], decisions: [update.addDecision! as any] } }),
+    })
+    expect(result).toMatchObject({ ok: true, sessionId: "session-repo-1" })
+    expect(objective).toContain("Retry failed payments")
+    expect(objective).toContain("Quote")
+  })
+
+  it("rejects non-research and already-sessioned items", async () => {
+    const unused: any = { resolveBaseUrl: async () => null, listInsights: async () => ({ ok: true, insights: [] }), create: async () => { throw new Error() }, goal: async () => null, update: async () => ({ ok: false, error: "no" }) }
+    const typedItem = { ...item, stage: "research" as const, decisions: [] }
+    expect(await startResearchSessionWithDeps({ ...typedItem, stage: "decision" }, idea, "repo", {}, unused)).toMatchObject({ ok: false, error: expect.stringContaining("research-stage") })
+    expect(await startResearchSessionWithDeps(typedItem, idea, "repo", {}, unused)).toMatchObject({ ok: false, error: expect.stringContaining("already") })
   })
 })

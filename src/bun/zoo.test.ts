@@ -73,6 +73,25 @@ test("persists setup metadata and credential names without exposing values", asy
   expect(await zoo.deleteCredential({ name: "token" })).toEqual({ ok: true })
 })
 
+test("persists idea and item jams and records outcomes without changing disposition", async () => {
+  const zoo = setup()
+  const created = await zoo.createIdea({ type: "build", title: "Jam me", rationale: "Explore first" }); if (!created.ok) throw new Error(created.error)
+  const ideaId = created.idea.id
+  expect(await zoo.recordJamSession({ target: "idea", targetId: ideaId, sessionId: "jam-idea" })).toMatchObject({ ok: true, idea: { status: "proposed", jamSessions: [{ sessionId: "jam-idea" }] } })
+  const outcome = await zoo.addJamOutcome({ sessionId: "jam-idea", note: "Needs a spike" })
+  expect(outcome).toMatchObject({ ok: true, idea: { status: "proposed", decisions: [{ note: "Needs a spike", sessionId: "jam-idea" }], jamSessions: [{ outcomeAt: expect.any(Number) }] } })
+  expect(await zoo.addJamOutcome({ sessionId: "jam-idea", note: "Again" })).toMatchObject({ ok: false })
+  const promoted = await zoo.promoteIdea({ ideaId, reason: "User chose go" }); if (!promoted.ok) throw new Error(promoted.error)
+  expect((await zoo.getIdea({ ideaId }))).toMatchObject({ ok: true, idea: { status: "promoted", jamSessions: [{ sessionId: "jam-idea" }], decisions: [{ note: "Needs a spike" }] } })
+  expect(await zoo.recordJamSession({ target: "item", targetId: promoted.item.id, sessionId: "jam-item" })).toMatchObject({ ok: true, item: { jamSessions: [{ sessionId: "jam-item" }], sessionIds: [] } })
+  expect(await zoo.addNote({ itemId: promoted.item.id, note: "Item jam conclusion" })).toMatchObject({ ok: true, item: { decisions: expect.any(Array), jamSessions: [{ outcomeAt: expect.any(Number) }] } })
+  expect(await zoo.recordJamSession({ target: "idea", targetId: "missing", sessionId: "bad" })).toMatchObject({ ok: false })
+  const dismissed = await zoo.createIdea({ type: "investigate", title: "Dismiss later", rationale: "Jam history survives" }); if (!dismissed.ok) throw new Error(dismissed.error)
+  await zoo.recordJamSession({ target: "idea", targetId: dismissed.idea.id, sessionId: "jam-dismissed" })
+  await zoo.addJamOutcome({ sessionId: "jam-dismissed", note: "Not now" })
+  expect(await zoo.dismissIdea({ ideaId: dismissed.idea.id, reason: "User declined" })).toMatchObject({ ok: true, idea: { status: "dismissed", jamSessions: [{ sessionId: "jam-dismissed" }], decisions: [{ note: "Not now" }] } })
+})
+
 test("backfills paginated issues, dedupes unchanged content, and versions changes", async () => {
   const zoo = setup([[issue("ZOO-1", "First")], [issue("ZOO-2", "Second")]])
   const connected = await zoo.connectLinear({ apiKey: "good" }); if (!connected.ok) throw new Error(connected.error)

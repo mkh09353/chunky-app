@@ -118,11 +118,12 @@ export function useZooBoard(): ZooBoard {
   }, [available, refresh])
 
   const backfilling = !!status?.sources.some((source) => source.backfill.state === "running")
+  const pendingJam = ideas.some((idea) => idea.jamSessions?.some((session) => !session.outcomeAt)) || items.some((item) => item.jamSessions?.some((session) => !session.outcomeAt))
   useEffect(() => {
-    if (!available || !backfilling) return
+    if (!available || (!backfilling && !pendingJam)) return
     const timer = setInterval(() => void refresh(), POLL_MS)
     return () => clearInterval(timer)
-  }, [available, backfilling, refresh])
+  }, [available, backfilling, pendingJam, refresh])
 
   return { available, status, areas, watches, watchHour, watchLastRunAt, xWatches, xWatchIntervalMinutes, xWatchLastSuccessAt, insights, ideas, items, error, loading, refresh }
 }

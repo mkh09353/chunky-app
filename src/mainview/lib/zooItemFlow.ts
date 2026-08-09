@@ -18,6 +18,14 @@ export type ItemFlowResult =
   | { ok: true; item: ZooItem; sessionId?: string }
   | { ok: false; error: string; item?: ZooItem }
 
+export type ResearchSessionDeps = {
+  resolveBaseUrl: (baseUrl?: string | null) => Promise<string | null>
+  listInsights: typeof zooListInsights
+  create: typeof createSession
+  goal: typeof setGoal
+  update: typeof zooUpdateItem
+}
+
 /** Quotes are capped so a chatty insight cannot crowd out the brief itself. */
 const MAX_QUOTES = 12
 const MAX_QUOTE_CHARS = 600
@@ -96,33 +104,28 @@ export async function promoteIdea(
     return { ok: false, error, item: logged.ok ? logged.item : item }
   }
 
-  const baseUrl = await resolveBaseUrl(opts.baseUrl)
-  if (!baseUrl) return noteFailure("No Chunky server is available.")
-
-  // Best effort: a brief without quotes still beats no research session.
-  const listed = await zooListInsights()
-  const brief = buildResearchBrief(idea, listed.ok ? listed.insights : [])
-
-  let sessionId: string
-  try {
-    sessionId = (await createSession(baseUrl, repoId)).sessionId
-  } catch (err) {
-    return noteFailure(errorMessage(err, "Could not create a research session."))
-  }
-
-  try {
-    await setGoal(baseUrl, sessionId, { objective: brief, mode: "direct" })
-  } catch (err) {
-    return noteFailure(errorMessage(err, "Could not set the research goal."))
-  }
-
-  const updated = await zooUpdateItem(item.id, {
-    addSessionId: sessionId,
-    addDecision: { actor: "user", note: "Promoted for research" },
-  })
-  if (!updated.ok) return { ok: false, error: updated.error, item }
-  return { ok: true, item: updated.item, sessionId }
+  const started = await startResearchSession(item, idea, repoId, { ...opts, decisionNote: "Promoted for research" })
+  return started.ok ? started : noteFailure(started.error)
 }
+
+/** Start the canonical goal session for an existing research item. This is also
+ * the repair path for agent-promoted items, whose fixed server tool deliberately
+ * creates an item without a session. */
+export async function startResearchSessionWithDeps(item: ZooItem, idea: ZooIdea, repoId: string | null | undefined, opts: { baseUrl?: string | null; decisionNote?: string }, deps: ResearchSessionDeps): Promise<ItemFlowResult> {
+  if (!repoId) return { ok: false, error: "Research needs a selected repository.", item }
+  if (item.stage !== "research") return { ok: false, error: "Only a research-stage item can start research.", item }
+  if (item.sessionIds.length) return { ok: false, error: "This item already has a research session.", item }
+  if (item.ideaId !== idea.id) return { ok: false, error: "The item does not match its originating idea.", item }
+  const baseUrl = await deps.resolveBaseUrl(opts.baseUrl); if (!baseUrl) return { ok: false, error: "No Chunky server is available.", item }
+  const listed = await deps.listInsights(); const brief = buildResearchBrief(idea, listed.ok ? listed.insights : [])
+  let sessionId: string
+  try { sessionId = (await deps.create(baseUrl, repoId)).sessionId } catch (err) { return { ok: false, error: errorMessage(err, "Could not create a research session."), item } }
+  try { await deps.goal(baseUrl, sessionId, { objective: brief, mode: "direct" }) } catch (err) { return { ok: false, error: errorMessage(err, "Could not set the research goal."), item } }
+  const updated = await deps.update(item.id, { addSessionId: sessionId, addDecision: { actor: "user", note: opts.decisionNote ?? "Research session started" } })
+  return updated.ok ? { ok: true, item: updated.item, sessionId } : { ok: false, error: `Research started, but the Zoo could not link the session: ${updated.error}`, item }
+}
+
+export const startResearchSession = (item: ZooItem, idea: ZooIdea, repoId: string | null | undefined, opts: { baseUrl?: string | null; decisionNote?: string } = {}) => startResearchSessionWithDeps(item, idea, repoId, opts, { resolveBaseUrl, listInsights: zooListInsights, create: createSession, goal: setGoal, update: zooUpdateItem })
 
 /** The item's newest session — where feedback and follow-ups go. */
 export function latestSessionId(item: ZooItem): string | null {

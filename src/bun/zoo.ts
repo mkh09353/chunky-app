@@ -15,7 +15,7 @@ import {
 import { DEFAULT_WATCH_HOUR } from "./watchScheduler"
 import { DEFAULT_X_WATCH_INTERVAL_MINUTES, MAX_X_WATCH_INTERVAL_MINUTES, MIN_X_WATCH_INTERVAL_MINUTES } from "./xWatchScheduler"
 import { formatXArtifact, normalizeXHandle, type XWatchRun } from "./xWatch"
-import type { SetupSessionMeta, ZooArea, ZooAreaKind, ZooArtifactMeta, ZooCredentialMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooXWatch, ZooXWatchResult, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
+import type { SetupSessionMeta, ZooArea, ZooAreaKind, ZooArtifactMeta, ZooCredentialMeta, ZooIdeaDecision, ZooJamSession, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooXWatch, ZooXWatchResult, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
 
 const LINEAR_URL = "https://api.linear.app/graphql"
 const DEFAULT_EXPORT_CHARS = 150_000
@@ -139,6 +139,10 @@ export function createZooManager(deps: ZooDependencies = {}) {
     // Secret values stay in Bun's local database. Every public method below
     // explicitly selects/returns metadata and never serializes `value`.
     db.run("CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, value TEXT NOT NULL, created_at INTEGER NOT NULL)")
+    db.run("CREATE TABLE IF NOT EXISTS jam_sessions (session_id TEXT PRIMARY KEY, target_kind TEXT NOT NULL CHECK(target_kind IN ('idea', 'item')), target_id TEXT NOT NULL, created_at INTEGER NOT NULL, outcome_at INTEGER)")
+    db.run("CREATE INDEX IF NOT EXISTS jam_sessions_target ON jam_sessions(target_kind, target_id, created_at)")
+    db.run("CREATE TABLE IF NOT EXISTS idea_decisions (id TEXT PRIMARY KEY, idea_id TEXT NOT NULL REFERENCES ideas(id), session_id TEXT REFERENCES jam_sessions(session_id), at INTEGER NOT NULL, actor TEXT NOT NULL, note TEXT NOT NULL)")
+    db.run("CREATE INDEX IF NOT EXISTS idea_decisions_idea ON idea_decisions(idea_id, at)")
     db.run("CREATE INDEX IF NOT EXISTS setup_sessions_activity ON setup_sessions(last_activity_at DESC)")
     db.run("CREATE INDEX IF NOT EXISTS credentials_created ON credentials(created_at DESC)")
     if (isNewStore && deps.seedDefaults !== false) {
@@ -219,8 +223,9 @@ export function createZooManager(deps: ZooDependencies = {}) {
   }
   const areaExists = (id: string) => !!one("SELECT id FROM areas WHERE id = ?", id)
   const insightIds = (ideaId: string) => rows("SELECT insight_id FROM idea_insights WHERE idea_id = ? ORDER BY rowid", ideaId).map((r) => String(r.insight_id))
-  const ideaFrom = (row: Row): ZooIdea => ({ id: String(row.id), type: row.type as ZooIdeaType, title: String(row.title), rationale: String(row.rationale), status: row.status as ZooIdeaStatus, insightIds: insightIds(String(row.id)), ...areaOf(row), createdAt: Number(row.created_at), ...(typeof row.item_id === "string" && row.item_id ? { itemId: row.item_id } : {}), ...(typeof row.dismiss_reason === "string" && row.dismiss_reason ? { dismissReason: row.dismiss_reason } : {}) })
-  const itemFrom = (row: Row): ZooItem => ({ id: String(row.id), ideaId: String(row.idea_id), title: String(row.title), stage: row.stage as ZooItemStage, sessionIds: rows("SELECT session_id FROM item_sessions WHERE item_id = ? ORDER BY rowid", row.id).map((r) => String(r.session_id)), decisions: rows("SELECT at, actor, note FROM item_decisions WHERE item_id = ? ORDER BY at, rowid", row.id).map((r): ZooDecision => ({ at: Number(r.at), actor: r.actor as ZooDecision["actor"], note: String(r.note) })), ...areaOf(row), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) })
+  const jamSessions = (kind: "idea" | "item", id: unknown): ZooJamSession[] => rows("SELECT session_id, created_at, outcome_at FROM jam_sessions WHERE target_kind = ? AND target_id = ? ORDER BY created_at, rowid", kind, id).map((r) => ({ sessionId: String(r.session_id), createdAt: Number(r.created_at), ...(typeof r.outcome_at === "number" ? { outcomeAt: r.outcome_at } : {}) }))
+  const ideaFrom = (row: Row): ZooIdea => ({ id: String(row.id), type: row.type as ZooIdeaType, title: String(row.title), rationale: String(row.rationale), status: row.status as ZooIdeaStatus, insightIds: insightIds(String(row.id)), jamSessions: jamSessions("idea", row.id), decisions: rows("SELECT at, actor, note, session_id FROM idea_decisions WHERE idea_id = ? ORDER BY at, rowid", row.id).map((r): ZooIdeaDecision => ({ at: Number(r.at), actor: r.actor as ZooIdeaDecision["actor"], note: String(r.note), ...(typeof r.session_id === "string" && r.session_id ? { sessionId: r.session_id } : {}) })), ...areaOf(row), createdAt: Number(row.created_at), ...(typeof row.item_id === "string" && row.item_id ? { itemId: row.item_id } : {}), ...(typeof row.dismiss_reason === "string" && row.dismiss_reason ? { dismissReason: row.dismiss_reason } : {}) })
+  const itemFrom = (row: Row): ZooItem => ({ id: String(row.id), ideaId: String(row.idea_id), title: String(row.title), stage: row.stage as ZooItemStage, sessionIds: rows("SELECT session_id FROM item_sessions WHERE item_id = ? ORDER BY rowid", row.id).map((r) => String(r.session_id)), jamSessions: jamSessions("item", row.id), decisions: rows("SELECT at, actor, note FROM item_decisions WHERE item_id = ? ORDER BY at, rowid", row.id).map((r): ZooDecision => ({ at: Number(r.at), actor: r.actor as ZooDecision["actor"], note: String(r.note) })), ...areaOf(row), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) })
 
   async function gql(key: string, query: string, variables?: Record<string, unknown>): Promise<Record<string, unknown>> {
     const response = await request(LINEAR_URL, { method: "POST", headers: { Authorization: key, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables }) })
@@ -300,6 +305,30 @@ export function createZooManager(deps: ZooDependencies = {}) {
       const name = text(object(params)?.name, 500); if (!name) return { ok: false, error: "Invalid credential name" }
       run("DELETE FROM credentials WHERE name = ?", name); return { ok: true }
     } catch { return { ok: false, error: "Unable to delete credential" } } },
+    async recordJamSession(params: unknown): Promise<Result<{ target: "idea" | "item"; idea?: ZooIdea; item?: ZooItem }>> { try {
+      const body = object(params); const target = body?.target; const targetId = text(body?.targetId, 200); const sessionId = text(body?.sessionId, 500)
+      if ((target !== "idea" && target !== "item") || !targetId || !sessionId) return { ok: false, error: "Invalid jam session" }
+      const table = target === "idea" ? "ideas" : "items"; if (!one(`SELECT id FROM ${table} WHERE id = ?`, targetId)) return { ok: false, error: `Unknown ${target}` }
+      run("INSERT OR IGNORE INTO jam_sessions (session_id, target_kind, target_id, created_at) VALUES (?, ?, ?, ?)", sessionId, target, targetId, clock())
+      const owned = one("SELECT target_kind, target_id FROM jam_sessions WHERE session_id = ?", sessionId)
+      if (owned?.target_kind !== target || owned?.target_id !== targetId) return { ok: false, error: "Session is already linked to another Zoo card" }
+      return target === "idea" ? { ok: true, target, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", targetId)!) } : { ok: true, target, item: itemFrom(one("SELECT * FROM items WHERE id = ?", targetId)!) }
+    } catch { return { ok: false, error: "Unable to link jam session" } } },
+    async addJamOutcome(params: unknown): Promise<Result<{ target: "idea" | "item"; idea?: ZooIdea; item?: ZooItem }>> { try {
+      const body = object(params); const sessionId = text(body?.sessionId, 500); const note = text(body?.note, 20_000)
+      if (!sessionId || !note) return { ok: false, error: "Invalid jam outcome" }
+      const jam = one("SELECT target_kind, target_id, outcome_at FROM jam_sessions WHERE session_id = ?", sessionId)
+      if (!jam) return { ok: false, error: "Unknown jam session" }
+      if (jam.outcome_at !== null && jam.outcome_at !== undefined) return { ok: false, error: "This jam already recorded an outcome" }
+      const at = clock(); const target = jam.target_kind as "idea" | "item"; const targetId = String(jam.target_id)
+      database().transaction(() => {
+        if (target === "idea") run("INSERT INTO idea_decisions (id, idea_id, session_id, at, actor, note) VALUES (?, ?, ?, ?, 'agent', ?)", randomUUID(), targetId, sessionId, at, note)
+        else run("INSERT INTO item_decisions (id, item_id, at, actor, note) VALUES (?, ?, ?, 'agent', ?)", randomUUID(), targetId, at, note)
+        run("UPDATE jam_sessions SET outcome_at = ? WHERE session_id = ?", at, sessionId)
+        if (target === "item") run("UPDATE items SET updated_at = ? WHERE id = ?", at, targetId)
+      })()
+      return target === "idea" ? { ok: true, target, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", targetId)!) } : { ok: true, target, item: itemFrom(one("SELECT * FROM items WHERE id = ?", targetId)!) }
+    } catch { return { ok: false, error: "Unable to record jam outcome" } } },
     async listAreas(params: unknown): Promise<Result<{ areas: ZooArea[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid areas request" }; return { ok: true, areas: rows("SELECT * FROM areas ORDER BY created_at, rowid").map(areaFrom) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async createArea(params: unknown): Promise<Result<{ area: ZooArea }>> { try {
       const body = object(params); const name = text(body?.name, 200); if (!name) return { ok: false, error: "Invalid area name" }
@@ -580,7 +609,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
     async promoteIdea(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const reason = text(body?.reason, 20_000); if (!reason) return { ok: false, error: "Invalid promotion reason" }; const created = await this.createItem({ ideaId: body?.ideaId }); if (!created.ok) return created; return this.updateItem({ itemId: created.item.id, addDecision: { actor: "agent", note: `Promoted: ${reason}` } }) },
     async dismissIdea(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const id = text(body?.ideaId, 200); const reason = text(body?.reason, 20_000); if (!id || !reason) return { ok: false, error: "Invalid dismissal" }; if (!one("SELECT id FROM ideas WHERE id = ?", id)) return { ok: false, error: "Unknown idea" }; run("UPDATE ideas SET status = 'dismissed', dismiss_reason = ? WHERE id = ?", reason, id); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async createIdea(params: unknown): Promise<Result<{ idea: ZooIdea }>> { try { const body = object(params); const type = body?.type; const title = text(body?.title, 2000); const rationale = text(body?.rationale, 20_000); if (typeof type !== "string" || !IDEA_TYPES.has(type as ZooIdeaType) || !title || !rationale) return { ok: false, error: "Invalid idea" }; const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }; const id = randomUUID(); database().transaction(() => { run("INSERT INTO ideas (id, pass_id, type, title, rationale, status, area_id, created_at) VALUES (?, NULL, ?, ?, ?, 'proposed', ?, ?)", id, type, title, rationale, areaId || null, clock()); if (Array.isArray(body?.insightIds)) for (const raw of body.insightIds) { const insightId = text(raw, 200); if (insightId && one("SELECT id FROM insights WHERE id = ?", insightId)) run("INSERT OR IGNORE INTO idea_insights (idea_id, insight_id) VALUES (?, ?)", id, insightId) } })(); return { ok: true, idea: ideaFrom(one("SELECT * FROM ideas WHERE id = ?", id)!) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async addNote(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const note = text(body?.note, 20_000); if (!note) return { ok: false, error: "Invalid note" }; return this.updateItem({ itemId: body?.itemId, addDecision: { actor: "agent", note } }) },
+    async addNote(params: unknown): Promise<Result<{ item: ZooItem }>> { const body = object(params); const note = text(body?.note, 20_000); const itemId = text(body?.itemId, 200); if (!note || !itemId) return { ok: false, error: "Invalid note" }; const updated = await this.updateItem({ itemId, addDecision: { actor: "agent", note } }); if (updated.ok) { const pending = one("SELECT session_id FROM jam_sessions WHERE target_kind = 'item' AND target_id = ? AND outcome_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", itemId); if (pending) run("UPDATE jam_sessions SET outcome_at = ? WHERE session_id = ?", clock(), pending.session_id); return { ok: true, item: itemFrom(one("SELECT * FROM items WHERE id = ?", itemId)!) } } return updated },
   }
 }
 export type ZooManager = ReturnType<typeof createZooManager>

@@ -114,7 +114,7 @@ export function BoardView({
               <Card
                 key={idea.id}
                 title={idea.title}
-                meta={relativeTime(idea.createdAt)}
+                meta={`${relativeTime(idea.createdAt)}${idea.jamSessions?.length ? ` · ${idea.jamSessions.length} jam${idea.jamSessions.length === 1 ? "" : "s"}` : ""}`}
                 badge={<Badge className={IDEA_TYPE_TONE[idea.type]}>{IDEA_TYPE_LABEL[idea.type]}</Badge>}
                 area={showAreas ? areaName(areas, idea.areaId) : null}
                 selected={selectedId === `idea:${idea.id}`}
@@ -128,7 +128,7 @@ export function BoardView({
                 <Card
                   key={item.id}
                   title={item.title}
-                  meta={`${relativeTime(item.updatedAt)} · ${item.sessionIds.length} session${item.sessionIds.length === 1 ? "" : "s"}`}
+                  meta={`${relativeTime(item.updatedAt)} · ${item.sessionIds.length} research · ${item.jamSessions?.length ?? 0} jam`}
                   badge={<Badge className={STAGE_TONE[item.stage]}>{STAGE_LABEL[item.stage]}</Badge>}
                   area={showAreas ? areaName(areas, item.areaId) : null}
                   selected={selectedId === `item:${item.id}`}

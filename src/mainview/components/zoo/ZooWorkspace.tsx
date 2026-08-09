@@ -36,6 +36,8 @@ import { resolveRepoForArea } from "~/lib/zooDecisions"
 import { runExtraction, type ExtractionPhase } from "~/lib/zooExtraction"
 import { buildInbox, entryForIdea, entryForItem, inFlightItems, type InboxEntry } from "~/lib/zooInbox"
 import { runSynthesis, runTriage } from "~/lib/zooSynthesis"
+import { startJam, type JamTarget } from "~/lib/zooJam"
+import { startResearchSession } from "~/lib/zooItemFlow"
 import { AreaSwitcher } from "./AreaSwitcher"
 import { Button } from "../ui/button"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip"
@@ -80,6 +82,7 @@ export function ZooWorkspace({
   const [headerError, setHeaderError] = useState<string | null>(null)
   const [setupRepoId, setSetupRepoId] = useState<string | null>(null)
   const [setupRepoError, setSetupRepoError] = useState<string | null>(null)
+  const [cardActionBusy, setCardActionBusy] = useState<string | null>(null)
 
   const [runs, setRuns] = useState<Record<RunKind, RunState>>(IDLE_RUNS)
   const [elapsed, setElapsed] = useState(0)
@@ -256,6 +259,32 @@ export function ZooWorkspace({
     setView("setup")
   }
 
+  const targetArea = (entry: InboxEntry) => entry.areaId ? areas.find((candidate) => candidate.id === entry.areaId) ?? null : null
+  const startCardJam = async (entry: InboxEntry) => {
+    if (cardActionBusy) return
+    const idea = entry.idea ?? (entry.item ? ideas.find((candidate) => candidate.id === entry.item!.ideaId) : undefined)
+    if (!idea) { setHeaderError("This card's originating idea is unavailable."); return }
+    setCardActionBusy(entry.id); setHeaderError(null)
+    const target: JamTarget = entry.item ? { kind: "item", item: entry.item, idea } : { kind: "idea", idea }
+    const result = await startJam(baseUrl, repoId, targetArea(entry), target, insights)
+    setCardActionBusy(null)
+    if (!result.ok) { setHeaderError(result.error); return }
+    if (result.warning) setHeaderError(result.warning)
+    await refresh(); onOpenSession?.(result.sessionId)
+  }
+  const startCardResearch = async (entry: InboxEntry) => {
+    if (cardActionBusy || !entry.item) return
+    const idea = entry.idea ?? ideas.find((candidate) => candidate.id === entry.item!.ideaId)
+    if (!idea) { setHeaderError("This item's originating idea is unavailable."); return }
+    setCardActionBusy(entry.id); setHeaderError(null)
+    const bound = await resolveRepoForArea(baseUrl, targetArea(entry), repoId)
+    if (!bound) { setCardActionBusy(null); setHeaderError("Select a repository or configure this card's area repository before starting research."); return }
+    const result = await startResearchSession(entry.item, idea, bound, { baseUrl })
+    setCardActionBusy(null)
+    if (!result.ok) { setHeaderError(result.error); return }
+    await refresh(); if (result.sessionId) onOpenSession?.(result.sessionId)
+  }
+
   const openSession = onOpenSession
     ? (sessionId: string) => onOpenSession(sessionId)
     : undefined
@@ -295,6 +324,9 @@ export function ZooWorkspace({
       synthesizing={runs.synthesis.kind === "running"}
       {...(openSession ? { onOpenSession: openSession } : {})}
       loading={board.loading}
+      onStartJam={(entry) => void startCardJam(entry)}
+      onStartResearch={(entry) => void startCardResearch(entry)}
+      actionBusyId={cardActionBusy}
     />
   ) : view === "board" ? (
     <BoardView
@@ -455,6 +487,9 @@ export function ZooWorkspace({
             areaBusy={areaBusy}
             onClose={() => setSelectedId(null)}
             {...(openSession ? { onOpenSession: openSession } : {})}
+            onStartJam={(entry) => void startCardJam(entry)}
+            onStartResearch={(entry) => void startCardResearch(entry)}
+            actionBusy={cardActionBusy === selected.id}
           />
         )}
       </div>

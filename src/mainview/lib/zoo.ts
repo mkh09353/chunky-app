@@ -16,6 +16,8 @@ import type {
   ZooDecision,
   ZooEvidence,
   ZooIdea,
+  ZooIdeaDecision,
+  ZooJamSession,
   ZooIdeaStatus,
   ZooIdeaType,
   ZooInsight,
@@ -39,6 +41,8 @@ export type {
   ZooDecision,
   ZooEvidence,
   ZooIdea,
+  ZooIdeaDecision,
+  ZooJamSession,
   ZooIdeaStatus,
   ZooIdeaType,
   ZooInsight,
@@ -267,6 +271,9 @@ function parseIdea(value: unknown): ZooIdea | null {
     insightIds.push(insightId)
   }
   const itemId = str(row.itemId)
+  const jamSessions = parseList(row.jamSessions ?? [], parseJamSession)
+  const decisions = parseList(row.decisions ?? [], parseIdeaDecision)
+  if (!jamSessions || !decisions) return null
   return {
     id,
     type: type as ZooIdeaType,
@@ -274,10 +281,26 @@ function parseIdea(value: unknown): ZooIdea | null {
     rationale,
     status: status as ZooIdeaStatus,
     insightIds,
+    jamSessions,
+    decisions,
     ...areaOf(row),
     createdAt,
     ...(itemId ? { itemId } : {}),
   }
+}
+
+function parseJamSession(value: unknown): ZooJamSession | null {
+  const row = obj(value); if (!row) return null
+  const sessionId = str(row.sessionId); const createdAt = num(row.createdAt); const outcomeAt = num(row.outcomeAt)
+  if (!sessionId || createdAt === null || (row.outcomeAt !== undefined && outcomeAt === null)) return null
+  return { sessionId, createdAt, ...(outcomeAt !== null ? { outcomeAt } : {}) }
+}
+
+function parseIdeaDecision(value: unknown): ZooIdeaDecision | null {
+  const row = obj(value); if (!row) return null
+  const at = num(row.at); const note = str(row.note); const actor = row.actor; const sessionId = str(row.sessionId)
+  if (at === null || !note || (actor !== "user" && actor !== "agent")) return null
+  return { at, actor, note, ...(sessionId ? { sessionId } : {}) }
 }
 
 function parseDecision(value: unknown): ZooDecision | null {
@@ -314,12 +337,15 @@ function parseItem(value: unknown): ZooItem | null {
     if (!decision) return null
     decisions.push(decision)
   }
+  const jamSessions = parseList(row.jamSessions ?? [], parseJamSession)
+  if (!jamSessions) return null
   return {
     id,
     ideaId,
     title,
     stage: stage as ZooItemStage,
     sessionIds,
+    jamSessions,
     decisions,
     ...areaOf(row),
     createdAt,
@@ -786,6 +812,16 @@ export function zooSetIdeaStatus(
 
 export function zooCreateItem(ideaId: string): Promise<ZooResult<{ item: ZooItem }>> {
   return call("zooCreateItem", { ideaId }, parseItemResponse)
+}
+
+export function zooRecordJamSession(target: "idea" | "item", targetId: string, sessionId: string): Promise<ZooResult<{ target: "idea" | "item"; idea?: ZooIdea; item?: ZooItem }>> {
+  return call("zooRecordJamSession", { target, targetId, sessionId }, (raw) => {
+    const { body, failure } = envelope(raw); if (!body) return failure ?? malformed()
+    if (body.target !== "idea" && body.target !== "item") return malformed()
+    const idea = body.idea === undefined ? null : parseIdea(body.idea); const item = body.item === undefined ? null : parseItem(body.item)
+    if ((body.target === "idea" && !idea) || (body.target === "item" && !item)) return malformed()
+    return { ok: true, target: body.target, ...(idea ? { idea } : {}), ...(item ? { item } : {}) }
+  })
 }
 
 export function zooUpdateItem(

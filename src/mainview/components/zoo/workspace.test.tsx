@@ -161,6 +161,20 @@ describe("DetailPane", () => {
     expect(html).toContain("Research done: the retry hook already exists.")
     expect(html).toContain("Sessions · 1")
     expect(html).toContain("s-42")
+    expect(html).toContain("Jam")
+  })
+})
+
+describe("card working sessions", () => {
+  it("offers jam for a proposed idea and research repair for an un-sessioned item", () => {
+    const proposed = entries.find((entry) => entry.idea?.id === "d-2")!
+    const ideaHtml = renderToStaticMarkup(<TooltipProvider><DetailPane entry={proposed} areas={areas} onClose={() => {}} onStartJam={() => {}} /></TooltipProvider>)
+    expect(ideaHtml).toContain("Working sessions")
+    expect(ideaHtml).toContain("Jam")
+    const repair = { ...items[0]!, stage: "research" as const, sessionIds: [] }
+    const repairEntry = { ...entries.find((entry) => entry.item?.id === "t-1")!, item: repair }
+    const itemHtml = renderToStaticMarkup(<TooltipProvider><DetailPane entry={repairEntry} areas={areas} onClose={() => {}} onStartJam={() => {}} onStartResearch={() => {}} /></TooltipProvider>)
+    expect(itemHtml).toContain("Start research session")
   })
 })
 

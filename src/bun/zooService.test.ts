@@ -46,6 +46,18 @@ test("Zoo service excludes renderer setup and credential operations", async () =
   expect(await manager.listCredentials({})).toEqual({ ok: true, credentials: [] })
 })
 
+test("Zoo addNote routes jam targets to idea outcomes while direct outcome stays excluded", async () => {
+  const { service, manager } = setup(); const target = await service.target()
+  const created = await manager.createIdea({ type: "investigate", title: "Jam", rationale: "Learn" }); if (!created.ok) throw new Error(created.error)
+  await manager.recordJamSession({ target: "idea", targetId: created.idea.id, sessionId: "session-1" })
+  expect(await (await op(target, "addNote", { itemId: "jam:session-1", note: "Keep proposed" })).json()).toMatchObject({ ok: true, idea: { status: "proposed", decisions: [{ note: "Keep proposed" }] } })
+  expect(await (await op(target, "addNote", { itemId: "jam:", note: "Malformed" })).json()).toMatchObject({ ok: false, error: "Invalid jam outcome" })
+  expect(await (await op(target, "addNote", { itemId: "jam:missing", note: "Unknown" })).json()).toMatchObject({ ok: false, error: "Unknown jam session" })
+  expect(await (await op(target, "addJamOutcome", { sessionId: "session-1", note: "Bypass" })).json()).toEqual({ ok: false, error: "Unknown Zoo operation" })
+  const promoted = await manager.promoteIdea({ ideaId: created.idea.id, reason: "Now go" }); if (!promoted.ok) throw new Error(promoted.error)
+  expect(await (await op(target, "addNote", { itemId: promoted.item.id, note: "Ordinary item note" })).json()).toMatchObject({ ok: true, item: { decisions: expect.arrayContaining([expect.objectContaining({ note: "Ordinary item note" })]) } })
+})
+
 test("Zoo service reads and mutates product-factory ideas and items", async () => {
   const { service } = setup(); const target = await service.target()
   const created = await (await op(target, "createIdea", { type: "build", title: "Better search", rationale: "Customers ask" })).json() as any

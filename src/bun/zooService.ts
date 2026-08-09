@@ -29,6 +29,12 @@ export function createZooService({ manager }: ZooServiceDeps): ZooService {
         return envelope({ ok: false, error: "Invalid operation" }, 400)
       }
       if (!AGENT_OPERATIONS.has(method)) return envelope({ ok: false, error: "Unknown Zoo operation" })
+      if (method === "addNote") {
+        const body = params as { itemId?: unknown; note?: unknown }
+        if (typeof body.itemId === "string" && body.itemId.startsWith("jam:")) {
+          return envelope(await manager.addJamOutcome({ sessionId: body.itemId.slice(4), note: body.note }))
+        }
+      }
       const operation = (manager as Record<string, unknown>)[method]
       if (typeof operation !== "function") return envelope({ ok: false, error: "Unknown Zoo operation" })
       return envelope(await (operation as (params: unknown) => Promise<unknown>).call(manager, params))

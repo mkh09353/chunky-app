@@ -4,7 +4,7 @@
 // Reading an artifact is the one server round trip this pane makes, and it goes
 // through lib/zoo.ts like everything else.
 
-import { ExternalLink, LoaderCircle, X } from "lucide-react"
+import { ExternalLink, FlaskConical, LoaderCircle, MessageSquareMore, X } from "lucide-react"
 import { useEffect, useState, type ReactNode } from "react"
 import { cn } from "~/lib/cn"
 import { relativeTime } from "~/lib/format"
@@ -12,6 +12,7 @@ import { openExternal } from "~/lib/openExternal"
 import { zooGetArtifact, type ZooArea, type ZooAreaKind, type ZooArtifactDetail } from "~/lib/zoo"
 import type { InboxEntry } from "~/lib/zooInbox"
 import { latestSessionId } from "~/lib/zooItemFlow"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { AreaAssignMenu } from "./AreaSwitcher"
 import { Button } from "../ui/button"
 import {
@@ -41,6 +42,9 @@ export function DetailPane({
   areaBusy = false,
   onClose,
   onOpenSession,
+  onStartJam,
+  onStartResearch,
+  actionBusy = false,
 }: {
   entry: InboxEntry
   areas: ZooArea[]
@@ -49,6 +53,9 @@ export function DetailPane({
   areaBusy?: boolean
   onClose: () => void
   onOpenSession?: (sessionId: string) => void
+  onStartJam?: (entry: InboxEntry) => void
+  onStartResearch?: (entry: InboxEntry) => void
+  actionBusy?: boolean
 }) {
   const [artifact, setArtifact] = useState<ZooArtifactDetail | null>(null)
   const [artifactLoading, setArtifactLoading] = useState(false)
@@ -131,6 +138,31 @@ export function DetailPane({
             <p className="min-w-0 whitespace-pre-wrap break-words text-[12.5px] text-foreground leading-relaxed">
               {idea.rationale}
             </p>
+          </Section>
+        )}
+
+        {(idea || item) && (
+          <Section title="Working sessions">
+            <div className="flex min-w-0 flex-wrap gap-1.5">
+              <Button className={NO_DRAG_REGION} size="sm" variant="outline" disabled={actionBusy || !onStartJam || (idea && !item && idea.status !== "proposed")} onClick={() => onStartJam?.(entry)}>
+                {actionBusy ? <LoaderCircle className="animate-spin" /> : <MessageSquareMore />} Jam
+              </Button>
+              {item?.stage === "research" && item.sessionIds.length === 0 && (
+                <Button className={NO_DRAG_REGION} size="sm" disabled={actionBusy || !onStartResearch} onClick={() => onStartResearch?.(entry)}>
+                  {actionBusy ? <LoaderCircle className="animate-spin" /> : <FlaskConical />} Start research session
+                </Button>
+              )}
+            </div>
+            {(item?.jamSessions ?? idea?.jamSessions ?? []).length > 0 && (
+              <div className="flex min-w-0 flex-wrap gap-1.5">
+                {(item?.jamSessions ?? idea?.jamSessions ?? []).map((session) => (
+                  <Button key={session.sessionId} className={NO_DRAG_REGION} size="sm" variant="ghost" disabled={!onOpenSession} onClick={() => onOpenSession?.(session.sessionId)}>
+                    <span className="max-w-32 truncate font-mono text-[11px]">{session.sessionId}</span>
+                    <span className="text-[10px] text-muted-foreground">{session.outcomeAt ? "outcome saved" : "awaiting outcome"}</span>
+                  </Button>
+                ))}
+              </div>
+            )}
           </Section>
         )}
 
@@ -232,6 +264,12 @@ export function DetailPane({
                   ))}
               </ol>
             )}
+          </Section>
+        )}
+
+        {!item && idea && idea.decisions && idea.decisions.length > 0 && (
+          <Section title={`Jam outcomes · ${idea.decisions.length}`}>
+            <ol className="flex min-w-0 flex-col gap-2">{[...idea.decisions].sort((a, b) => b.at - a.at).map((decision, index) => <li key={`${decision.at}-${index}`} className="min-w-0"><p className="whitespace-pre-wrap break-words text-[12.5px]">{decision.note}</p><p className="text-[11px] text-muted-foreground">The factory · {relativeTime(decision.at)}</p></li>)}</ol>
           </Section>
         )}
 

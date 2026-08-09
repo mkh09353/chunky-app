@@ -6,7 +6,7 @@
 // detail pane; the verdicts themselves go through lib/zooDecisions.ts, which
 // maps them onto the existing item-flow helpers.
 
-import { CheckCircle2, Inbox, LoaderCircle, MessageSquare, Sparkles } from "lucide-react"
+import { CheckCircle2, FlaskConical, Inbox, LoaderCircle, MessageSquare, MessageSquareMore, Sparkles } from "lucide-react"
 import { useState } from "react"
 import { cn } from "~/lib/cn"
 import { relativeTime } from "~/lib/format"
@@ -48,6 +48,9 @@ export function InboxView({
   synthesizing = false,
   onOpenSession,
   loading,
+  onStartJam,
+  onStartResearch,
+  actionBusyId,
 }: {
   entries: InboxEntry[]
   inFlight: ZooItem[]
@@ -64,6 +67,9 @@ export function InboxView({
   synthesizing?: boolean
   onOpenSession?: (sessionId: string) => void
   loading: boolean
+  onStartJam?: (entry: InboxEntry) => void
+  onStartResearch?: (entry: InboxEntry) => void
+  actionBusyId?: string | null
 }) {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -172,6 +178,11 @@ export function InboxView({
                   {synthesizing ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
                   Synthesize ideas
                 </Button>
+                {entry.idea && (
+                  <Button size="sm" variant="outline" disabled={busyId !== null || actionBusyId === entry.id || !onStartJam} onClick={() => onStartJam?.(entry)}>
+                    {actionBusyId === entry.id ? <LoaderCircle className="animate-spin" /> : <MessageSquareMore />} Jam
+                  </Button>
+                )}
                 <Button size="sm" variant="outline" onClick={() => onSetAside(entry.id)}>
                   Not now
                 </Button>
@@ -293,6 +304,7 @@ export function InboxView({
             <ul className="flex min-w-0 flex-col gap-1.5">
               {inFlight.map((item) => {
                 const sessionId = latestSessionId(item)
+                const fullEntry: InboxEntry = { id: `item:${item.id}`, kind: "item", title: item.title, why: "Research item without a session.", at: item.updatedAt, urgency: 0, item, ...(item.areaId ? { areaId: item.areaId } : {}), insights: [] }
                 return (
                   <li
                     key={item.id}
@@ -308,6 +320,11 @@ export function InboxView({
                     {sessionId && onOpenSession && (
                       <Button size="sm" variant="ghost" onClick={() => onOpenSession(sessionId)}>
                         Open
+                      </Button>
+                    )}
+                    {!sessionId && item.stage === "research" && (
+                      <Button size="sm" variant="outline" disabled={!onStartResearch || actionBusyId === `item:${item.id}`} onClick={() => onStartResearch?.(fullEntry)}>
+                        {actionBusyId === `item:${item.id}` ? <LoaderCircle className="animate-spin" /> : <FlaskConical />} Start research
                       </Button>
                     )}
                   </li>
