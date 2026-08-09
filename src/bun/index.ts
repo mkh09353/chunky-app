@@ -501,6 +501,11 @@ rpc = createRPC({
       createDirectory((params ?? {}) as { parentDir?: unknown; name?: unknown }),
 
     zooStatus: async (params: unknown) => zoo.status(params),
+    zooListAreas: async (params: unknown) => zoo.listAreas(params),
+    zooCreateArea: async (params: unknown) => zoo.createArea(params),
+    zooUpdateArea: async (params: unknown) => zoo.updateArea(params),
+    zooDeleteArea: async (params: unknown) => zoo.deleteArea(params),
+    zooAssignArea: async (params: unknown) => zoo.assignArea(params),
     zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),
     zooConnectTranscripts: async (params: unknown) => zoo.connectTranscripts(params),
     zooStartBackfill: async (params: unknown) => zoo.startBackfill(params),

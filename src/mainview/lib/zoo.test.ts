@@ -3,12 +3,16 @@
 //   bun test src/mainview/lib/zoo.test.ts
 import { describe, expect, it } from "bun:test"
 import {
+  parseAreaResponse,
+  parseAreasResponse,
   parseArtifactResponse,
   parseArtifactsResponse,
   parseExportResponse,
   parseInsightsResponse,
   parseOkResponse,
   parseRecordResponse,
+  parseIdeasResponse,
+  parseItemsResponse,
   parseSourceResponse,
   parseStatusResponse,
   ZOO_UNAVAILABLE,
@@ -242,5 +246,69 @@ describe("parseFencedInsights", () => {
     const result = parseFencedInsights(block('[{"title":"x","summary":"y"}]'))
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.insights[0]?.evidence).toEqual([])
+  })
+})
+
+// ---- Areas: the wire contract for multi-product scoping --------------------
+
+describe("area validation", () => {
+  const area = { id: "a-1", name: "Payments", repoPaths: ["/code/payments"], createdAt: 1000 }
+
+  it("accepts areas with and without repo paths", () => {
+    const result = parseAreasResponse({ ok: true, areas: [area, { id: "a-2", name: "Growth", createdAt: 2000 }] })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.areas[0]).toEqual(area)
+    // An area with no paths carries no key at all rather than an empty array.
+    expect("repoPaths" in result.areas[1]!).toBe(false)
+  })
+
+  it("rejects malformed areas and bad path lists", () => {
+    const bad = (patch: Record<string, unknown>) => parseAreaResponse({ ok: true, area: { ...area, ...patch } }).ok
+    expect(parseAreaResponse({ ok: true, area }).ok).toBe(true)
+    expect(bad({ name: "" })).toBe(false)
+    expect(bad({ createdAt: "1000" })).toBe(false)
+    expect(bad({ repoPaths: "/code/payments" })).toBe(false)
+    expect(bad({ repoPaths: ["/code/payments", 7] })).toBe(false)
+    expect(parseAreasResponse({ ok: true, areas: [area, { id: "a-2" }] }).ok).toBe(false)
+    expect(parseAreasResponse({ ok: false, error: "nope" })).toEqual({ ok: false, error: "nope" })
+  })
+
+  it("reads areaId off every scoped row, and tolerates its absence", () => {
+    const withArea = parseIdeasResponse({
+      ok: true,
+      ideas: [
+        { id: "d-1", type: "build", title: "t", rationale: "r", status: "proposed", insightIds: [], areaId: "a-1", createdAt: 1 },
+        { id: "d-2", type: "build", title: "t", rationale: "r", status: "proposed", insightIds: [], createdAt: 2 },
+      ],
+    })
+    expect(withArea.ok).toBe(true)
+    if (!withArea.ok) return
+    expect(withArea.ideas[0]?.areaId).toBe("a-1")
+    // Rows stored before areas existed simply have none — never a parse failure.
+    expect("areaId" in withArea.ideas[1]!).toBe(false)
+
+    const items = parseItemsResponse({
+      ok: true,
+      items: [{ id: "t-1", ideaId: "d-1", title: "t", stage: "research", sessionIds: [], decisions: [], areaId: "a-1", createdAt: 1, updatedAt: 2 }],
+    })
+    expect(items.ok && items.items[0]?.areaId).toBe("a-1")
+
+    const sources = parseStatusResponse({
+      ok: true,
+      sources: [{ id: "s-1", kind: "linear", label: "Acme", areaId: "a-1", createdAt: 1, backfill: { state: "done", fetched: 2 } }],
+      artifactCount: 0,
+      insightCount: 0,
+      ideaCount: 0,
+      itemCount: 0,
+      passes: [],
+    })
+    expect(sources.ok && sources.sources[0]?.areaId).toBe("a-1")
+
+    const insights = parseInsightsResponse({
+      ok: true,
+      insights: [{ id: "i-1", passId: "p-1", title: "t", summary: "s", evidence: [], areaId: "a-1", createdAt: 1 }],
+    })
+    expect(insights.ok && insights.insights[0]?.areaId).toBe("a-1")
   })
 })

@@ -6,6 +6,8 @@
 
 import { getRpc, nativeRpcAvailable } from "./rpc"
 import type {
+  ZooArea,
+  ZooAreaKind,
   ZooArtifactMeta,
   ZooDecision,
   ZooEvidence,
@@ -20,6 +22,8 @@ import type {
 } from "../../shared/zooTypes"
 
 export type {
+  ZooArea,
+  ZooAreaKind,
   ZooArtifactMeta,
   ZooBackfillState,
   ZooDecision,
@@ -105,6 +109,30 @@ const IDEA_TYPE_SET = new Set<string>(IDEA_TYPES)
 const IDEA_STATUSES = new Set<string>(["proposed", "promoted", "dismissed"])
 const ITEM_STAGE_SET = new Set<string>(ITEM_STAGES)
 
+/** areaId is optional everywhere: a row without one is "unassigned", which is
+ *  normal for anything stored before areas existed — never a parse failure. */
+function areaOf(row: Record<string, unknown>): { areaId?: string } {
+  const areaId = str(row.areaId)
+  return areaId ? { areaId } : {}
+}
+
+function parseArea(value: unknown): ZooArea | null {
+  const row = obj(value)
+  if (!row) return null
+  const id = str(row.id)
+  const name = str(row.name)
+  const createdAt = num(row.createdAt)
+  if (!id || !name || createdAt === null) return null
+  if (row.repoPaths !== undefined && !Array.isArray(row.repoPaths)) return null
+  const repoPaths: string[] = []
+  for (const entry of Array.isArray(row.repoPaths) ? row.repoPaths : []) {
+    const path = str(entry)
+    if (!path) return null
+    repoPaths.push(path)
+  }
+  return { id, name, ...(repoPaths.length ? { repoPaths } : {}), createdAt }
+}
+
 function parseSource(value: unknown): ZooSource | null {
   const row = obj(value)
   if (!row) return null
@@ -123,6 +151,7 @@ function parseSource(value: unknown): ZooSource | null {
     id,
     kind: kind as ZooSource["kind"],
     label,
+    ...areaOf(row),
     createdAt,
     backfill: {
       state: state as ZooSource["backfill"]["state"],
@@ -179,6 +208,7 @@ function parseInsight(value: unknown): ZooInsight | null {
     summary,
     ...(priority !== null ? { priority } : {}),
     evidence,
+    ...areaOf(row),
     createdAt,
   }
 }
@@ -225,6 +255,7 @@ function parseIdea(value: unknown): ZooIdea | null {
     rationale,
     status: status as ZooIdeaStatus,
     insightIds,
+    ...areaOf(row),
     createdAt,
     ...(itemId ? { itemId } : {}),
   }
@@ -271,6 +302,7 @@ function parseItem(value: unknown): ZooItem | null {
     stage: stage as ZooItemStage,
     sessionIds,
     decisions,
+    ...areaOf(row),
     createdAt,
     updatedAt,
   }
@@ -321,6 +353,20 @@ export function parseStatusResponse(raw: unknown): ZooResult<ZooStatus> {
   if (!sources || !passes || artifactCount === null || insightCount === null) return malformed()
   if (ideaCount === null || itemCount === null) return malformed()
   return { ok: true, sources, artifactCount, insightCount, ideaCount, itemCount, passes }
+}
+
+export function parseAreasResponse(raw: unknown): ZooResult<{ areas: ZooArea[] }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const areas = parseList(body.areas, parseArea)
+  return areas ? { ok: true, areas } : malformed()
+}
+
+export function parseAreaResponse(raw: unknown): ZooResult<{ area: ZooArea }> {
+  const { body, failure } = envelope(raw)
+  if (!body) return failure ?? malformed()
+  const area = parseArea(body.area)
+  return area ? { ok: true, area } : malformed()
 }
 
 export function parseSourceResponse(raw: unknown): ZooResult<{ source: ZooSource }> {
@@ -440,12 +486,50 @@ export function zooStatus(): Promise<ZooResult<ZooStatus>> {
   return call("zooStatus", {}, parseStatusResponse)
 }
 
-export function zooConnectLinear(apiKey: string): Promise<ZooResult<{ source: ZooSource }>> {
-  return call("zooConnectLinear", { apiKey }, parseSourceResponse)
+export function zooListAreas(): Promise<ZooResult<{ areas: ZooArea[] }>> {
+  return call("zooListAreas", {}, parseAreasResponse)
 }
 
-export function zooConnectTranscripts(folder: string): Promise<ZooResult<{ source: ZooSource }>> {
-  return call("zooConnectTranscripts", { folder }, parseSourceResponse)
+export function zooCreateArea(
+  name: string,
+  repoPaths: string[] = [],
+): Promise<ZooResult<{ area: ZooArea }>> {
+  return call("zooCreateArea", { name, repoPaths }, parseAreaResponse)
+}
+
+export function zooUpdateArea(
+  areaId: string,
+  update: { name?: string; repoPaths?: string[] },
+): Promise<ZooResult<{ area: ZooArea }>> {
+  return call("zooUpdateArea", { areaId, ...update }, parseAreaResponse)
+}
+
+/** Deleting an area unassigns its rows; board data is never removed with it. */
+export function zooDeleteArea(areaId: string): Promise<ZooResult<Record<never, never>>> {
+  return call("zooDeleteArea", { areaId }, parseOkResponse)
+}
+
+/** Move one row to an area, or to no area at all (`null` = unassigned). */
+export function zooAssignArea(
+  kind: ZooAreaKind,
+  id: string,
+  areaId: string | null,
+): Promise<ZooResult<Record<never, never>>> {
+  return call("zooAssignArea", { kind, id, areaId }, parseOkResponse)
+}
+
+export function zooConnectLinear(
+  apiKey: string,
+  areaId?: string | null,
+): Promise<ZooResult<{ source: ZooSource }>> {
+  return call("zooConnectLinear", { apiKey, ...(areaId ? { areaId } : {}) }, parseSourceResponse)
+}
+
+export function zooConnectTranscripts(
+  folder: string,
+  areaId?: string | null,
+): Promise<ZooResult<{ source: ZooSource }>> {
+  return call("zooConnectTranscripts", { folder, ...(areaId ? { areaId } : {}) }, parseSourceResponse)
 }
 
 export function zooStartBackfill(sourceId: string): Promise<ZooResult<Record<never, never>>> {
@@ -464,10 +548,11 @@ export function zooGetArtifact(id: string): Promise<ZooResult<{ artifact: ZooArt
 
 export function zooExportForExtraction(
   maxChars?: number,
+  areaId?: string | null,
 ): Promise<ZooResult<{ passId: string; bundle: string }>> {
   return call(
     "zooExportForExtraction",
-    maxChars === undefined ? {} : { maxChars },
+    { ...(maxChars === undefined ? {} : { maxChars }), ...(areaId ? { areaId } : {}) },
     parseExportResponse,
   )
 }
@@ -475,8 +560,9 @@ export function zooExportForExtraction(
 export function zooRecordInsights(
   passId: string,
   insights: ZooInsightInput[],
+  areaId?: string | null,
 ): Promise<ZooResult<{ insightCount: number }>> {
-  return call("zooRecordInsights", { passId, insights }, parseRecordResponse)
+  return call("zooRecordInsights", { passId, insights, ...(areaId ? { areaId } : {}) }, parseRecordResponse)
 }
 
 export function zooFailPass(passId: string, error: string): Promise<ZooResult<Record<never, never>>> {
@@ -489,10 +575,11 @@ export function zooListInsights(): Promise<ZooResult<{ insights: ZooInsight[] }>
 
 export function zooExportInsightsForSynthesis(
   maxChars?: number,
+  areaId?: string | null,
 ): Promise<ZooResult<{ passId: string; bundle: string }>> {
   return call(
     "zooExportInsightsForSynthesis",
-    maxChars === undefined ? {} : { maxChars },
+    { ...(maxChars === undefined ? {} : { maxChars }), ...(areaId ? { areaId } : {}) },
     parseExportResponse,
   )
 }
@@ -500,8 +587,9 @@ export function zooExportInsightsForSynthesis(
 export function zooRecordIdeas(
   passId: string,
   ideas: ZooIdeaInput[],
+  areaId?: string | null,
 ): Promise<ZooResult<{ ideaCount: number }>> {
-  return call("zooRecordIdeas", { passId, ideas }, parseRecordIdeasResponse)
+  return call("zooRecordIdeas", { passId, ideas, ...(areaId ? { areaId } : {}) }, parseRecordIdeasResponse)
 }
 
 export function zooListIdeas(): Promise<ZooResult<{ ideas: ZooIdea[] }>> {
