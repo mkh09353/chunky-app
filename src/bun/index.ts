@@ -1,6 +1,8 @@
 import { BrowserWindow, ApplicationMenu, BuildConfig, createRPC, Updater, Utils } from "electrobun/bun"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { existsSync } from "node:fs"
+import { stat as fsStat } from "node:fs/promises"
 import { createAppBrowserResolver } from "./appBrowser"
 import {
   candidateRoots,
@@ -10,6 +12,7 @@ import {
   searchDirectories,
 } from "./dirSearch"
 import { createDirectory } from "./fsOps"
+import { openInEditor as runOpenInEditor, type EditorDeps } from "./openInEditor"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import {
@@ -215,6 +218,52 @@ const zoo = createZooManager()
 // to announce it to the local Chunky server.
 const zooService = createZooService({ manager: zoo })
 
+/**
+ * How the editor hand-off reaches the OS. Kept next to the RPC handler (rather
+ * than inside src/bun/openInEditor.ts) so that module stays free of Bun and
+ * node globals and can be unit-tested on its own.
+ */
+const editorCliCache = new Map<string, string | null>()
+
+/** GUI apps inherit a minimal PATH, so `code` often is not on it even when the
+ *  user has installed the CLI. Check the usual install locations too. */
+const CODE_CLI_FALLBACKS = [
+  "/opt/homebrew/bin/code",
+  "/usr/local/bin/code",
+  "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+]
+
+const editorDeps: EditorDeps = {
+  home: () => homedir(),
+  stat: async (path) => {
+    try {
+      const info = await fsStat(path)
+      return { isDirectory: info.isDirectory() }
+    } catch {
+      return null
+    }
+  },
+  which: (command) => {
+    const cached = editorCliCache.get(command)
+    if (cached !== undefined) return cached
+    let found = Bun.which(command)
+    if (!found && command === "code") {
+      found = CODE_CLI_FALLBACKS.find((candidate) => existsSync(candidate)) ?? null
+    }
+    editorCliCache.set(command, found)
+    return found
+  },
+  // Argument array only — there is no shell in this path, by construction.
+  spawn: async (argv) => {
+    const child = Bun.spawn(argv, { stdout: "ignore", stderr: "pipe" })
+    const [exitCode, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ])
+    return { exitCode, stderr }
+  },
+}
+
 rpc = createRPC({
   maxRequestTime: 180_000,
   requestHandler: {
@@ -382,6 +431,32 @@ rpc = createRPC({
         console.warn("[chunky] openExternal failed:", error)
         return { ok: false, error }
       }
+    },
+
+    /**
+     * Open a file the assistant mentioned in the user's editor. The renderer
+     * detects the path (src/mainview/lib/fileLinks.ts) and sends it here with
+     * the session's repo as `cwd`; Bun resolves it, checks that it exists and
+     * launches an argv array — a renderer string never reaches a shell.
+     * Input: { path: string, line?: number, column?: number, cwd?: string }
+     * Output: { ok: boolean, path?: string, error?: string }
+     */
+    openInEditor: async (params: unknown) => {
+      const body = (params && typeof params === "object" ? params : {}) as {
+        path?: unknown
+        line?: unknown
+        column?: unknown
+        cwd?: unknown
+      }
+      const target = {
+        path: typeof body.path === "string" ? body.path : "",
+        ...(typeof body.line === "number" ? { line: body.line } : {}),
+        ...(typeof body.column === "number" ? { column: body.column } : {}),
+        ...(typeof body.cwd === "string" && body.cwd ? { cwd: body.cwd } : {}),
+      }
+      const result = await runOpenInEditor(target, editorDeps)
+      if (!result.ok) console.warn("[chunky] openInEditor refused:", result.error)
+      return result
     },
 
     /**

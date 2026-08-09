@@ -3,16 +3,23 @@
 //   bun test src/mainview/lib/markdown.test.ts
 import { describe, expect, it } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
-import type { ReactElement } from "react"
+import { createElement, Fragment, type ReactElement, type ReactNode } from "react"
+import { FileLinkProvider } from "./fileLinkContext"
 import {
   buildListTree,
   isHorizontalRule,
+  Markdown,
+  markdownFallback,
   parseAlignRow,
   parseBullet,
   parseTable,
+  parseTaskItem,
+  RenderErrorBoundary,
   renderMarkdown,
   splitTableRow,
   splitTrailingPunctuation,
+  tableToMarkdown,
+  type TableSpec,
 } from "./markdown"
 
 /** Rendered HTML for a markdown source — the transcript's actual output. */
@@ -297,5 +304,298 @@ describe("renderMarkdown blocks", () => {
     expect(out).toContain('href="https://x.dev"')
     expect(out).toContain("<ol")
     expect(out.match(/<li/g)?.length).toBe(2)
+  })
+
+  it("keeps a loose ordered list (blank lines between items) as one list", () => {
+    const out = html("1. first item\n\n2. second item\n\n3. third item\n\nplain para after")
+    expect(out.match(/<ol/g)?.length).toBe(1)
+    expect(out.match(/<li/g)?.length).toBe(3)
+    // Badges count up instead of repeating “1”.
+    expect(out).toContain(">2<")
+    expect(out).toContain(">3<")
+    // The trailing paragraph is not swallowed into the list.
+    expect(out).toContain("plain para after")
+  })
+
+  it("respects the starting number of an ordered list", () => {
+    const out = html("3. third\n4. fourth")
+    expect(out).toContain(">3<")
+    expect(out).toContain(">4<")
+  })
+})
+
+describe("parseTaskItem", () => {
+  it("reads both checkbox states", () => {
+    expect(parseTaskItem("[ ] todo")).toEqual({ checked: false, text: "todo" })
+    expect(parseTaskItem("[x] done")).toEqual({ checked: true, text: "done" })
+    expect(parseTaskItem("[X] done")).toEqual({ checked: true, text: "done" })
+  })
+
+  it("keeps the rest of the line, formatting included", () => {
+    expect(parseTaskItem("[ ]   ship **it** now")).toEqual({
+      checked: false,
+      text: "ship **it** now",
+    })
+  })
+
+  it("rejects anything that is not a GFM marker", () => {
+    for (const notATask of ["[y] foo", "[] foo", "[ x] foo", "[xx] foo", "plain", "a [x] b"]) {
+      expect(parseTaskItem(notATask)).toBeNull()
+    }
+  })
+
+  it("degrades on half-streamed prefixes instead of throwing", () => {
+    for (const partial of ["[", "[ ", "[x", "[X", "[ ] "]) {
+      expect(() => parseTaskItem(partial)).not.toThrow()
+    }
+    expect(parseTaskItem("[")).toBeNull()
+    expect(parseTaskItem("[ ")).toBeNull()
+    expect(parseTaskItem("[x")).toBeNull()
+  })
+})
+
+describe("task lists", () => {
+  it("renders a checkbox instead of the dot bullet", () => {
+    const out = html("- [ ] todo\n- [x] done")
+    expect(out).toContain('role="checkbox"')
+    expect(out).toContain('aria-checked="false"')
+    expect(out).toContain('aria-checked="true"')
+    expect(out).toContain("rounded-sm")
+    // The literal brackets are gone; the text survives.
+    expect(text("- [ ] todo\n- [x] done")).toBe("tododone")
+    // A checked item is muted, never struck through.
+    expect(out).not.toContain("line-through")
+  })
+
+  it("works at any nesting depth", () => {
+    const out = html("- [ ] parent\n  - [x] child\n    - [ ] grandchild")
+    expect(out.match(/role="checkbox"/g)?.length).toBe(3)
+    expect(out.match(/<ul/g)?.length).toBe(3)
+  })
+
+  it("mixes plain bullets and task items in one list", () => {
+    const out = html("- plain\n- [x] done")
+    expect(out.match(/role="checkbox"/g)?.length).toBe(1)
+    // The plain item keeps its dot marker.
+    expect(out).toContain("rounded-full")
+  })
+
+  it("leaves a non-marker bracket as text", () => {
+    const out = html("- [y] foo")
+    expect(out).not.toContain('role="checkbox"')
+    expect(text("- [y] foo")).toContain("[y] foo")
+  })
+
+  it("survives every prefix of a streamed task list", () => {
+    const doc = ["## Plan", "", "- [x] done", "- [ ] todo", "  - [x] nested", "- [y] not a task"].join(
+      "\n",
+    )
+    for (let n = 0; n <= doc.length; n++) {
+      expect(() => html(doc.slice(0, n))).not.toThrow()
+    }
+    expect(html(doc).match(/role="checkbox"/g)?.length).toBe(3)
+  })
+
+  it("treats a half-streamed marker as plain text", () => {
+    for (const partial of ["- [", "- [ ", "- [x", "- [x]", "- [ ]"]) {
+      expect(() => html(partial)).not.toThrow()
+    }
+    expect(html("- [ ")).not.toContain('role="checkbox"')
+    expect(text("- [x")).toContain("[x")
+  })
+})
+
+describe("tableToMarkdown", () => {
+  const spec: TableSpec = {
+    header: ["Tool", "Use", "Note"],
+    align: ["left", "right", null],
+    rows: [
+      ["grep", "search", ""],
+      ["rg", "faster", "a | pipe"],
+    ],
+  }
+
+  it("rebuilds pipes, the delimiter row and every cell", () => {
+    expect(tableToMarkdown(spec).split("\n")).toEqual([
+      "| Tool | Use | Note |",
+      "| :--- | ---: | --- |",
+      "| grep | search |  |",
+      "| rg | faster | a \\| pipe |",
+    ])
+  })
+
+  it("round-trips through the parser", () => {
+    const parsed = parseTable(tableToMarkdown(spec).split("\n"), 0)
+    expect(parsed?.table).toEqual(spec)
+  })
+
+  it("round-trips a table taken straight out of markdown", () => {
+    const src = "| a | b |\n| :---: | ---: |\n| 1 | 2 |"
+    const first = parseTable(src.split("\n"), 0)
+    expect(first).not.toBeNull()
+    const round = parseTable(tableToMarkdown(first?.table as TableSpec).split("\n"), 0)
+    expect(round?.table).toEqual(first?.table as TableSpec)
+  })
+
+  it("pads a short or ragged spec to the header width", () => {
+    const ragged: TableSpec = { header: ["a", "b"], align: [], rows: [["1"]] }
+    expect(tableToMarkdown(ragged)).toBe("| a | b |\n| --- | --- |\n| 1 |  |")
+    expect(parseTable(tableToMarkdown(ragged).split("\n"), 0)?.table).toEqual({
+      header: ["a", "b"],
+      align: [null, null],
+      rows: [["1", ""]],
+    })
+  })
+})
+
+describe("table copy button", () => {
+  it("is rendered next to the table, hover-revealed and labelled", () => {
+    const out = html("| a | b |\n| --- | --- |\n| 1 | 2 |")
+    expect(out).toContain('aria-label="Copy table as markdown"')
+    expect(out).toContain("group-hover/table:opacity-100")
+    // Icon-only: the button adds no text to the transcript.
+    expect(text("| a | b |\n| --- | --- |\n| 1 | 2 |")).toBe("ab12")
+  })
+
+  it("leaves non-table markdown untouched", () => {
+    expect(html("just prose")).not.toContain("aria-label=\"Copy table as markdown\"")
+  })
+})
+
+describe("file-path code spans", () => {
+  /** Rendered inside a scope that says the editor bridge exists. */
+  const linked = (src: string, cwd?: string) =>
+    renderToStaticMarkup(
+      createElement(
+        FileLinkProvider,
+        { enabled: true, ...(cwd ? { cwd } : {}), children: renderMarkdown(src) },
+      ) as ReactElement,
+    )
+
+  it("turns a path code span into a clickable chip", () => {
+    const out = linked("see `src/mainview/lib/markdown.tsx` for the renderer", "/repo")
+    expect(out).toContain('data-file-link="src/mainview/lib/markdown.tsx"')
+    expect(out).toContain('title="Open in editor"')
+    expect(out).toContain("<button")
+    expect(out).toContain("cursor-pointer")
+    // The chip keeps the code-span look.
+    expect(out).toContain("font-mono")
+    expect(out).toContain("bg-muted")
+    expect(text("see `src/mainview/lib/markdown.tsx` for the renderer")).toContain(
+      "src/mainview/lib/markdown.tsx",
+    )
+  })
+
+  it("carries a line:col suffix through to the chip", () => {
+    const out = linked("`src/bun/index.ts:352:7`", "/repo")
+    expect(out).toContain('data-file-link="src/bun/index.ts"')
+    // The label still reads exactly as the author wrote it.
+    expect(out).toContain("src/bun/index.ts:352:7")
+  })
+
+  it("leaves a non-path code span alone", () => {
+    for (const code of ["npm install", "@chunky/protocol", "renderMarkdown", "https://x.dev/a.ts"]) {
+      const out = linked(`run \`${code}\` now`, "/repo")
+      expect(out).not.toContain("data-file-link")
+      expect(out).not.toContain("<button")
+      expect(out).toContain("<code")
+    }
+  })
+
+  it("stays a plain code span when the editor bridge is absent", () => {
+    // `html()` renders with no provider: in a browser build (and in this test
+    // process) there is no RPC, so nothing may promise to open a file.
+    const out = html("see `src/mainview/lib/markdown.tsx`")
+    expect(out).not.toContain("data-file-link")
+    expect(out).not.toContain("<button")
+    expect(out).toContain("<code")
+  })
+
+  it("does not offer relative paths when there is no cwd to anchor them", () => {
+    const out = linked("see `src/a.ts`")
+    expect(out).not.toContain("data-file-link")
+    // Absolute and ~ paths need no anchor, so they stay clickable.
+    const absolute = linked("see `/Users/me/p/a.ts` and `~/notes/todo.md`")
+    expect(absolute.match(/data-file-link/g)?.length).toBe(2)
+  })
+
+  it("works inside lists, blockquotes and table cells", () => {
+    const out = linked(
+      "- see `src/a.ts`\n\n> and `src/b.ts`\n\n| f |\n| --- |\n| `src/c.ts` |",
+      "/repo",
+    )
+    expect(out.match(/data-file-link/g)?.length).toBe(3)
+  })
+
+  it("never throws on a half-streamed code span", () => {
+    const doc = "edit `src/mainview/lib/markdown.tsx:42:7` then `npm install`"
+    for (let n = 0; n <= doc.length; n++) {
+      expect(() => linked(doc.slice(0, n), "/repo")).not.toThrow()
+    }
+  })
+})
+
+describe("render error boundary", () => {
+  /**
+   * React's Fizz server renderer never calls `getDerivedStateFromError`, so the
+   * boundary's contract is driven by hand here — the same two steps React takes
+   * on the client: catch the throw, then re-render with the derived state.
+   */
+  const renderWithBoundary = (children: ReactNode, fallback: ReactNode): string => {
+    const boundary = new RenderErrorBoundary({ children, fallback })
+    try {
+      return renderToStaticMarkup(createElement(Fragment, null, boundary.render()))
+    } catch {
+      Object.assign(boundary.state, RenderErrorBoundary.getDerivedStateFromError())
+      return renderToStaticMarkup(createElement(Fragment, null, boundary.render()))
+    }
+  }
+
+  const Boom = (): ReactNode => {
+    throw new Error("render crashed")
+  }
+
+  it("shows children while they render", () => {
+    const out = renderWithBoundary(createElement("span", null, "fine"), markdownFallback("raw"))
+    expect(out).toContain("fine")
+    expect(out).not.toContain("<pre")
+  })
+
+  it("falls back to the raw source when a child throws", () => {
+    const src = "# Title\n\n| broken"
+    const out = renderWithBoundary(createElement(Boom), markdownFallback(src))
+    expect(out).toContain("<pre")
+    expect(out).toContain("whitespace-pre-wrap")
+    expect(out).toContain("# Title")
+    expect(out).toContain("| broken")
+    expect(out).not.toContain("<h1")
+  })
+
+  it("keeps the raw markdown literal, unrendered", () => {
+    const out = renderToStaticMarkup(
+      createElement(Fragment, null, markdownFallback("a **bold** [x] `c`")) as ReactElement,
+    )
+    expect(out).toContain("a **bold** [x] `c`")
+    expect(out).not.toContain("<strong")
+  })
+
+  it("clears a previous failure only when the source changes", () => {
+    const failed = { failed: true, seen: "old" }
+    expect(RenderErrorBoundary.getDerivedStateFromProps(
+      { fallback: null, resetKey: "old", children: null },
+      failed,
+    )).toBeNull()
+    expect(RenderErrorBoundary.getDerivedStateFromProps(
+      { fallback: null, resetKey: "new", children: null },
+      failed,
+    )).toEqual({ failed: false, seen: "new" })
+  })
+
+  it("renders the same output as renderMarkdown when nothing throws", () => {
+    const src = "# Title\n\n- [x] done\n\n| a | b |\n| --- | --- |\n| 1 | 2 |"
+    const wrapped = renderToStaticMarkup(
+      createElement(Markdown, { source: src }) as ReactElement,
+    )
+    expect(wrapped).toBe(html(src))
   })
 })

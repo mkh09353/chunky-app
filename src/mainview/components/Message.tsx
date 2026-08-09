@@ -31,7 +31,7 @@ import chunkyLogo from "~/assets/chunky-logo.png"
 import type { ToolSummary } from "~/lib/toolSummary"
 import { groupStatus, groupSummary, toolKind } from "~/lib/toolSummary"
 import { cn } from "~/lib/cn"
-import { renderMarkdown } from "~/lib/markdown"
+import { Markdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
 import { LiveRunSection, useLiveRuns } from "./LiveRun"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
@@ -585,7 +585,7 @@ function AssistantBlock({
   }
   return (
     <div className={cn(bi > 0 && "mt-3")}>
-      {renderMarkdown(block.content)}
+      <Markdown source={block.content} />
       {streaming && last && (
         <span className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[2px] animate-caret bg-primary align-text-bottom" />
       )}

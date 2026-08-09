@@ -33,6 +33,7 @@ import { RepoFilesPane } from "./components/RepoFilesPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
 import { ConfirmHost } from "./components/ConfirmDialog"
 import { confirm } from "./lib/confirm"
+import { FileLinkProvider } from "./lib/fileLinkContext"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { subscribeBrowserNavigation } from "./lib/browserNav"
@@ -2979,16 +2980,21 @@ export function App() {
               aria-hidden={mainView !== "chat"}
             >
               {statusBanner}
-              <ChatView
-                thread={activeThread}
-                streamingId={liveStreamingId}
-                loading={live && transcriptLoading}
-                catchingUp={live && catchingUp}
-                transcript={live ? transcript : undefined}
-                modelName={uiModel.name}
-                foldAll={foldThreads}
-                compacted={liveCompacted}
-              />
+              {/* File paths in assistant prose resolve against the session's
+                  own workspace (falling back to the open repo), so clicking
+                  `src/a.ts` opens the right checkout. */}
+              <FileLinkProvider cwd={gitCwd}>
+                <ChatView
+                  thread={activeThread}
+                  streamingId={liveStreamingId}
+                  loading={live && transcriptLoading}
+                  catchingUp={live && catchingUp}
+                  transcript={live ? transcript : undefined}
+                  modelName={uiModel.name}
+                  foldAll={foldThreads}
+                  compacted={liveCompacted}
+                />
+              </FileLinkProvider>
               {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
               <TerminalDrawer
                 open={terminalsOpen}

@@ -1,5 +1,10 @@
-import { Fragment, type ReactNode } from "react"
+import { Check, Copy } from "lucide-react"
+import { Component, Fragment, useState, type ReactNode } from "react"
 import { cn } from "~/lib/cn"
+import { copyText } from "~/lib/clipboard"
+import { useFileLinkScope } from "~/lib/fileLinkContext"
+import { parseFileRef, type FileRef } from "~/lib/fileLinks"
+import { openInEditor } from "~/lib/openInEditor"
 import { CodeBlock } from "~/components/CodeBlock"
 
 /*
@@ -21,6 +26,11 @@ const INLINE_RE =
   /(\*\*[^*]+\*\*|\*[^*]+\*|~~[^~]+~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s<>"'`]+)/g
 
 const LINK_CLASS = "font-medium text-primary underline-offset-2 hover:underline"
+
+/** One chip, two behaviours: a plain code span and a clickable file link look
+ *  identical until the pointer arrives. */
+const CODE_CLASS =
+  "mx-px whitespace-nowrap rounded-[5px] border border-border/70 bg-muted px-1.5 py-px font-mono text-[0.82em] text-foreground"
 
 function count(text: string, char: string): number {
   let n = 0
@@ -170,6 +180,42 @@ export interface ListNode {
   children: ListNode[]
 }
 
+export interface TaskItem {
+  checked: boolean
+  text: string
+}
+
+/**
+ * GFM task-list marker at the head of a bullet's content: `[ ] todo` /
+ * `[x] done`. Returns null for anything else — including the half-typed `[`,
+ * `[ ` and `[x` a stream produces, and non-markers like `[y] foo` — so those
+ * keep rendering as ordinary text instead of throwing or eating the bracket.
+ */
+export function parseTaskItem(text: string): TaskItem | null {
+  const m = /^\[([ xX])\](?:\s+(.*))?$/.exec(text)
+  if (!m) return null
+  return { checked: (m[1] ?? " ").toLowerCase() === "x", text: m[2] ?? "" }
+}
+
+/**
+ * A parsed table back to its markdown source, for the copy button. Pipes inside
+ * cells are re-escaped so the output round-trips through `parseTable`.
+ */
+export function tableToMarkdown(spec: TableSpec): string {
+  const cell = (value: string) => value.replace(/\|/g, "\\|").trim()
+  const row = (cells: string[]) => `| ${cells.map(cell).join(" | ")} |`
+  // Always as wide as the header: a spec whose align/row arrays are short (or
+  // long) still serialises to a table `parseTable` accepts.
+  const delim = spec.header.map((_, c) => {
+    const a = spec.align[c] ?? null
+    return a === "center" ? ":---:" : a === "right" ? "---:" : a === "left" ? ":---" : "---"
+  })
+  const pad = (cells: string[]) => spec.header.map((_, c) => cells[c] ?? "")
+  const lines = [row(spec.header), `| ${delim.join(" | ")} |`]
+  for (const r of spec.rows) lines.push(row(pad(r)))
+  return lines.join("\n")
+}
+
 /** `  - nested` → its indent and content; null when the line is not a bullet. */
 export function parseBullet(raw: string): ListItem | null {
   const m = /^(\s*)[-*]\s+(.*)$/.exec(raw)
@@ -230,12 +276,15 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
       )
     }
     if (part.startsWith("`") && part.endsWith("`")) {
+      const code = part.slice(1, -1)
+      // A code span that is really a file path becomes a link to the editor.
+      // Everything else — commands, identifiers, package names — is left alone
+      // (see lib/fileLinks.ts for how conservatively that is decided).
+      const ref = parseFileRef(code)
+      if (ref) return <FileChip key={k} label={code} target={ref} />
       return (
-        <code
-          key={k}
-          className="mx-px whitespace-nowrap rounded-[5px] border border-border/70 bg-muted px-1.5 py-px font-mono text-[0.82em] text-foreground"
-        >
-          {part.slice(1, -1)}
+        <code key={k} className={CODE_CLASS}>
+          {code}
         </code>
       )
     }
@@ -265,77 +314,179 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   })
 }
 
+/**
+ * A file path from the transcript, clickable when there is an editor bridge to
+ * click through to. Without one (browser dev build) it renders as the ordinary
+ * code chip, with no cursor, tooltip or focus ring promising something the app
+ * cannot do.
+ */
+function FileChip({ label, target }: { label: string; target: FileRef }): ReactNode {
+  const { cwd, enabled } = useFileLinkScope()
+  // A relative path with nowhere to resolve against is not openable either.
+  const anchored = target.path.startsWith("/") || target.path.startsWith("~") || !!cwd
+  if (!enabled || !anchored) return <code className={CODE_CLASS}>{label}</code>
+
+  const open = () => {
+    void openInEditor({ ...target, ...(cwd ? { cwd } : {}) })
+  }
+
+  return (
+    <button
+      type="button"
+      title="Open in editor"
+      data-file-link={target.path}
+      onClick={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        open()
+      }}
+      className={cn(
+        CODE_CLASS,
+        "cursor-pointer align-baseline underline-offset-2 outline-none transition-colors hover:border-primary/50 hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring/50",
+      )}
+    >
+      {label}
+    </button>
+  )
+}
+
+/** The read-only GFM task-list box. Purely presentational: it reports its state
+ *  to assistive tech but is never focusable or clickable. */
+function TaskBox({ checked }: { checked: boolean }): ReactNode {
+  return (
+    <span
+      role="checkbox"
+      aria-checked={checked}
+      aria-disabled="true"
+      className={cn(
+        "mt-[3px] flex size-[14px] shrink-0 items-center justify-center rounded-sm border",
+        checked ? "border-primary bg-primary text-primary-foreground" : "border-border bg-muted/40",
+      )}
+    >
+      {checked && <Check aria-hidden className="size-[10px]" strokeWidth={3.5} />}
+    </span>
+  )
+}
+
 /** Bullet tree → nested <ul>. Depth only changes the marker and the indent, so
- *  arbitrarily deep lists stay readable. */
+ *  arbitrarily deep lists stay readable. A `[ ]` / `[x]` prefix swaps the dot
+ *  for a checkbox at any depth; anything else keeps the dot. */
 function renderList(nodes: ListNode[], keyBase: string, depth = 0): ReactNode {
   return (
     <ul className={cn("flex flex-col gap-1.5", depth > 0 && "mt-1.5 pl-1.5")}>
-      {nodes.map((node, idx) => (
-        <li
-          key={`${keyBase}-${depth}-${idx}`}
-          className="flex gap-2.5 text-[14px] leading-[1.6] text-foreground/90"
-        >
-          <span
+      {nodes.map((node, idx) => {
+        const task = parseTaskItem(node.text)
+        return (
+          <li
+            key={`${keyBase}-${depth}-${idx}`}
             className={cn(
-              "mt-[9px] size-1 shrink-0 rounded-full",
-              depth === 0 ? "bg-primary/70" : "bg-foreground/35",
+              "flex gap-2.5 text-[14px] leading-[1.6]",
+              task?.checked ? "text-foreground/65" : "text-foreground/90",
             )}
-          />
-          {/* A div, not a span: a nested <ul> is flow content and cannot live
-              inside phrasing content. Layout is identical in a flex row. */}
-          <div className="min-w-0 flex-1">
-            {renderInline(node.text, `${keyBase}-${depth}-${idx}`)}
-            {node.children.length > 0 &&
-              renderList(node.children, `${keyBase}-${idx}`, depth + 1)}
-          </div>
-        </li>
-      ))}
+          >
+            {task ? (
+              <TaskBox checked={task.checked} />
+            ) : (
+              <span
+                className={cn(
+                  "mt-[9px] size-1 shrink-0 rounded-full",
+                  depth === 0 ? "bg-primary/70" : "bg-foreground/35",
+                )}
+              />
+            )}
+            {/* A div, not a span: a nested <ul> is flow content and cannot live
+                inside phrasing content. Layout is identical in a flex row. */}
+            <div className="min-w-0 flex-1">
+              {renderInline(task ? task.text : node.text, `${keyBase}-${depth}-${idx}`)}
+              {node.children.length > 0 &&
+                renderList(node.children, `${keyBase}-${idx}`, depth + 1)}
+            </div>
+          </li>
+        )
+      })}
     </ul>
+  )
+}
+
+/** Hover-revealed copy for a table, mirroring the CodeBlock copy button. The
+ *  source is rebuilt from the parsed spec, never scraped from the DOM. */
+function TableCopyButton({ source }: { source: string }): ReactNode {
+  const [copied, setCopied] = useState(false)
+
+  const copy = () => {
+    // Fire-and-forget: `copyText` arms its WKWebView fallback synchronously,
+    // inside the click gesture (see lib/clipboard).
+    void copyText(source).then((ok) => {
+      if (!ok) return
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1400)
+    })
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label={copied ? "Table copied" : "Copy table as markdown"}
+      title="Copy table as markdown"
+      className={cn(
+        "absolute top-1.5 right-1.5 inline-flex size-6 cursor-pointer items-center justify-center rounded-md border border-border bg-background/95 text-muted-foreground opacity-0 shadow-xs outline-none transition-all hover:bg-accent hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring/50 group-hover/table:opacity-100",
+        copied && "text-success opacity-100",
+      )}
+    >
+      {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+    </button>
   )
 }
 
 function renderTable(spec: TableSpec, keyBase: string): ReactNode {
   const { header, align, rows } = spec
   return (
-    // The wrapper scrolls so a wide table can never widen the transcript
-    // column; `w-max min-w-full` lets the table grow past the wrapper instead
-    // of squeezing columns into unreadable slivers.
-    <div className="overflow-x-auto rounded-xl border border-border">
-      <table className="w-max min-w-full border-collapse text-[13px]">
-        <thead>
-          <tr className="border-border/70 border-b bg-muted/50">
-            {header.map((cell, c) => (
-              <th
-                key={`${keyBase}-h-${c}`}
-                scope="col"
-                className={cn(
-                  "px-3 py-2 font-semibold text-foreground",
-                  ALIGN_CLASS[align[c] ?? "left"],
-                )}
-              >
-                {renderInline(cell, `${keyBase}-h-${c}`)}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, r) => (
-            <tr key={`${keyBase}-r-${r}`} className="border-border/50 border-b last:border-b-0">
-              {row.map((cell, c) => (
-                <td
-                  key={`${keyBase}-r-${r}-${c}`}
+    // The outer box is the hover target and the copy button's positioning
+    // context: the button must not live inside the scroller, or it would slide
+    // away with a wide table.
+    <div className="group/table relative">
+      <TableCopyButton source={tableToMarkdown(spec)} />
+      {/* The wrapper scrolls so a wide table can never widen the transcript
+          column; `w-max min-w-full` lets the table grow past the wrapper
+          instead of squeezing columns into unreadable slivers. */}
+      <div className="overflow-x-auto rounded-xl border border-border">
+        <table className="w-max min-w-full border-collapse text-[13px]">
+          <thead>
+            <tr className="border-border/70 border-b bg-muted/50">
+              {header.map((cell, c) => (
+                <th
+                  key={`${keyBase}-h-${c}`}
+                  scope="col"
                   className={cn(
-                    "max-w-[44ch] px-3 py-2 align-top text-foreground/90",
+                    "px-3 py-2 font-semibold text-foreground",
                     ALIGN_CLASS[align[c] ?? "left"],
                   )}
                 >
-                  {renderInline(cell, `${keyBase}-r-${r}-${c}`)}
-                </td>
+                  {renderInline(cell, `${keyBase}-h-${c}`)}
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row, r) => (
+              <tr key={`${keyBase}-r-${r}`} className="border-border/50 border-b last:border-b-0">
+                {row.map((cell, c) => (
+                  <td
+                    key={`${keyBase}-r-${r}-${c}`}
+                    className={cn(
+                      "max-w-[44ch] px-3 py-2 align-top text-foreground/90",
+                      ALIGN_CLASS[align[c] ?? "left"],
+                    )}
+                  >
+                    {renderInline(cell, `${keyBase}-r-${r}-${c}`)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -473,13 +624,30 @@ export function renderMarkdown(src: string): ReactNode {
       continue
     }
 
-    // Ordered list
+    // Ordered list. Blank lines between numbered items (a "loose" list, which
+    // models emit for long items) stay part of the SAME list — otherwise each
+    // item becomes its own one-item <ol> and every badge reads "1".
     if (/^\d+\.\s+/.test(line)) {
       flushPara()
+      const start = Number.parseInt(line, 10) || 1
       const items: string[] = []
-      while (i < lines.length && /^\d+\.\s+/.test((lines[i] ?? "").trim())) {
-        items.push((lines[i] ?? "").trim().replace(/^\d+\.\s+/, ""))
-        i++
+      while (i < lines.length) {
+        const cur = (lines[i] ?? "").trim()
+        if (/^\d+\.\s+/.test(cur)) {
+          items.push(cur.replace(/^\d+\.\s+/, ""))
+          i++
+          continue
+        }
+        if (cur === "") {
+          // Only skip the gap when the next non-blank line continues the list.
+          let j = i + 1
+          while (j < lines.length && (lines[j] ?? "").trim() === "") j++
+          if (j < lines.length && /^\d+\.\s+/.test((lines[j] ?? "").trim())) {
+            i = j
+            continue
+          }
+        }
+        break
       }
       out.push(
         <ol key={`ol-${key++}`} className={cn("flex flex-col gap-2", out.length > 0 && "mt-3")}>
@@ -489,7 +657,7 @@ export function renderMarkdown(src: string): ReactNode {
               className="flex gap-2.5 text-[14px] leading-[1.55] text-foreground/90"
             >
               <span className="mt-px flex size-[18px] shrink-0 items-center justify-center rounded-md bg-muted font-semibold text-[11px] text-muted-foreground tabular-nums">
-                {idx + 1}
+                {start + idx}
               </span>
               <span className="min-w-0 pt-px">{renderInline(it, `oli-${key}-${idx}`)}</span>
             </li>
@@ -511,4 +679,77 @@ export function renderMarkdown(src: string): ReactNode {
 
   flushPara()
   return <>{out}</>
+}
+
+// ── Crash containment ──────────────────────────────────────────────────────
+
+interface BoundaryProps {
+  /** What to show once a descendant has thrown. */
+  fallback: ReactNode
+  /** Change it to clear a previous failure and try rendering again. */
+  resetKey?: unknown
+  children: ReactNode
+}
+
+interface BoundaryState {
+  failed: boolean
+  seen: unknown
+}
+
+/**
+ * A minimal, generic error boundary. React only surfaces render-time errors to
+ * class components, so this stays a class; everything else about it is
+ * deliberately tiny. Note that server rendering (`renderToStaticMarkup`) never
+ * invokes `getDerivedStateFromError` — the boundary is a client-side guarantee.
+ */
+export class RenderErrorBoundary extends Component<BoundaryProps, BoundaryState> {
+  override state: BoundaryState = { failed: false, seen: undefined }
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true }
+  }
+
+  /** A new `resetKey` (new content) earns one more attempt. The error re-render
+   *  itself carries the same key, so a failure is not cleared underneath it. */
+  static getDerivedStateFromProps(
+    props: BoundaryProps,
+    state: BoundaryState,
+  ): Partial<BoundaryState> | null {
+    if (props.resetKey === state.seen) return null
+    return { failed: false, seen: props.resetKey }
+  }
+
+  override render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children
+  }
+}
+
+/** The last-resort view of a message: its own source, verbatim. */
+export function markdownFallback(source: string): ReactNode {
+  return (
+    <pre className="whitespace-pre-wrap break-words font-mono text-[13px] text-foreground/80">
+      {source}
+    </pre>
+  )
+}
+
+function MarkdownBody({ source }: { source: string }): ReactNode {
+  return <>{renderMarkdown(source)}</>
+}
+
+/**
+ * `renderMarkdown` behind an error boundary: a crash in parsing or in any block
+ * component degrades the message to its raw source instead of blanking it. The
+ * body is a child component (not a call) so a throw inside `renderMarkdown`
+ * itself happens under the boundary too.
+ *
+ * `resetKey` (not a React `key`) lets a message that crashed mid-stream recover
+ * on the next delta without remounting the subtree on every delta.
+ */
+export function Markdown({ source }: { source: string }): ReactNode {
+  return (
+    <RenderErrorBoundary fallback={markdownFallback(source)} resetKey={source}>
+      <MarkdownBody source={source} />
+    </RenderErrorBoundary>
+  )
 }
