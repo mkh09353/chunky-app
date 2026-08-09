@@ -10,6 +10,8 @@ import type {
   ZooAreaKind,
   ZooRepoWatch,
   ZooWatchResult,
+  ZooXWatch,
+  ZooXWatchResult,
   ZooArtifactMeta,
   ZooDecision,
   ZooEvidence,
@@ -30,6 +32,8 @@ export type {
   ZooSourceKind,
   ZooWatchResult,
   ZooWatchStatus,
+  ZooXWatch,
+  ZooXWatchResult,
   ZooArtifactMeta,
   ZooBackfillState,
   ZooDecision,
@@ -110,7 +114,7 @@ function num(value: unknown): number | null {
 
 const BACKFILL_STATES = new Set(["idle", "running", "done", "error"])
 const PASS_STATES = new Set(["running", "done", "error"])
-const SOURCE_KINDS = new Set<string>(["linear", "transcripts", "repo-watch"])
+const SOURCE_KINDS = new Set<string>(["linear", "transcripts", "repo-watch", "x-watch"])
 const IDEA_TYPE_SET = new Set<string>(IDEA_TYPES)
 const WATCH_STATUSES = new Set<string>(["ok", "skipped", "error"])
 const IDEA_STATUSES = new Set<string>(["proposed", "promoted", "dismissed"])
@@ -415,6 +419,32 @@ function parseWatchResult(value: unknown): ZooWatchResult | null {
   return { watchId, label, status: status as ZooWatchResult["status"], added, ...(note ? { note } : {}) }
 }
 
+function parseXWatch(value: unknown): ZooXWatch | null {
+  const row = obj(value); if (!row) return null
+  const id = str(row.id); const sourceId = str(row.sourceId); const handle = str(row.handle); const label = str(row.label); const createdAt = num(row.createdAt)
+  if (!id || !sourceId || !handle || !label || createdAt === null) return null
+  const status = str(row.lastStatus); if (row.lastStatus !== undefined && (!status || !WATCH_STATUSES.has(status))) return null
+  const optional = (key: string) => num(row[key])
+  return { id, sourceId, handle, label, ...areaOf(row), ...(optional("lastSuccessAt") !== null ? { lastSuccessAt: optional("lastSuccessAt")! } : {}), ...(optional("lastAttemptAt") !== null ? { lastAttemptAt: optional("lastAttemptAt")! } : {}), ...(status ? { lastStatus: status as ZooXWatch["lastStatus"] } : {}), ...(str(row.lastNote) ? { lastNote: str(row.lastNote)! } : {}), ...(optional("lastArtifactAt") !== null ? { lastArtifactAt: optional("lastArtifactAt")! } : {}), ...(optional("lastExtractAt") !== null ? { lastExtractAt: optional("lastExtractAt")! } : {}), createdAt }
+}
+
+function parseXWatchResult(value: unknown): ZooXWatchResult | null {
+  const row = obj(value); if (!row) return null
+  const watchId = str(row.watchId); const label = str(row.label); const status = str(row.status); const added = num(row.added)
+  if (!watchId || !label || (status !== "ok" && status !== "error") || added === null) return null
+  return { watchId, label, status, added, ...(str(row.note) ? { note: str(row.note)! } : {}) }
+}
+
+export function parseXWatchesResponse(raw: unknown): ZooResult<{ watches: ZooXWatch[]; intervalMinutes: number; lastSuccessAt: number | null }> {
+  const { body, failure } = envelope(raw); if (!body) return failure ?? malformed()
+  const watches = parseList(body.watches, parseXWatch); const intervalMinutes = num(body.intervalMinutes); if (!watches || intervalMinutes === null) return malformed()
+  return { ok: true, watches, intervalMinutes, lastSuccessAt: num(body.lastSuccessAt) }
+}
+export function parseXWatchResponse(raw: unknown): ZooResult<{ watch: ZooXWatch }> { const { body, failure } = envelope(raw); if (!body) return failure ?? malformed(); const watch = parseXWatch(body.watch); return watch ? { ok: true, watch } : malformed() }
+export function parseXWatchCheckResponse(raw: unknown): ZooResult<{ results: ZooXWatchResult[]; checkedAt: number; succeeded: boolean }> { const { body, failure } = envelope(raw); if (!body) return failure ?? malformed(); const results = parseList(body.results, parseXWatchResult); const checkedAt = num(body.checkedAt); if (!results || checkedAt === null || typeof body.succeeded !== "boolean") return malformed(); return { ok: true, results, checkedAt, succeeded: body.succeeded } }
+export function parseXWatchScheduleResponse(raw: unknown): ZooResult<{ intervalMinutes: number }> { const { body, failure } = envelope(raw); if (!body) return failure ?? malformed(); const intervalMinutes = num(body.intervalMinutes); return intervalMinutes === null ? malformed() : { ok: true, intervalMinutes } }
+export function parseXWatchStateResponse(raw: unknown): ZooResult<{ intervalMinutes: number; lastSuccessAt: number | null; watchCount: number }> { const { body, failure } = envelope(raw); if (!body) return failure ?? malformed(); const intervalMinutes = num(body.intervalMinutes); const watchCount = num(body.watchCount); if (intervalMinutes === null || watchCount === null) return malformed(); return { ok: true, intervalMinutes, lastSuccessAt: num(body.lastSuccessAt), watchCount } }
+
 export function parseWatchesResponse(
   raw: unknown,
 ): ZooResult<{ watches: ZooRepoWatch[]; hour: number; lastRunAt: number | null }> {
@@ -653,6 +683,14 @@ export function zooCheckRepoWatches(
 export function zooMarkWatchExtracted(watchId: string): Promise<ZooResult<Record<never, never>>> {
   return call("zooMarkWatchExtracted", { watchId }, parseOkResponse)
 }
+
+export function zooListXWatches() { return call("zooListXWatches", {}, parseXWatchesResponse) }
+export function zooAddXWatch(handle: string, areaId?: string | null) { return call("zooAddXWatch", { handle, ...(areaId ? { areaId } : {}) }, parseXWatchResponse) }
+export function zooRemoveXWatch(watchId: string) { return call("zooRemoveXWatch", { watchId }, parseOkResponse) }
+export function zooSetXWatchSchedule(intervalMinutes: number) { return call("zooSetXWatchSchedule", { intervalMinutes }, parseXWatchScheduleResponse) }
+export function zooCheckXWatches(watchId?: string | null) { return call("zooCheckXWatches", watchId ? { watchId } : {}, parseXWatchCheckResponse) }
+export function zooMarkXWatchExtracted(watchId: string) { return call("zooMarkXWatchExtracted", { watchId }, parseOkResponse) }
+export function zooXWatchState() { return call("zooXWatchState", {}, parseXWatchStateResponse) }
 
 export function zooConnectLinear(
   apiKey: string,

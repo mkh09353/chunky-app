@@ -7,13 +7,14 @@ import { FolderOpen, LoaderCircle, Plug, RefreshCw, Sparkles } from "lucide-reac
 import { useState, type FormEvent } from "react"
 import { relativeTime } from "~/lib/format"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
-import { zooConnectLinear, zooConnectTranscripts, zooStartBackfill, type ZooArea, type ZooRepoWatch, type ZooSource, type ZooStatus } from "~/lib/zoo"
+import { zooConnectLinear, zooConnectTranscripts, zooStartBackfill, type ZooArea, type ZooRepoWatch, type ZooXWatch, type ZooSource, type ZooStatus } from "~/lib/zoo"
 import type { AreaSelection } from "~/lib/zooAreas"
 import type { ExtractionPhase } from "~/lib/zooExtraction"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
 import { EmptyState, Notice, ViewHeader } from "./parts"
 import { WatchList } from "./WatchList"
+import { XWatchList } from "./XWatchList"
 
 export type RunKind = "extraction" | "synthesis" | "triage"
 
@@ -74,6 +75,9 @@ export function SourcesView({
   areas,
   watchHour,
   watchLastRunAt,
+  xWatches,
+  xWatchIntervalMinutes,
+  xWatchLastSuccessAt,
   onAssignArea,
 }: {
   status: ZooStatus | null
@@ -94,6 +98,9 @@ export function SourcesView({
   areas: ZooArea[]
   watchHour: number
   watchLastRunAt: number | null
+  xWatches: ZooXWatch[]
+  xWatchIntervalMinutes: number
+  xWatchLastSuccessAt: number | null
   onAssignArea: (sourceId: string, areaId: string | null) => void
 }) {
   const [apiKey, setApiKey] = useState("")
@@ -102,7 +109,7 @@ export function SourcesView({
   const [error, setError] = useState<string | null>(null)
 
   const artifactCount = status?.artifactCount ?? 0
-  const connected = sources.filter((source) => source.kind !== "repo-watch")
+  const connected = sources.filter((source) => source.kind !== "repo-watch" && source.kind !== "x-watch")
 
   const connectLinear = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -173,12 +180,13 @@ export function SourcesView({
           onRefresh={onRefresh}
           onAssignArea={onAssignArea}
         />
+        <XWatchList watches={xWatches} areas={areas} intervalMinutes={xWatchIntervalMinutes} lastSuccessAt={xWatchLastSuccessAt} areaId={areaId} baseUrl={baseUrl} onRefresh={onRefresh} onAssignArea={onAssignArea} />
 
         {connected.length === 0 ? (
           <EmptyState
             icon={<Plug className="size-5" />}
             title="No sources connected"
-            body="Connect Linear, a folder of transcripts, or a competitor repository — the factory reads evidence from them and nothing else."
+            body="Connect Linear, transcripts, competitor repositories, or X accounts — the factory reads evidence from them and nothing else."
           />
         ) : (
           <ul className="flex min-w-0 flex-col gap-2">

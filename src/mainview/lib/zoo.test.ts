@@ -7,6 +7,10 @@ import {
   parseWatchCheckResponse,
   parseWatchesResponse,
   parseWatchResponse,
+  parseXWatchCheckResponse,
+  parseXWatchesResponse,
+  parseXWatchResponse,
+  parseXWatchStateResponse,
   parseAreasResponse,
   parseArtifactResponse,
   parseArtifactsResponse,
@@ -389,5 +393,20 @@ describe("watch validation", () => {
     expect(result.insights[0]?.sourceLabels).toEqual(["sst/opencode"])
     expect("sourceLabels" in result.insights[1]!).toBe(false)
     expect(parseInsightsResponse({ ok: true, insights: [{ id: "i-1", passId: "p-1", title: "t", summary: "s", evidence: [], sourceLabels: [7], createdAt: 1 }] }).ok).toBe(false)
+  })
+})
+
+describe("X-watch validation", () => {
+  const watch = { id: "x-1", sourceId: "s-x", handle: "theo", label: "@theo", lastSuccessAt: 5000, lastAttemptAt: 6000, lastStatus: "ok", lastNote: "No new posts", createdAt: 1000 }
+  it("validates lists, rows, schedules, and check results strictly", () => {
+    expect(parseXWatchesResponse({ ok: true, watches: [watch], intervalMinutes: 60, lastSuccessAt: 5000 })).toMatchObject({ ok: true, watches: [{ handle: "theo" }], intervalMinutes: 60 })
+    expect(parseXWatchesResponse({ ok: true, watches: [], intervalMinutes: 60, lastSuccessAt: null })).toEqual({ ok: true, watches: [], intervalMinutes: 60, lastSuccessAt: null })
+    expect(parseXWatchResponse({ ok: true, watch: { ...watch, lastStatus: "pending" } }).ok).toBe(false)
+    expect(parseXWatchResponse({ ok: true, watch: { ...watch, createdAt: "1" } }).ok).toBe(false)
+    expect(parseXWatchCheckResponse({ ok: true, checkedAt: 7000, succeeded: true, results: [{ watchId: "x-1", label: "@theo", status: "ok", added: 0 }] })).toMatchObject({ ok: true, succeeded: true })
+    expect(parseXWatchCheckResponse({ ok: true, checkedAt: 7000, succeeded: "yes", results: [] }).ok).toBe(false)
+    expect(parseXWatchCheckResponse({ ok: true, checkedAt: 7000, succeeded: false, results: [{ watchId: "x", label: "@x", status: "skipped", added: 0 }] }).ok).toBe(false)
+    expect(parseXWatchStateResponse({ ok: true, intervalMinutes: 60, lastSuccessAt: null, watchCount: 1 })).toEqual({ ok: true, intervalMinutes: 60, lastSuccessAt: null, watchCount: 1 })
+    expect(parseXWatchStateResponse({ ok: true, intervalMinutes: "60", lastSuccessAt: null, watchCount: 1 }).ok).toBe(false)
   })
 })

@@ -4,7 +4,7 @@
 export type ZooArea = { id: string; name: string; repoPaths?: string[]; createdAt: number }
 export type ZooAreaKind = "source" | "insight" | "idea" | "item"
 export type ZooBackfillState = "idle" | "running" | "done" | "error"
-export type ZooSourceKind = "linear" | "transcripts" | "repo-watch"
+export type ZooSourceKind = "linear" | "transcripts" | "repo-watch" | "x-watch"
 export type ZooSource = { id: string; kind: ZooSourceKind; label: string; areaId?: string; createdAt: number; backfill: { state: ZooBackfillState; fetched: number; error?: string; completedAt?: number } }
 export type ZooArtifactMeta = { id: string; sourceId: string; kind: string; externalId: string; title: string; url?: string; fetchedAt: number }
 export type ZooEvidence = { artifactId: string; quote: string }
@@ -23,3 +23,7 @@ export type ZooWatchStatus = "ok" | "skipped" | "error"
 export type ZooRepoWatch = { id: string; sourceId: string; owner: string; name: string; label: string; areaId?: string; lastCheckAt?: number; lastStatus?: ZooWatchStatus; lastNote?: string; lastArtifactAt?: number; lastExtractAt?: number; createdAt: number }
 /** One watch's result from a check pass. */
 export type ZooWatchResult = { watchId: string; label: string; status: ZooWatchStatus; added: number; note?: string }
+
+/** An X account collected through a repository-less, session-pinned Grok run. */
+export type ZooXWatch = { id: string; sourceId: string; handle: string; label: string; areaId?: string; lastSuccessAt?: number; lastAttemptAt?: number; lastStatus?: ZooWatchStatus; lastNote?: string; lastArtifactAt?: number; lastExtractAt?: number; createdAt: number }
+export type ZooXWatchResult = { watchId: string; label: string; status: "ok" | "error"; added: number; note?: string }

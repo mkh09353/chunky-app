@@ -332,6 +332,70 @@ test("does not seed a pre-existing empty database", async () => {
   expect(watches.watches).toEqual([])
 })
 
+test("new stores seed @theo beside the exact four repositories, while existing stores only migrate", async () => {
+  const path = mkdtempSync(join(tmpdir(), "chunky-zoo-x-seed-")); const dbPath = join(path, "zoo.db")
+  const zoo = createZooManager({ dbPath, now: () => 1234 }); cleanup.push({ path, zoo })
+  const repos = await zoo.listRepoWatches({}); const x = await zoo.listXWatches({})
+  expect(repos.ok && repos.watches.map((watch) => watch.label)).toEqual(["pingdotgg/t3code", "craft-ai-agents/craft-agents-oss", "Emanuele-web04/synara", "get-bb/bb"])
+  expect(x).toMatchObject({ ok: true, watches: [{ handle: "theo", label: "@theo" }], intervalMinutes: 60, lastSuccessAt: null })
+  expect(x.ok && x.watches[0]?.lastSuccessAt).toBeUndefined()
+  const status = await zoo.status({}); expect(status.ok && status.sources.filter((source) => source.kind === "x-watch")).toHaveLength(1)
+
+  const existingPath = mkdtempSync(join(tmpdir(), "chunky-zoo-x-existing-")); const existingDb = join(existingPath, "zoo.db"); new Database(existingDb).close()
+  const migrated = createZooManager({ dbPath: existingDb }); cleanup.push({ path: existingPath, zoo: migrated })
+  expect(await migrated.listXWatches({})).toMatchObject({ ok: true, watches: [] })
+})
+
+test("X-watch CRUD normalizes handles, dedupes post URLs, and advances success on empty and nonempty results", async () => {
+  const path = mkdtempSync(join(tmpdir(), "chunky-zoo-x-")); let clock = Date.UTC(2026, 0, 2, 12); let findings = [{ url: "https://x.com/theo/status/1", author: "@theo", text: "one", postedAt: clock - 1_000 }]
+  const calls: { handle: string; since: number | null; now: number }[] = []
+  const zoo = createZooManager({ dbPath: join(path, "zoo.db"), seedDefaults: false, now: () => clock, xWatchRun: async (params) => { calls.push(params); return { findings, provider: "grok", model: "g" } } }); cleanup.push({ path, zoo })
+  expect(await zoo.addXWatch({ handle: "bad-name" })).toMatchObject({ ok: false })
+  const added = await zoo.addXWatch({ handle: "https://twitter.com/THEO" }); if (!added.ok) throw new Error(added.error)
+  expect(added.watch).toMatchObject({ handle: "theo", label: "@theo" })
+  expect(await zoo.addXWatch({ handle: "@Theo" })).toMatchObject({ ok: false, error: "That X account is already watched" })
+  let checked = await zoo.checkXWatches({}); expect(checked).toMatchObject({ ok: true, succeeded: true, results: [{ status: "ok", added: 1 }] })
+  expect(calls[0]?.since).toBeNull()
+  let artifacts = await zoo.listArtifacts({ sourceId: added.watch.sourceId }); expect(artifacts.ok && artifacts.artifacts[0]).toMatchObject({ kind: "x-watch", externalId: "https://x.com/theo/status/1", url: "https://x.com/theo/status/1" })
+  clock += 3_600_000; findings = [{ ...findings[0]!, text: "edited but same URL" }]
+  checked = await zoo.checkXWatches({}); expect(checked).toMatchObject({ ok: true, succeeded: true, results: [{ added: 0 }] })
+  expect(calls[1]?.since).toBe(clock - 3_600_000)
+  artifacts = await zoo.listArtifacts({ sourceId: added.watch.sourceId }); expect(artifacts.ok && artifacts.total).toBe(1)
+  clock += 3_600_000; findings = []; checked = await zoo.checkXWatches({}); expect(checked).toMatchObject({ ok: true, succeeded: true, results: [{ added: 0, note: "No new posts" }] })
+  const listed = await zoo.listXWatches({}); expect(listed.ok && listed.watches[0]?.lastSuccessAt).toBe(clock); expect(listed.ok && listed.lastSuccessAt).toBe(clock)
+  expect(await zoo.startBackfill({ sourceId: added.watch.sourceId })).toMatchObject({ ok: false, error: "Watch sources are checked, not backfilled" })
+  expect(await zoo.removeXWatch({ watchId: added.watch.id })).toEqual({ ok: true }); expect(await zoo.listXWatches({})).toMatchObject({ ok: true, watches: [] }); expect((await zoo.status({}) as any).sources).toHaveLength(1)
+})
+
+test("X-watch errors are durable, do not move success, and all-success freshness requires every watch", async () => {
+  const path = mkdtempSync(join(tmpdir(), "chunky-zoo-x-errors-")); let clock = 10_000; let fail = false
+  const zoo = createZooManager({ dbPath: join(path, "zoo.db"), seedDefaults: false, now: () => clock, xWatchRun: async ({ handle }) => { if (fail || handle === "other") throw new Error("Grok is unavailable"); return { findings: [], provider: "grok", model: "g" } } }); cleanup.push({ path, zoo })
+  const theo = await zoo.addXWatch({ handle: "theo" }); if (!theo.ok) throw new Error(theo.error)
+  expect(await zoo.checkXWatches({ watchId: theo.watch.id })).toMatchObject({ ok: true, succeeded: true })
+  const success = clock; clock += 5_000; fail = true
+  expect(await zoo.checkXWatches({ watchId: theo.watch.id })).toMatchObject({ ok: true, succeeded: false, results: [{ status: "error", added: 0 }] })
+  let state = await zoo.xWatchState({}); expect(state.ok && state.lastSuccessAt).toBe(success)
+  let listed = await zoo.listXWatches({}); expect(listed.ok && listed.watches[0]).toMatchObject({ lastSuccessAt: success, lastAttemptAt: clock, lastStatus: "error" })
+  fail = false; await zoo.addXWatch({ handle: "other" }); clock += 5_000
+  expect(await zoo.checkXWatches({})).toMatchObject({ ok: true, succeeded: false })
+  state = await zoo.xWatchState({}); expect(state.ok && state.lastSuccessAt).toBe(success)
+  expect(await zoo.setXWatchSchedule({ intervalMinutes: 10 })).toMatchObject({ ok: false })
+  expect(await zoo.setXWatchSchedule({ intervalMinutes: 90 })).toEqual({ ok: true, intervalMinutes: 90 })
+  expect(await zoo.checkXWatches({ watchId: "missing" })).toMatchObject({ ok: false, error: "Unknown X watch" })
+})
+
+test("X-watch manager guard prevents per-watch and all-watch checks from racing", async () => {
+  const path = mkdtempSync(join(tmpdir(), "chunky-zoo-x-race-")); let entered = false; let release: (() => void) | null = null
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const zoo = createZooManager({ dbPath: join(path, "zoo.db"), seedDefaults: false, xWatchRun: async () => { entered = true; await gate; return { findings: [], provider: "grok", model: "g" } } }); cleanup.push({ path, zoo })
+  const added = await zoo.addXWatch({ handle: "theo" }); if (!added.ok) throw new Error(added.error)
+  const first = zoo.checkXWatches({ watchId: added.watch.id })
+  for (let i = 0; i < 20 && !entered; i++) await Bun.sleep(1)
+  expect(entered).toBe(true)
+  expect(await zoo.checkXWatches({})).toEqual({ ok: false, error: "An X-watch check is already running." })
+  release?.(); expect((await first).ok).toBe(true)
+})
+
 // ---- Competitor watch: a watch is a source, its delta is an artifact --------
 
 const DAY_MS = 86_400_000

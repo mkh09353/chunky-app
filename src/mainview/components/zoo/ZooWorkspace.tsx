@@ -112,6 +112,7 @@ export function ZooWorkspace({
     () => board.watches.filter((watch) => inArea(watch, selectedArea)),
     [board.watches, selectedArea],
   )
+  const xWatchesInView = useMemo(() => board.xWatches.filter((watch) => inArea(watch, selectedArea)), [board.xWatches, selectedArea])
 
   /** Every selectable thing, queued or not, in the shape the detail pane wants. */
   const catalog = useMemo(() => {
@@ -310,6 +311,9 @@ export function ZooWorkspace({
       areas={areas}
       watchHour={board.watchHour}
       watchLastRunAt={board.watchLastRunAt}
+      xWatches={xWatchesInView}
+      xWatchIntervalMinutes={board.xWatchIntervalMinutes}
+      xWatchLastSuccessAt={board.xWatchLastSuccessAt}
       onAssignArea={(sourceId, next) => assignArea("source", sourceId, next)}
     />
   )

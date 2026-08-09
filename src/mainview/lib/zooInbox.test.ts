@@ -155,6 +155,11 @@ describe("buildInbox", () => {
     expect(byId.get("insights:p-2")?.sourceLabels).toBeUndefined()
   })
 
+  it("carries an X-watch source label through the same Inbox attribution path", () => {
+    const entries = buildInbox({ ideas: [], items: [], insights: [insight({ id: "i-x", passId: "p-x", sourceLabels: ["@theo"] })] })
+    expect(entries[0]?.sourceLabels).toEqual(["@theo"])
+  })
+
   it("returns nothing for an empty board", () => {
     expect(buildInbox({ ideas: [], items: [], insights: [] })).toEqual([])
   })

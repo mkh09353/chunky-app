@@ -26,6 +26,8 @@ import { mergeDesktopState, readDesktopState, type DesktopState } from "./deskto
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
 import { createWatchScheduler } from "./watchScheduler"
+import { runXWatchSession } from "./xWatch"
+import { createXWatchScheduler } from "./xWatchScheduler"
 import { setSetupStageReporter, SETUP_STAGE_MESSAGE, type SetupStage } from "./setupStatus"
 import { hasVoiceApiKey, mintVoiceToken, setVoiceApiKey } from "./voice"
 import { inspectServers, retireServer, stopServer, type ServerInspection } from "./serverInspection"
@@ -214,7 +216,12 @@ const terminals = createTerminalManager((name, payload) => {
 })
 // SQLite is opened lazily inside the manager, so merely launching Chunky does
 // not create product-factory state or touch the disk.
-const zoo = createZooManager()
+const zoo = createZooManager({
+  xWatchRun: async (params) => {
+    const connection = await resolveChunkyConnection()
+    return runXWatchSession(params, { baseUrl: connection.baseUrl, token: connection.serverToken })
+  },
+})
 // The token-guarded loopback service remains dormant until the renderer needs
 // to announce it to the local Chunky server.
 const zooService = createZooService({ manager: zoo })
@@ -229,6 +236,20 @@ const watchScheduler = createWatchScheduler({
     return zoo.checkRepoWatches({})
   },
   onError: (error) => console.warn("[zoo] competitor watch check failed:", error),
+})
+const xWatchScheduler = createXWatchScheduler({
+  state: async () => {
+    if (!zoo.hasStore()) return { intervalMinutes: 60, lastSuccessAt: Date.now() }
+    const state = await zoo.xWatchState({})
+    return state.ok ? { intervalMinutes: state.intervalMinutes, lastSuccessAt: state.lastSuccessAt } : { intervalMinutes: 60, lastSuccessAt: null }
+  },
+  run: async () => {
+    if (!zoo.hasStore()) return { ok: true as const, results: [], checkedAt: Date.now(), succeeded: false }
+    const state = await zoo.xWatchState({})
+    if (!state.ok || state.watchCount === 0) return { ok: true as const, results: [], checkedAt: Date.now(), succeeded: false }
+    return zoo.checkXWatches({})
+  },
+  onError: (error) => console.warn("[zoo] X-watch check failed:", error instanceof Error ? error.message : "unknown error"),
 })
 
 /**
@@ -539,6 +560,26 @@ rpc = createRPC({
     },
     zooMarkWatchExtracted: async (params: unknown) => zoo.markWatchExtracted(params),
     zooWatchState: async (params: unknown) => zoo.watchState(params),
+    zooListXWatches: async (params: unknown) => zoo.listXWatches(params),
+    zooAddXWatch: async (params: unknown) => {
+      const result = await zoo.addXWatch(params)
+      if (result.ok) void xWatchScheduler.start().catch(() => {})
+      return result
+    },
+    zooRemoveXWatch: async (params: unknown) => zoo.removeXWatch(params),
+    zooSetXWatchSchedule: async (params: unknown) => {
+      const result = await zoo.setXWatchSchedule(params)
+      if (result.ok) await xWatchScheduler.reschedule()
+      return result
+    },
+    zooCheckXWatches: async (params: unknown) => {
+      const body = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : {}
+      if (typeof body.watchId === "string") return zoo.checkXWatches(body)
+      const outcome = await xWatchScheduler.checkNow()
+      return outcome.ran ? outcome.result : { ok: false as const, error: "An X-watch check is already running." }
+    },
+    zooMarkXWatchExtracted: async (params: unknown) => zoo.markXWatchExtracted(params),
+    zooXWatchState: async (params: unknown) => zoo.xWatchState(params),
     zooConnectLinear: async (params: unknown) => zoo.connectLinear(params),
     zooConnectTranscripts: async (params: unknown) => zoo.connectTranscripts(params),
     zooStartBackfill: async (params: unknown) => zoo.startBackfill(params),
@@ -583,6 +624,7 @@ rpc = createRPC({
 // Existing stores are migrated in place and never seeded. The scheduler owns
 // catch-up and all later re-arming; GitHub remains entirely in this Bun process.
 void watchScheduler.start().catch((error) => console.warn("[zoo] competitor watch scheduler:", error))
+void xWatchScheduler.start().catch((error) => console.warn("[zoo] X-watch scheduler:", error instanceof Error ? error.message : "unknown error"))
 
 // First-run setup can take minutes (release download → bun install → server
 // start). Push each stage to the webview over the existing fire-and-forget
@@ -629,6 +671,7 @@ win.on("resize", () => {
 // Tear down native FFF handles when the process is leaving.
 const cleanup = () => {
   watchScheduler.stop()
+  xWatchScheduler.stop()
   zoo.close()
   terminals.destroy()
   destroyFinders()

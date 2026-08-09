@@ -13,7 +13,9 @@ import {
   type WatchCheckOutcome,
 } from "./repoWatch"
 import { DEFAULT_WATCH_HOUR } from "./watchScheduler"
-import type { ZooArea, ZooAreaKind, ZooArtifactMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
+import { DEFAULT_X_WATCH_INTERVAL_MINUTES, MAX_X_WATCH_INTERVAL_MINUTES, MIN_X_WATCH_INTERVAL_MINUTES } from "./xWatchScheduler"
+import { formatXArtifact, normalizeXHandle, type XWatchRun } from "./xWatch"
+import type { ZooArea, ZooAreaKind, ZooArtifactMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooXWatch, ZooXWatchResult, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
 
 const LINEAR_URL = "https://api.linear.app/graphql"
 const DEFAULT_EXPORT_CHARS = 150_000
@@ -30,6 +32,8 @@ const AREA_TABLES: Record<ZooAreaKind, string> = { source: "sources", insight: "
 const MAX_AREA_REPOS = 20
 /** Guard rail on a check: 60 unauthenticated GitHub calls/hour, ~6 per watch. */
 const MAX_WATCHES = 25
+const MAX_X_WATCHES = 25
+export const DEFAULT_X_WATCHES = ["theo"] as const
 export const DEFAULT_REPO_WATCHES = [
   { owner: "pingdotgg", name: "t3code" },
   { owner: "craft-ai-agents", name: "craft-agents-oss" },
@@ -39,7 +43,7 @@ export const DEFAULT_REPO_WATCHES = [
 
 type Row = Record<string, unknown>
 type Result<T extends object> = ({ ok: true } & T) | { ok: false; error: string }
-type ZooDependencies = { dbPath?: string; fetch?: typeof fetch; githubToken?: string | null; now?: () => number; seedDefaults?: boolean }
+type ZooDependencies = { dbPath?: string; fetch?: typeof fetch; githubToken?: string | null; xWatchRun?: XWatchRun; now?: () => number; seedDefaults?: boolean }
 type LinearIssue = { identifier: string; title: string; url?: string | null }
 
 function object(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null }
@@ -68,6 +72,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
   let db: Database | undefined
   const activeBackfills = new Set<string>()
   let activeWatchCheck = false
+  let activeXWatchCheck = false
 
   const database = () => {
     if (db) return db
@@ -124,6 +129,11 @@ export function createZooManager(deps: ZooDependencies = {}) {
     db.run("DELETE FROM repo_watches WHERE EXISTS (SELECT 1 FROM repo_watches older WHERE older.owner = repo_watches.owner COLLATE NOCASE AND older.name = repo_watches.name COLLATE NOCASE AND older.rowid < repo_watches.rowid)")
     db.run("DROP INDEX IF EXISTS repo_watches_repo")
     db.run("CREATE UNIQUE INDEX IF NOT EXISTS repo_watches_repo ON repo_watches(owner COLLATE NOCASE, name COLLATE NOCASE)")
+    // X watches are independent sources and jobs. `last_success_at` is the
+    // collection cursor; attempts and failures never move it.
+    db.run("CREATE TABLE IF NOT EXISTS x_watches (id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id), handle TEXT NOT NULL, last_success_at INTEGER, last_attempt_at INTEGER, last_status TEXT, last_note TEXT, last_artifact_at INTEGER, last_extract_at INTEGER, created_at INTEGER NOT NULL)")
+    db.run("DELETE FROM x_watches WHERE EXISTS (SELECT 1 FROM x_watches older WHERE older.handle = x_watches.handle COLLATE NOCASE AND older.rowid < x_watches.rowid)")
+    db.run("CREATE UNIQUE INDEX IF NOT EXISTS x_watches_handle ON x_watches(handle COLLATE NOCASE)")
     db.run("CREATE TABLE IF NOT EXISTS zoo_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     if (isNewStore && deps.seedDefaults !== false) {
       const now = clock()
@@ -133,6 +143,11 @@ export function createZooManager(deps: ZooDependencies = {}) {
           db!.query("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'repo-watch', ?, '', NULL, ?, 'idle', 0)").run(sourceId, label, now)
           db!.query("INSERT INTO repo_watches (id, source_id, owner, name, seen_tags, created_at) VALUES (?, ?, ?, ?, '[]', ?)").run(watchId, sourceId, ref.owner, ref.name, now)
         }
+        for (const handle of DEFAULT_X_WATCHES) {
+          const sourceId = randomUUID(); const watchId = randomUUID()
+          db!.query("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'x-watch', ?, '', NULL, ?, 'idle', 0)").run(sourceId, `@${handle}`, now)
+          db!.query("INSERT INTO x_watches (id, source_id, handle, created_at) VALUES (?, ?, ?, ?)").run(watchId, sourceId, handle, now)
+        }
       })()
     }
     return db
@@ -140,7 +155,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
   const rows = (sql: string, ...args: unknown[]): Row[] => database().query(sql).all(...args) as Row[]
   const one = (sql: string, ...args: unknown[]): Row | undefined => database().query(sql).get(...args) as Row | undefined
   const run = (sql: string, ...args: unknown[]) => database().query(sql).run(...args)
-  const sourceFrom = (row: Row): ZooSource => ({ id: String(row.id), kind: row.kind === "transcripts" ? "transcripts" : row.kind === "repo-watch" ? "repo-watch" : "linear", label: String(row.label), ...areaOf(row), createdAt: Number(row.created_at), backfill: { state: row.backfill_state as ZooSource["backfill"]["state"], fetched: Number(row.backfill_fetched), ...(typeof row.backfill_error === "string" && row.backfill_error ? { error: row.backfill_error } : {}), ...(typeof row.backfill_completed_at === "number" ? { completedAt: row.backfill_completed_at } : {}) } })
+  const sourceFrom = (row: Row): ZooSource => ({ id: String(row.id), kind: row.kind === "transcripts" ? "transcripts" : row.kind === "repo-watch" ? "repo-watch" : row.kind === "x-watch" ? "x-watch" : "linear", label: String(row.label), ...areaOf(row), createdAt: Number(row.created_at), backfill: { state: row.backfill_state as ZooSource["backfill"]["state"], fetched: Number(row.backfill_fetched), ...(typeof row.backfill_error === "string" && row.backfill_error ? { error: row.backfill_error } : {}), ...(typeof row.backfill_completed_at === "number" ? { completedAt: row.backfill_completed_at } : {}) } })
   const artifactFrom = (row: Row): ZooArtifactMeta => ({ id: String(row.id), sourceId: String(row.source_id), kind: String(row.kind), externalId: String(row.external_id), title: String(row.title), ...(typeof row.url === "string" && row.url ? { url: row.url } : {}), fetchedAt: Number(row.fetched_at) })
   const latestArtifacts = (sourceId?: string) => rows(`SELECT a.* FROM artifacts a WHERE ${sourceId ? "a.source_id = ? AND" : ""} NOT EXISTS (SELECT 1 FROM artifacts n WHERE n.source_id = a.source_id AND n.external_id = a.external_id AND (n.fetched_at > a.fetched_at OR (n.fetched_at = a.fetched_at AND n.rowid > a.rowid)))`, ...(sourceId ? [sourceId] : []))
   const count = (table: string) => Number(one(`SELECT COUNT(*) AS count FROM ${table}`)?.count || 0)
@@ -187,6 +202,9 @@ export function createZooManager(deps: ZooDependencies = {}) {
     createdAt: Number(row.created_at),
   })
   const watchRows = () => rows("SELECT w.*, s.area_id AS area_id FROM repo_watches w JOIN sources s ON s.id = w.source_id ORDER BY w.created_at, w.rowid")
+  const xInterval = (): number => { const raw = Number(setting("xWatchIntervalMinutes")); return Number.isFinite(raw) && raw >= MIN_X_WATCH_INTERVAL_MINUTES && raw <= MAX_X_WATCH_INTERVAL_MINUTES ? Math.floor(raw) : DEFAULT_X_WATCH_INTERVAL_MINUTES }
+  const xWatchFrom = (row: Row): ZooXWatch => ({ id: String(row.id), sourceId: String(row.source_id), handle: String(row.handle), label: `@${String(row.handle)}`, ...areaOf(row), ...(typeof row.last_success_at === "number" ? { lastSuccessAt: row.last_success_at } : {}), ...(typeof row.last_attempt_at === "number" ? { lastAttemptAt: row.last_attempt_at } : {}), ...(typeof row.last_status === "string" && row.last_status ? { lastStatus: row.last_status as ZooXWatch["lastStatus"] } : {}), ...(typeof row.last_note === "string" && row.last_note ? { lastNote: row.last_note } : {}), ...(typeof row.last_artifact_at === "number" ? { lastArtifactAt: row.last_artifact_at } : {}), ...(typeof row.last_extract_at === "number" ? { lastExtractAt: row.last_extract_at } : {}), createdAt: Number(row.created_at) })
+  const xWatchRows = () => rows("SELECT w.*, s.area_id AS area_id FROM x_watches w JOIN sources s ON s.id = w.source_id ORDER BY w.created_at, w.rowid")
   /** Where an insight's evidence came from — a watch's insights can then be
    *  badged with the repository they are about. */
   const sourceLabelsOf = (insightId: string): { sourceLabels?: string[] } => {
@@ -391,6 +409,46 @@ export function createZooManager(deps: ZooDependencies = {}) {
       run("UPDATE repo_watches SET last_extract_at = ? WHERE id = ?", clock(), id)
       return { ok: true }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    // ---- X watch ----------------------------------------------------------
+    async listXWatches(params: unknown): Promise<Result<{ watches: ZooXWatch[]; intervalMinutes: number; lastSuccessAt: number | null }>> { try {
+      if (!emptyObject(params)) return { ok: false, error: "Invalid X-watch list request" }
+      const last = Number(setting("xWatchLastSuccessAt"))
+      return { ok: true, watches: xWatchRows().map(xWatchFrom), intervalMinutes: xInterval(), lastSuccessAt: Number.isFinite(last) && last > 0 ? last : null }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async addXWatch(params: unknown): Promise<Result<{ watch: ZooXWatch }>> { try {
+      const body = object(params); const handle = normalizeXHandle(body?.handle); if (!handle) return { ok: false, error: "Enter a valid X handle" }
+      const areaId = text(body?.areaId, 200); if (areaId && !areaExists(areaId)) return { ok: false, error: "Unknown area" }
+      if (one("SELECT id FROM x_watches WHERE handle = ? COLLATE NOCASE", handle)) return { ok: false, error: "That X account is already watched" }
+      if (Number(one("SELECT COUNT(*) AS count FROM x_watches")?.count || 0) >= MAX_X_WATCHES) return { ok: false, error: `An X watchlist tops out at ${MAX_X_WATCHES} accounts` }
+      const id = randomUUID(); const sourceId = randomUUID(); const now = clock()
+      database().transaction(() => { run("INSERT INTO sources (id, kind, label, api_key, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'x-watch', ?, '', ?, ?, 'idle', 0)", sourceId, `@${handle}`, areaId || null, now); run("INSERT INTO x_watches (id, source_id, handle, created_at) VALUES (?, ?, ?, ?)", id, sourceId, handle, now) })()
+      return { ok: true, watch: xWatchFrom(one("SELECT w.*, s.area_id FROM x_watches w JOIN sources s ON s.id = w.source_id WHERE w.id = ?", id)!) }
+    } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async removeXWatch(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.watchId, 200); if (!id || !one("SELECT id FROM x_watches WHERE id = ?", id)) return { ok: false, error: id ? "Unknown X watch" : "Invalid X-watch id" }; run("DELETE FROM x_watches WHERE id = ?", id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async setXWatchSchedule(params: unknown): Promise<Result<{ intervalMinutes: number }>> { try { const raw = Number(object(params)?.intervalMinutes); if (!Number.isFinite(raw) || raw < MIN_X_WATCH_INTERVAL_MINUTES || raw > MAX_X_WATCH_INTERVAL_MINUTES) return { ok: false, error: `Pick an interval between ${MIN_X_WATCH_INTERVAL_MINUTES} and ${MAX_X_WATCH_INTERVAL_MINUTES} minutes` }; const intervalMinutes = Math.floor(raw); putSetting("xWatchIntervalMinutes", String(intervalMinutes)); return { ok: true, intervalMinutes } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async xWatchState(params: unknown): Promise<Result<{ intervalMinutes: number; lastSuccessAt: number | null; watchCount: number }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid X-watch state request" }; const last = Number(setting("xWatchLastSuccessAt")); return { ok: true, intervalMinutes: xInterval(), lastSuccessAt: Number.isFinite(last) && last > 0 ? last : null, watchCount: Number(one("SELECT COUNT(*) AS count FROM x_watches")?.count || 0) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async checkXWatches(params: unknown): Promise<Result<{ results: ZooXWatchResult[]; checkedAt: number; succeeded: boolean }>> { try {
+      if (activeXWatchCheck) return { ok: false, error: "An X-watch check is already running." }
+      const body = object(params); if (!body) return { ok: false, error: "Invalid X-watch check request" }; const only = body.watchId === undefined ? null : text(body.watchId, 200); if (body.watchId !== undefined && !only) return { ok: false, error: "Invalid X-watch id" }
+      const targets = xWatchRows().filter((row) => !only || String(row.id) === only); if (only && !targets.length) return { ok: false, error: "Unknown X watch" }
+      activeXWatchCheck = true; const checkedAt = clock(); const results: ZooXWatchResult[] = []; let succeeded = targets.length > 0
+      try { for (const row of targets) {
+        const watch = xWatchFrom(row); run("UPDATE x_watches SET last_attempt_at = ? WHERE id = ?", checkedAt, watch.id)
+        try {
+          if (!deps.xWatchRun) throw new Error("X-watch collection is unavailable.")
+          const collection = await deps.xWatchRun({ handle: watch.handle, since: watch.lastSuccessAt ?? null, now: checkedAt })
+          let added = 0
+          for (const finding of collection.findings) { const artifact = formatXArtifact(finding); if (!one("SELECT id FROM artifacts WHERE source_id = ? AND external_id = ?", watch.sourceId, artifact.externalId) && insertArtifact(watch.sourceId, "x-watch", artifact.externalId, artifact.title, artifact.content, artifact.url)) added++ }
+          const note = added ? `Recorded ${added} new post${added === 1 ? "" : "s"}` : "No new posts"
+          run("UPDATE x_watches SET last_success_at = ?, last_status = 'ok', last_note = ?" + (added ? ", last_artifact_at = ?" : "") + " WHERE id = ?", checkedAt, note, ...(added ? [checkedAt] : []), watch.id)
+          run("UPDATE sources SET backfill_state = 'done', backfill_fetched = backfill_fetched + ?, backfill_error = NULL, backfill_completed_at = ? WHERE id = ?", added, checkedAt, watch.sourceId)
+          results.push({ watchId: watch.id, label: watch.label, status: "ok", added, note })
+        } catch (error) { succeeded = false; const note = errorMessage(error).slice(0, 2000); run("UPDATE x_watches SET last_status = 'error', last_note = ? WHERE id = ?", note, watch.id); run("UPDATE sources SET backfill_state = 'error', backfill_error = ? WHERE id = ?", note, watch.sourceId); results.push({ watchId: watch.id, label: watch.label, status: "error", added: 0, note }) }
+      } } finally { activeXWatchCheck = false }
+      if (succeeded) putSetting("xWatchLastSuccessAt", String(checkedAt))
+      return { ok: true, results, checkedAt, succeeded }
+    } catch (e) { activeXWatchCheck = false; return { ok: false, error: errorMessage(e) } } },
+    async markXWatchExtracted(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.watchId, 200); if (!id || !one("SELECT id FROM x_watches WHERE id = ?", id)) return { ok: false, error: id ? "Unknown X watch" : "Invalid X-watch id" }; run("UPDATE x_watches SET last_extract_at = ? WHERE id = ?", clock(), id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async status(params: unknown): Promise<Result<{ sources: ZooSource[]; artifactCount: number; insightCount: number; ideaCount: number; itemCount: number; passes: ZooPass[] }>> { try {
       if (!emptyObject(params)) return { ok: false, error: "Invalid status request" }
       const passes = rows("SELECT * FROM passes ORDER BY started_at DESC").map((r): ZooPass => ({ id: String(r.id), startedAt: Number(r.started_at), status: r.status as ZooPass["status"], ...(typeof r.note === "string" && r.note ? { note: r.note } : {}) }))
@@ -412,7 +470,7 @@ export function createZooManager(deps: ZooDependencies = {}) {
       if (!existing) run("INSERT INTO sources (id, kind, label, api_key, folder, area_id, created_at, backfill_state, backfill_fetched) VALUES (?, 'transcripts', ?, '', ?, ?, ?, 'idle', 0)", id, `${basename(path)} · ${path}`, path, areaId || null, clock())
       return { ok: true, source: sourceFrom(one("SELECT * FROM sources WHERE id = ?", id)!) }
     } catch (e) { return { ok: false, error: errorMessage(e) } } },
-    async startBackfill(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.sourceId, 200); const source = id ? one("SELECT id, kind FROM sources WHERE id = ?", id) : undefined; if (!source) return { ok: false, error: "Unknown source" }; if (source.kind === "repo-watch") return { ok: false, error: "Repository watches are checked, not backfilled" }; void backfill(id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
+    async startBackfill(params: unknown): Promise<Result<{}>> { try { const id = text(object(params)?.sourceId, 200); const source = id ? one("SELECT id, kind FROM sources WHERE id = ?", id) : undefined; if (!source) return { ok: false, error: "Unknown source" }; if (source.kind === "repo-watch" || source.kind === "x-watch") return { ok: false, error: "Watch sources are checked, not backfilled" }; void backfill(id); return { ok: true } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async listArtifacts(params: unknown): Promise<Result<{ artifacts: ZooArtifactMeta[]; total: number }>> { try {
       const body = object(params); if (!body) return { ok: false, error: "Invalid artifact list request" }; const sourceId = body.sourceId === undefined ? undefined : text(body.sourceId, 200); if (body.sourceId !== undefined && !sourceId) return { ok: false, error: "Invalid sourceId" }
       const all = latestArtifacts(sourceId).sort((a, b) => Number(b.fetched_at) - Number(a.fetched_at)); const limit = number(body.limit, 100, 500) || 100; const offset = number(body.offset, 0, Number.MAX_SAFE_INTEGER)
