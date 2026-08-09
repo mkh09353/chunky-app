@@ -135,6 +135,8 @@ async function recordPass(
   passId: string,
   reply: { ok: true; text: string } | { ok: false; error: string },
   phase: (next: IdeasPhase) => void,
+  /** Area the run was scoped to; its ideas are stamped with it. */
+  areaId?: string | null,
 ): Promise<IdeasResult> {
   const failPass = async (error: string): Promise<IdeasResult> => {
     await zooFailPass(passId, error)
@@ -146,19 +148,19 @@ async function recordPass(
   if (!parsed.ok) return failPass(parsed.error)
 
   phase("recording")
-  const recorded = await zooRecordIdeas(passId, parsed.ideas)
+  const recorded = await zooRecordIdeas(passId, parsed.ideas, areaId)
   if (!recorded.ok) return failPass(recorded.error)
   return { ok: true, passId, ideaCount: recorded.ideaCount, dropped: parsed.dropped }
 }
 
 /** Insights -> proposed ideas. No repo binding: this pass only reasons. */
 export async function runSynthesis(
-  opts: { baseUrl?: string | null; maxChars?: number; onPhase?: (phase: IdeasPhase) => void } = {},
+  opts: { baseUrl?: string | null; maxChars?: number; areaId?: string | null; onPhase?: (phase: IdeasPhase) => void } = {},
 ): Promise<IdeasResult> {
   const phase = (next: IdeasPhase) => opts.onPhase?.(next)
 
   phase("exporting")
-  const exported = await zooExportInsightsForSynthesis(opts.maxChars)
+  const exported = await zooExportInsightsForSynthesis(opts.maxChars, opts.areaId)
   if (!exported.ok) return { ok: false, error: exported.error }
 
   phase("starting")
@@ -167,7 +169,7 @@ export async function runSynthesis(
     baseUrl: opts.baseUrl ?? null,
     onSession: () => phase("thinking"),
   })
-  return recordPass(exported.passId, reply, phase)
+  return recordPass(exported.passId, reply, phase, opts.areaId)
 }
 
 /**
@@ -176,13 +178,13 @@ export async function runSynthesis(
  */
 export async function runTriage(
   repoId: string,
-  opts: { baseUrl?: string | null; maxChars?: number; onPhase?: (phase: IdeasPhase) => void } = {},
+  opts: { baseUrl?: string | null; maxChars?: number; areaId?: string | null; onPhase?: (phase: IdeasPhase) => void } = {},
 ): Promise<IdeasResult> {
   const phase = (next: IdeasPhase) => opts.onPhase?.(next)
   if (!repoId) return { ok: false, error: "Triage needs a selected repository." }
 
   phase("exporting")
-  const exported = await zooExportForExtraction(opts.maxChars)
+  const exported = await zooExportForExtraction(opts.maxChars, opts.areaId)
   if (!exported.ok) return { ok: false, error: exported.error }
 
   phase("starting")
@@ -193,5 +195,5 @@ export async function runTriage(
     timeoutMs: TRIAGE_TIMEOUT_MS,
     onSession: () => phase("thinking"),
   })
-  return recordPass(exported.passId, reply, phase)
+  return recordPass(exported.passId, reply, phase, opts.areaId)
 }

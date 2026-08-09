@@ -16,6 +16,7 @@ export interface SlashCommand {
 export const COMMANDS: SlashCommand[] = [
   { name: "/clear", description: "Start a new session" },
   { name: "/resume", description: "Resume a previous thread in this repo" },
+  { name: "/zoo", description: "Open the product-factory workspace" },
   { name: "/rewind", description: "Restore files and conversation to an earlier turn" },
   { name: "/fork", description: "Branch this session, optionally in a Git worktree" },
   { name: "/rename", description: "Rename this session" },

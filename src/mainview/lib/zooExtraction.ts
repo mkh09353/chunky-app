@@ -293,12 +293,12 @@ export async function runSessionPrompt(opts: {
  * the store via zooFailPass so the pane and the durable record agree.
  */
 export async function runExtraction(
-  opts: { baseUrl?: string | null; maxChars?: number; onPhase?: (phase: ExtractionPhase) => void } = {},
+  opts: { baseUrl?: string | null; maxChars?: number; areaId?: string | null; onPhase?: (phase: ExtractionPhase) => void } = {},
 ): Promise<ExtractionResult> {
   const phase = (next: ExtractionPhase) => opts.onPhase?.(next)
 
   phase("exporting")
-  const exported = await zooExportForExtraction(opts.maxChars)
+  const exported = await zooExportForExtraction(opts.maxChars, opts.areaId)
   if (!exported.ok) return { ok: false, error: exported.error }
   const { passId, bundle } = exported
 
@@ -320,7 +320,7 @@ export async function runExtraction(
   if (!parsed.ok) return failPass(parsed.error)
 
   phase("recording")
-  const recorded = await zooRecordInsights(passId, parsed.insights)
+  const recorded = await zooRecordInsights(passId, parsed.insights, opts.areaId)
   if (!recorded.ok) return failPass(recorded.error)
   return { ok: true, passId, insightCount: recorded.insightCount }
 }

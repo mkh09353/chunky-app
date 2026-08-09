@@ -28,7 +28,7 @@ import { PrWidget } from "./components/PrWidget"
 import { PrPanel } from "./components/PrPanel"
 import { SidekickPicker } from "./components/SidekickPicker"
 import { BrowserPane } from "./components/BrowserPane"
-import { FactoryPane } from "./components/FactoryPane"
+import { ZooWorkspace } from "./components/zoo/ZooWorkspace"
 import { RepoFilesPane } from "./components/RepoFilesPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
 import { ApiKeyRequestHost } from "./components/ApiKeyDialog"
@@ -359,7 +359,7 @@ export function App() {
   // a thing you open, not a mode the app remembers for you. The chat column
   // stays MOUNTED behind it so a round-trip cannot cost the reader their scroll
   // position (or a re-attach).
-  const [mainView, setMainView] = useState<"chat" | "home" | "usage">("chat")
+  const [mainView, setMainView] = useState<"chat" | "home" | "usage" | "zoo">("chat")
   // sessionId -> when THIS client first saw the session busy, for Home's
   // elapsed times. Absent = we started watching mid-run and cannot say.
   const [busySince, setBusySince] = useState<ReadonlyMap<string, number>>(new Map())
@@ -429,13 +429,10 @@ export function App() {
   // (see devOnboardingRequested); always false in production builds.
   const [onboardingOpen, setOnboardingOpen] = useState(devOnboardingRequested)
   const [browserOpen, setBrowserOpen] = useState(false)
-  // The factory shares the content-panel side region with the browser pane.
-  const [factoryOpen, setFactoryOpen] = useState(false)
   const [filesRepoId, setFilesRepoId] = useState<string | null>(null)
   const openRepoFiles = useCallback((repoId: string) => {
     setFilesRepoId(repoId)
     setBrowserOpen(false)
-    setFactoryOpen(false)
   }, [])
   // PR reviews: the board is polled here (the sidebar widget needs it whether or
   // not the panel is open); the slide-over owns actions and setup.
@@ -449,7 +446,6 @@ export function App() {
   // itself picks the URL up from the same store.
   useEffect(() => subscribeBrowserNavigation(() => {
     setFilesRepoId(null)
-    setFactoryOpen(false)
     setBrowserOpen(true)
   }), [])
   useEffect(() => {
@@ -2452,6 +2448,9 @@ export function App() {
         case "/resume":
           setPaletteOpen(true)
           return true
+        case "/zoo":
+          setMainView("zoo")
+          return true
       }
 
       // Everything below needs the live server; in demo it stays chat text.
@@ -2661,6 +2660,7 @@ export function App() {
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: "new", label: "New session", hint: "⌘N", group: "Session" },
     { id: "home", label: "Go Home", hint: "⌘0", group: "Session" },
+    { id: "zoo", label: "Open The Zoo", group: "Workspace" },
     { id: "usage", label: "Usage", group: "Session" },
     { id: "scoreboard", label: "Scoreboard", group: "Session" },
     ...repos.map((repo) => ({ id: `repo:${repo.id}`, label: `Switch repo: ${repo.name}`, group: "Repositories" })),
@@ -2670,10 +2670,9 @@ export function App() {
     { id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" },
     { id: "theme", label: "Toggle theme", group: "Appearance" },
     { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
-    { id: "factory", label: factoryOpen ? "Close Factory" : "Open Factory", group: "Workspace" },
     { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
     { id: "onboarding", label: "Run Onboarding", group: "Integration" },
-  ], [repos, sessions, uiModels, browserOpen, factoryOpen])
+  ], [repos, sessions, uiModels, browserOpen])
 
   /** Stable app-action dispatch shared by the palette and the voice agent. */
   const dispatchAppAction = useCallback(
@@ -2710,12 +2709,12 @@ export function App() {
     (a: PaletteAction) => {
       if (a.id === "new") dispatchAppAction({ type: "new-session" })
       else if (a.id === "home") setMainView("home")
+      else if (a.id === "zoo") setMainView("zoo")
       else if (a.id === "usage") setMainView("usage")
       else if (a.id === "scoreboard") void openStats("scoreboard", "all")
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
-      else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open }) }
-      else if (a.id === "factory") { setFilesRepoId(null); setFactoryOpen((open) => { if (!open) setBrowserOpen(false); return !open }) }
+      else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => !open) }
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
       else if (a.id.startsWith("repo:")) dispatchAppAction({ type: "select-repo", repoId: a.id.slice(5) })
@@ -2907,6 +2906,8 @@ export function App() {
           // without a server behind it.
           onOpenHome={live ? () => setMainView("home") : undefined}
           homeActive={mainView === "home"}
+          onOpenZoo={() => setMainView("zoo")}
+          zooActive={mainView === "zoo"}
           onOpenUsage={live ? () => setMainView("usage") : undefined}
           usageActive={mainView === "usage"}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -2965,7 +2966,7 @@ export function App() {
             defaultCloneParent={cloneParentDefault}
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
-            onToggleBrowser={() => { setFilesRepoId(null); setFactoryOpen(false); setBrowserOpen((open) => !open) }}
+            onToggleBrowser={() => { setFilesRepoId(null); setBrowserOpen((open) => !open) }}
             onToggleTerminal={() => setTerminalsOpen((value) => !value)}
             terminalOpen={terminalsOpen}
           />
@@ -3071,6 +3072,21 @@ export function App() {
                 onOpenSession={(id, repoId) => void handleOpenActivitySession(id, repoId)}
               />
             )}
+            {mainView === "zoo" && (
+              <ZooWorkspace
+                baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
+                repoId={activeRepoId}
+                onOpenChat={() => setMainView("chat")}
+                onOpenSession={
+                  live
+                    ? (id) => {
+                        setMainView("chat")
+                        handleSelectThread(id)
+                      }
+                    : undefined
+                }
+              />
+            )}
             {filesRepoId && !repos.some((repo) => repo.id === filesRepoId) ? null : filesRepoId ? (
               <RepoFilesPane
                 repo={repos.find((repo) => repo.id === filesRepoId)!}
@@ -3081,13 +3097,6 @@ export function App() {
               <BrowserPane
                 onClose={() => setBrowserOpen(false)}
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
-              />
-            ) : factoryOpen ? (
-              <FactoryPane
-                onClose={() => setFactoryOpen(false)}
-                baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
-                repoId={activeRepoId}
-                onOpenSession={live ? handleSelectThread : undefined}
               />
             ) : null}
             <ExternalLinkMenu />

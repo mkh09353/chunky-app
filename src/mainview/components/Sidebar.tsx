@@ -9,6 +9,7 @@ import {
   Inbox,
   Mail,
   MailOpen,
+  PawPrint,
   PenSquare,
   Search,
   Settings,
@@ -288,6 +289,8 @@ export function Sidebar({
   onNewThread,
   onOpenHome,
   homeActive = false,
+  onOpenZoo,
+  zooActive = false,
   onOpenUsage,
   usageActive = false,
   onOpenSettings,
@@ -317,6 +320,10 @@ export function Sidebar({
   /** Home currently owns the main panel: the button reads as engaged, and the
    *  thread list below is still this repo's — nothing in it is selected. */
   homeActive?: boolean
+  /** Open the canonical full-page product-factory workspace. */
+  onOpenZoo?: () => void
+  /** The Zoo currently owns the main panel. */
+  zooActive?: boolean
   /** Swap the main panel for the full-page Usage view. Same live-only rule as
    *  Home: without a server there is no spend history to show. */
   onOpenUsage?: () => void
@@ -504,6 +511,30 @@ export function Sidebar({
               <House className="size-4" />
             </TooltipTrigger>
             <TooltipPopup>Home · ⌘0</TooltipPopup>
+          </Tooltip>
+        )}
+        {onOpenZoo && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={onOpenZoo}
+                  aria-pressed={zooActive}
+                  aria-label="The Zoo"
+                  className={cn(
+                    NO_DRAG_REGION,
+                    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                    zooActive
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border bg-background/50 text-muted-foreground hover:border-ring/40 hover:bg-accent hover:text-foreground",
+                  )}
+                />
+              }
+            >
+              <PawPrint className="size-4" />
+            </TooltipTrigger>
+            <TooltipPopup>The Zoo</TooltipPopup>
           </Tooltip>
         )}
         {onOpenUsage && (
