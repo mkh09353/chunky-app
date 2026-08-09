@@ -206,7 +206,11 @@ describe("DetailPane", () => {
   it("becomes a full-width detail surface with an explicit Back label in narrow Zoo containers", () => {
     const entry = entries.find((row) => row.idea?.id === "d-2")!
     const html = renderToStaticMarkup(<TooltipProvider><DetailPane entry={entry} areas={areas} onClose={() => {}} /></TooltipProvider>)
-    expect(html).toContain("@max-[46rem]/zoo-body:w-full")
+    expect(html).toContain("@max-[46rem]/zoo-body:min-w-0")
+    expect(html).toContain("@max-[46rem]/zoo-body:w-auto")
+    expect(html).toContain("@max-[46rem]/zoo-body:flex-1")
+    expect(html).toContain("@max-[46rem]/zoo-body:basis-0")
+    expect(html).toContain("@max-[46rem]/zoo-body:shrink")
     expect(html).toContain("@max-[46rem]/zoo-body:border-l-0")
     expect(html).toContain("Back")
     expect(html).toContain('aria-label="Close detail"')

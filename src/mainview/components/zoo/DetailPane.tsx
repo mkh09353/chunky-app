@@ -85,7 +85,7 @@ export function DetailPane({
   return (
     <aside
       aria-label="Detail"
-      className="flex min-h-0 w-[clamp(16rem,32vw,26rem)] shrink-0 flex-col border-border/70 border-l bg-background/60 @max-[46rem]/zoo-body:w-full @max-[46rem]/zoo-body:border-l-0"
+      className="flex min-h-0 w-[clamp(16rem,32vw,26rem)] shrink-0 flex-col border-border/70 border-l bg-background/60 @max-[46rem]/zoo-body:min-w-0 @max-[46rem]/zoo-body:w-auto @max-[46rem]/zoo-body:flex-1 @max-[46rem]/zoo-body:basis-0 @max-[46rem]/zoo-body:shrink @max-[46rem]/zoo-body:border-l-0"
     >
       <header className="flex min-h-[52px] shrink-0 items-start gap-2 border-border/70 border-b px-4 py-3">
         <div className="min-w-0 flex-1">
