@@ -44,8 +44,9 @@ import { DetailPane } from "./DetailPane"
 import { InboxView } from "./InboxView"
 import { EmptyState, Notice } from "./parts"
 import { IDLE_RUNS, SourcesView, type RunKind, type RunState } from "./SourcesView"
+import { SetupView } from "./SetupView"
 
-type ZooView = "inbox" | "board" | "sources"
+type ZooView = "inbox" | "board" | "sources" | "setup"
 
 const VIEWS: { id: ZooView; label: string; icon: typeof Inbox }[] = [
   { id: "inbox", label: "Inbox", icon: Inbox },
@@ -77,6 +78,8 @@ export function ZooWorkspace({
   const [setAside, setSetAside] = useState<string[]>([])
   const [talking, setTalking] = useState(false)
   const [headerError, setHeaderError] = useState<string | null>(null)
+  const [setupRepoId, setSetupRepoId] = useState<string | null>(null)
+  const [setupRepoError, setSetupRepoError] = useState<string | null>(null)
 
   const [runs, setRuns] = useState<Record<RunKind, RunState>>(IDLE_RUNS)
   const [elapsed, setElapsed] = useState(0)
@@ -244,6 +247,15 @@ export function ZooWorkspace({
     onOpenSession?.(result.sessionId)
   }
 
+  const openSetup = async () => {
+    setSetupRepoError(null)
+    const bound = await resolveRepoForArea(baseUrl, area, repoId)
+    setSetupRepoId(bound)
+    if (!bound) setSetupRepoError("Select a repository or configure this area's repository before starting setup.")
+    setSelectedId(null)
+    setView("setup")
+  }
+
   const openSession = onOpenSession
     ? (sessionId: string) => onOpenSession(sessionId)
     : undefined
@@ -294,7 +306,7 @@ export function ZooWorkspace({
       onSelectIdea={(idea: ZooIdea) => setSelectedId(`idea:${idea.id}`)}
       onSelectItem={(item: ZooItem) => setSelectedId(`item:${item.id}`)}
     />
-  ) : (
+  ) : view === "sources" ? (
     <SourcesView
       status={board.status}
       sources={scoped.sources}
@@ -315,6 +327,15 @@ export function ZooWorkspace({
       xWatchIntervalMinutes={board.xWatchIntervalMinutes}
       xWatchLastSuccessAt={board.xWatchLastSuccessAt}
       onAssignArea={(sourceId, next) => assignArea("source", sourceId, next)}
+      onOpenSetup={() => void openSetup()}
+    />
+  ) : (
+    <SetupView
+      baseUrl={baseUrl}
+      repoId={setupRepoId}
+      repositoryMessage={setupRepoError}
+      onBack={() => setView("sources")}
+      {...(openSession ? { onOpenSession: openSession } : {})}
     />
   )
 

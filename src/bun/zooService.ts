@@ -4,6 +4,14 @@ import type { ZooManager } from "./zoo"
 type ZooService = { target(): Promise<{ port: number; token: string }>; stop(): void }
 type ZooServiceDeps = { manager: ZooManager }
 
+// Renderer-only metadata/secret operations must never be reachable by an
+// agent holding the loopback token. This allowlist is also safer than exposing
+// every future ZooManager method by accident.
+const AGENT_OPERATIONS = new Set([
+  "board", "search", "getIdea", "getItem", "createIdea", "promoteIdea",
+  "dismissIdea", "moveItem", "addNote",
+])
+
 /** Token-guarded local bridge for the server's Zoo tools. */
 export function createZooService({ manager }: ZooServiceDeps): ZooService {
   const token = randomBytes(32).toString("hex")
@@ -20,7 +28,8 @@ export function createZooService({ manager }: ZooServiceDeps): ZooService {
       if (typeof method !== "string" || !params || typeof params !== "object" || Array.isArray(params)) {
         return envelope({ ok: false, error: "Invalid operation" }, 400)
       }
-      const operation = typeof method === "string" ? (manager as Record<string, unknown>)[method] : undefined
+      if (!AGENT_OPERATIONS.has(method)) return envelope({ ok: false, error: "Unknown Zoo operation" })
+      const operation = (manager as Record<string, unknown>)[method]
       if (typeof operation !== "function") return envelope({ ok: false, error: "Unknown Zoo operation" })
       return envelope(await (operation as (params: unknown) => Promise<unknown>).call(manager, params))
     } catch (error) {

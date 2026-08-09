@@ -32,6 +32,20 @@ test("Zoo service requires token auth, routes operations, and rejects malformed 
   expect(await (await op(target, "board", {})).json()).toMatchObject({ ok: true, counts: { artifacts: 0, insights: 0, ideas: 0, items: 0 } })
 })
 
+test("Zoo service excludes renderer setup and credential operations", async () => {
+  const { service, manager } = setup(); const target = await service.target(); const secret = "must-not-cross-agent-service"
+  for (const [method, params] of [
+    ["listSetupSessions", {}], ["recordSetupSession", { sessionId: "s" }],
+    ["listCredentials", {}], ["setCredential", { name: "token", value: secret }],
+    ["deleteCredential", { name: "token" }],
+  ] as const) {
+    const response = await (await op(target, method, params)).json()
+    expect(response).toEqual({ ok: false, error: "Unknown Zoo operation" })
+    expect(JSON.stringify(response)).not.toContain(secret)
+  }
+  expect(await manager.listCredentials({})).toEqual({ ok: true, credentials: [] })
+})
+
 test("Zoo service reads and mutates product-factory ideas and items", async () => {
   const { service } = setup(); const target = await service.target()
   const created = await (await op(target, "createIdea", { type: "build", title: "Better search", rationale: "Customers ask" })).json() as any

@@ -25,6 +25,7 @@ import {
 import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
+import { ensureZooLedgerSkill } from "./zooLedgerSkill"
 import { createWatchScheduler } from "./watchScheduler"
 import { runXWatchSession } from "./xWatch"
 import { createXWatchScheduler } from "./xWatchScheduler"
@@ -535,6 +536,12 @@ rpc = createRPC({
       createDirectory((params ?? {}) as { parentDir?: unknown; name?: unknown }),
 
     zooStatus: async (params: unknown) => zoo.status(params),
+    zooEnsureLedgerSkill: async (_params: unknown) => ensureZooLedgerSkill(),
+    zooListSetupSessions: async (params: unknown) => zoo.listSetupSessions(params),
+    zooRecordSetupSession: async (params: unknown) => zoo.recordSetupSession(params),
+    zooListCredentials: async (params: unknown) => zoo.listCredentials(params),
+    zooSetCredential: async (params: unknown) => zoo.setCredential(params),
+    zooDeleteCredential: async (params: unknown) => zoo.deleteCredential(params),
     zooListAreas: async (params: unknown) => zoo.listAreas(params),
     zooCreateArea: async (params: unknown) => zoo.createArea(params),
     zooUpdateArea: async (params: unknown) => zoo.updateArea(params),

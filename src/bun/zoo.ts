@@ -15,7 +15,7 @@ import {
 import { DEFAULT_WATCH_HOUR } from "./watchScheduler"
 import { DEFAULT_X_WATCH_INTERVAL_MINUTES, MAX_X_WATCH_INTERVAL_MINUTES, MIN_X_WATCH_INTERVAL_MINUTES } from "./xWatchScheduler"
 import { formatXArtifact, normalizeXHandle, type XWatchRun } from "./xWatch"
-import type { ZooArea, ZooAreaKind, ZooArtifactMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooXWatch, ZooXWatchResult, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
+import type { SetupSessionMeta, ZooArea, ZooAreaKind, ZooArtifactMeta, ZooCredentialMeta, ZooRepoWatch, ZooWatchResult, ZooWatchStatus, ZooXWatch, ZooXWatchResult, ZooDecision, ZooEvidence, ZooIdea, ZooIdeaStatus, ZooIdeaType, ZooInsight, ZooItem, ZooItemStage, ZooPass, ZooSource } from "../shared/zooTypes"
 
 const LINEAR_URL = "https://api.linear.app/graphql"
 const DEFAULT_EXPORT_CHARS = 150_000
@@ -135,6 +135,12 @@ export function createZooManager(deps: ZooDependencies = {}) {
     db.run("DELETE FROM x_watches WHERE EXISTS (SELECT 1 FROM x_watches older WHERE older.handle = x_watches.handle COLLATE NOCASE AND older.rowid < x_watches.rowid)")
     db.run("CREATE UNIQUE INDEX IF NOT EXISTS x_watches_handle ON x_watches(handle COLLATE NOCASE)")
     db.run("CREATE TABLE IF NOT EXISTS zoo_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    db.run("CREATE TABLE IF NOT EXISTS setup_sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at INTEGER NOT NULL, last_activity_at INTEGER NOT NULL)")
+    // Secret values stay in Bun's local database. Every public method below
+    // explicitly selects/returns metadata and never serializes `value`.
+    db.run("CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, value TEXT NOT NULL, created_at INTEGER NOT NULL)")
+    db.run("CREATE INDEX IF NOT EXISTS setup_sessions_activity ON setup_sessions(last_activity_at DESC)")
+    db.run("CREATE INDEX IF NOT EXISTS credentials_created ON credentials(created_at DESC)")
     if (isNewStore && deps.seedDefaults !== false) {
       const now = clock()
       db.transaction(() => {
@@ -266,6 +272,34 @@ export function createZooManager(deps: ZooDependencies = {}) {
     /** Is there a board on disk at all? Lets a caller (the watch scheduler at
      *  launch) skip work WITHOUT creating zoo.db as a side effect. */
     hasStore: () => existsSync(dbPath),
+    async listSetupSessions(params: unknown): Promise<Result<{ sessions: SetupSessionMeta[] }>> { try {
+      if (!emptyObject(params)) return { ok: false, error: "Invalid setup sessions request" }
+      const sessions = rows("SELECT session_id, title, created_at, last_activity_at FROM setup_sessions ORDER BY last_activity_at DESC, rowid DESC").map((row) => ({ sessionId: String(row.session_id), title: String(row.title), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at) }))
+      return { ok: true, sessions }
+    } catch { return { ok: false, error: "Unable to list setup sessions" } } },
+    async recordSetupSession(params: unknown): Promise<Result<{ session: SetupSessionMeta }>> { try {
+      const body = object(params); const sessionId = text(body?.sessionId, 500); const title = body?.title === undefined ? undefined : text(body.title, 2_000)
+      if (!sessionId || (body?.title !== undefined && !title)) return { ok: false, error: "Invalid setup session" }
+      const now = clock(); const existing = one("SELECT title, created_at FROM setup_sessions WHERE session_id = ?", sessionId)
+      if (existing) run("UPDATE setup_sessions SET title = ?, last_activity_at = ? WHERE session_id = ?", title || String(existing.title), now, sessionId)
+      else run("INSERT INTO setup_sessions (session_id, title, created_at, last_activity_at) VALUES (?, ?, ?, ?)", sessionId, title || sessionId, now, now)
+      const row = one("SELECT session_id, title, created_at, last_activity_at FROM setup_sessions WHERE session_id = ?", sessionId)!
+      return { ok: true, session: { sessionId: String(row.session_id), title: String(row.title), createdAt: Number(row.created_at), lastActivityAt: Number(row.last_activity_at) } }
+    } catch { return { ok: false, error: "Unable to record setup session" } } },
+    async listCredentials(params: unknown): Promise<Result<{ credentials: ZooCredentialMeta[] }>> { try {
+      if (!emptyObject(params)) return { ok: false, error: "Invalid credentials request" }
+      return { ok: true, credentials: rows("SELECT name, created_at FROM credentials ORDER BY created_at DESC, rowid DESC").map((row) => ({ name: String(row.name), createdAt: Number(row.created_at) })) }
+    } catch { return { ok: false, error: "Unable to list credentials" } } },
+    async setCredential(params: unknown): Promise<Result<{ credential: ZooCredentialMeta }>> { try {
+      const body = object(params); const name = text(body?.name, 500); const validValue = typeof body?.value === "string" && !!body.value.trim() && body.value.length <= 20_000 && !body.value.includes("\0")
+      if (!name || !validValue) return { ok: false, error: "Invalid credential" }
+      const now = clock(); run("INSERT INTO credentials (name, value, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value, created_at = excluded.created_at", name, body.value, now)
+      return { ok: true, credential: { name, createdAt: now } }
+    } catch { return { ok: false, error: "Unable to store credential" } } },
+    async deleteCredential(params: unknown): Promise<Result<{}>> { try {
+      const name = text(object(params)?.name, 500); if (!name) return { ok: false, error: "Invalid credential name" }
+      run("DELETE FROM credentials WHERE name = ?", name); return { ok: true }
+    } catch { return { ok: false, error: "Unable to delete credential" } } },
     async listAreas(params: unknown): Promise<Result<{ areas: ZooArea[] }>> { try { if (!emptyObject(params)) return { ok: false, error: "Invalid areas request" }; return { ok: true, areas: rows("SELECT * FROM areas ORDER BY created_at, rowid").map(areaFrom) } } catch (e) { return { ok: false, error: errorMessage(e) } } },
     async createArea(params: unknown): Promise<Result<{ area: ZooArea }>> { try {
       const body = object(params); const name = text(body?.name, 200); if (!name) return { ok: false, error: "Invalid area name" }

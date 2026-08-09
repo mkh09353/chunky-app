@@ -278,10 +278,13 @@ describe("area repository binding", () => {
           xWatchLastSuccessAt={null}
           watchLastRunAt={null}
           onAssignArea={() => {}}
+          onOpenSetup={() => {}}
         />
       </TooltipProvider>,
     )
     expect(html).toContain("Triage backlog")
+    expect(html).toContain("Add a source with Chunky")
+    expect(html).toContain("Add source")
     expect(html).not.toContain("Select a repository or configure this area&#x27;s repo path")
   })
 })
@@ -311,6 +314,7 @@ describe("competitor watch section", () => {
           xWatchLastSuccessAt={null}
           watchLastRunAt={now - 1000}
           onAssignArea={() => {}}
+          onOpenSetup={() => {}}
         />
       </TooltipProvider>,
     )
@@ -325,7 +329,7 @@ describe("competitor watch section", () => {
 describe("X Watch section", () => {
   it("renders handles, interval, last status, area, and pending extraction", () => {
     const now = Date.now()
-    const html = renderToStaticMarkup(<TooltipProvider><SourcesView status={{ sources: [], artifactCount: 1, insightCount: 0, ideaCount: 0, itemCount: 0, passes: [] }} sources={[]} areaId={null} areaName={null} runs={IDLE_RUNS} elapsed={0} onRun={() => {}} onRefresh={async () => {}} baseUrl="http://localhost:4620" canTriage insightCount={0} watches={[]} areas={areas} watchHour={8} watchLastRunAt={null} xWatches={[{ id: "x-1", sourceId: "sx-1", handle: "theo", label: "@theo", areaId: "a-pay", lastAttemptAt: now - 1000, lastSuccessAt: now - 2000, lastStatus: "ok", lastNote: "Recorded 1 new post", lastArtifactAt: now - 1000, createdAt: now - 3000 }]} xWatchIntervalMinutes={60} xWatchLastSuccessAt={now - 2000} onAssignArea={() => {}} /></TooltipProvider>)
+    const html = renderToStaticMarkup(<TooltipProvider><SourcesView status={{ sources: [], artifactCount: 1, insightCount: 0, ideaCount: 0, itemCount: 0, passes: [] }} sources={[]} areaId={null} areaName={null} runs={IDLE_RUNS} elapsed={0} onRun={() => {}} onRefresh={async () => {}} baseUrl="http://localhost:4620" canTriage insightCount={0} watches={[]} areas={areas} watchHour={8} watchLastRunAt={null} xWatches={[{ id: "x-1", sourceId: "sx-1", handle: "theo", label: "@theo", areaId: "a-pay", lastAttemptAt: now - 1000, lastSuccessAt: now - 2000, lastStatus: "ok", lastNote: "Recorded 1 new post", lastArtifactAt: now - 1000, createdAt: now - 3000 }]} xWatchIntervalMinutes={60} xWatchLastSuccessAt={now - 2000} onAssignArea={() => {}} onOpenSetup={() => {}} /></TooltipProvider>)
     expect(html).toContain("X Watch")
     expect(html).toContain("@theo")
     expect(html).toContain("Recorded 1 new post")

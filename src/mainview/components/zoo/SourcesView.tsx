@@ -3,9 +3,10 @@
 // FactoryPane — it all lives in lib/zoo.ts, lib/zooExtraction.ts and
 // lib/zooSynthesis.ts; this view only lays it out with room to breathe.
 
-import { FolderOpen, LoaderCircle, Plug, RefreshCw, Sparkles } from "lucide-react"
+import { FolderOpen, LoaderCircle, MessageSquarePlus, Plug, RefreshCw, Sparkles } from "lucide-react"
 import { useState, type FormEvent } from "react"
 import { relativeTime } from "~/lib/format"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
 import { zooConnectLinear, zooConnectTranscripts, zooStartBackfill, type ZooArea, type ZooRepoWatch, type ZooXWatch, type ZooSource, type ZooStatus } from "~/lib/zoo"
 import type { AreaSelection } from "~/lib/zooAreas"
@@ -79,6 +80,7 @@ export function SourcesView({
   xWatchIntervalMinutes,
   xWatchLastSuccessAt,
   onAssignArea,
+  onOpenSetup,
 }: {
   status: ZooStatus | null
   /** Sources narrowed to the selected area (unassigned ones stay visible). */
@@ -102,6 +104,7 @@ export function SourcesView({
   xWatchIntervalMinutes: number
   xWatchLastSuccessAt: number | null
   onAssignArea: (sourceId: string, areaId: string | null) => void
+  onOpenSetup: () => void
 }) {
   const [apiKey, setApiKey] = useState("")
   const [folder, setFolder] = useState("")
@@ -163,6 +166,13 @@ export function SourcesView({
       />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-y-auto px-6 pb-8">
         {error && <Notice text={error} />}
+        <section className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-primary/25 bg-primary/5 p-4">
+          <div className="min-w-48 flex-1">
+            <p className="font-medium text-[13px] text-foreground">Add a source with Chunky</p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-[12px] text-muted-foreground">Describe an evidence source or workflow and continue in a repository-bound setup conversation.</p>
+          </div>
+          <Button className={NO_DRAG_REGION} onClick={onOpenSetup}><MessageSquarePlus /> Add source</Button>
+        </section>
         {areaName && (
           <Notice
             text={`Sources you connect here join the “${areaName}” area. Sources with no area stay visible in every one.`}

@@ -27,3 +27,8 @@ export type ZooWatchResult = { watchId: string; label: string; status: ZooWatchS
 /** An X account collected through a repository-less, session-pinned Grok run. */
 export type ZooXWatch = { id: string; sourceId: string; handle: string; label: string; areaId?: string; lastSuccessAt?: number; lastAttemptAt?: number; lastStatus?: ZooWatchStatus; lastNote?: string; lastArtifactAt?: number; lastExtractAt?: number; createdAt: number }
 export type ZooXWatchResult = { watchId: string; label: string; status: "ok" | "error"; added: number; note?: string }
+
+/** Local index of ordinary Chunky sessions started from Add source. */
+export type SetupSessionMeta = { sessionId: string; title: string; createdAt: number; lastActivityAt: number }
+/** Renderer-visible credential shape. Values deliberately have no public type. */
+export type ZooCredentialMeta = { name: string; createdAt: number }

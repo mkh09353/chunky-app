@@ -57,6 +57,22 @@ test("initializes schema lazily and connects Linear without exposing its key", a
   expect(JSON.stringify(connected)).not.toContain("good")
 })
 
+test("persists setup metadata and credential names without exposing values", async () => {
+  const zoo = setup(); const secret = "never-return-this-value"
+  expect(await zoo.listSetupSessions({})).toEqual({ ok: true, sessions: [] })
+  expect(await zoo.recordSetupSession({ sessionId: " setup-1 ", title: " First " })).toMatchObject({ ok: true, session: { sessionId: "setup-1", title: "First" } })
+  expect(await zoo.recordSetupSession({ sessionId: "setup-1", title: " Second " })).toMatchObject({ ok: true, session: { title: "Second" } })
+  expect(await zoo.recordSetupSession({ sessionId: "bad\0id" })).toMatchObject({ ok: false })
+  expect(await zoo.setCredential({ name: " token ", value: secret })).toMatchObject({ ok: true, credential: { name: "token" } })
+  const listed = await zoo.listCredentials({})
+  expect(listed).toMatchObject({ ok: true, credentials: [{ name: "token" }] })
+  expect(JSON.stringify(listed)).not.toContain(secret)
+  expect(JSON.stringify(await zoo.setCredential({ name: "token", value: secret }))).not.toContain(secret)
+  expect(JSON.stringify(await zoo.deleteCredential({ name: `bad\0${secret}` }))).not.toContain(secret)
+  expect(await zoo.setCredential({ name: "bad", value: `bad\0${secret}` })).toEqual({ ok: false, error: "Invalid credential" })
+  expect(await zoo.deleteCredential({ name: "token" })).toEqual({ ok: true })
+})
+
 test("backfills paginated issues, dedupes unchanged content, and versions changes", async () => {
   const zoo = setup([[issue("ZOO-1", "First")], [issue("ZOO-2", "Second")]])
   const connected = await zoo.connectLinear({ apiKey: "good" }); if (!connected.ok) throw new Error(connected.error)
