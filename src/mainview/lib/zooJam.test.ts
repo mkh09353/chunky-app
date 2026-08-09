@@ -12,10 +12,21 @@ test("idea jam brief includes full bounded untrusted context and fixed-tool outc
 })
 
 test("item jam uses ordinary item add-note semantics and preserves research identity", () => {
-  const brief = buildJamBrief({ kind: "item", item, idea }, insights, null, "session-2")
+  const brief = buildJamBrief({ kind: "item", item: { ...item, title: "Item-specific title" }, idea }, insights, null, "session-2")
   expect(brief).toContain("itemId item-1")
   expect(brief).not.toContain("itemId jam:session-2")
+  expect(brief).toContain("Item title: Item-specific title")
   expect(brief).toContain("Existing research sessions: 0")
+})
+
+test("bounded briefs retain reconciliation and required writeback after oversized context", () => {
+  const huge = Array.from({ length: 24 }, (_, index): ZooInsight => ({ id: `i-${index}`, passId: "p", title: `Signal ${index}`, summary: "s".repeat(2_000), evidence: [{ artifactId: `a-${index}`, quote: "q".repeat(2_000) }], createdAt: 1 }))
+  const brief = buildJamBrief({ kind: "idea", idea: { ...idea, insightIds: huge.map((entry) => entry.id) } }, huge, null, "required-session")
+  expect(brief.length).toBeLessThanOrEqual(24_000)
+  expect(brief).toContain("Evidence truncated for prompt safety")
+  expect(brief).toContain("Call zoo_get_idea")
+  expect(brief).toContain("itemId jam:required-session")
+  expect(brief).toContain("If writeback fails")
 })
 
 const deps = (changes: Partial<JamDeps> = {}): JamDeps => ({ resolve: async () => "repo-1", create: async () => ({ sessionId: "session-1", incognito: false }), send: async () => null, record: async () => ({ ok: true, target: "idea", idea }), ...changes })
@@ -29,4 +40,11 @@ test("jam blocks non-proposed ideas and reports partial linkage honestly", async
   expect(await startJamWithDeps("http://chunky", "repo", null, { kind: "idea", idea: { ...idea, status: "dismissed" } }, insights, deps())).toMatchObject({ ok: false })
   expect(await startJamWithDeps("http://chunky", null, null, { kind: "idea", idea }, insights, deps({ resolve: async () => null }))).toMatchObject({ ok: false, error: expect.stringContaining("repository") })
   expect(await startJamWithDeps("http://chunky", "repo", null, { kind: "idea", idea }, insights, deps({ record: async () => ({ ok: false, error: "disk full" }) }))).toMatchObject({ ok: true, linked: false, warning: expect.stringContaining("disk full") })
+})
+
+test("item jam prevents ambiguous outcome attribution while one jam is pending", async () => {
+  let created = false
+  const result = await startJamWithDeps("http://chunky", "repo", null, { kind: "item", idea, item: { ...item, jamSessions: [{ sessionId: "pending", createdAt: 1 }] } }, insights, deps({ create: async () => { created = true; return { sessionId: "new", incognito: false } } }))
+  expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Reopen") })
+  expect(created).toBe(false)
 })

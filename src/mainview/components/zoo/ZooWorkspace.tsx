@@ -281,7 +281,7 @@ export function ZooWorkspace({
     if (!bound) { setCardActionBusy(null); setHeaderError("Select a repository or configure this card's area repository before starting research."); return }
     const result = await startResearchSession(entry.item, idea, bound, { baseUrl })
     setCardActionBusy(null)
-    if (!result.ok) { setHeaderError(result.error); return }
+    if (!result.ok) { setHeaderError(result.error); if (result.sessionId) onOpenSession?.(result.sessionId); return }
     await refresh(); if (result.sessionId) onOpenSession?.(result.sessionId)
   }
 

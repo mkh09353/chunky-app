@@ -260,4 +260,16 @@ describe("startResearchSession", () => {
     expect(await startResearchSessionWithDeps({ ...typedItem, stage: "decision" }, idea, "repo", {}, unused)).toMatchObject({ ok: false, error: expect.stringContaining("research-stage") })
     expect(await startResearchSessionWithDeps(typedItem, idea, "repo", {}, unused)).toMatchObject({ ok: false, error: expect.stringContaining("already") })
   })
+
+  it("returns the created session when local research linkage fails", async () => {
+    const researchItem = { ...item, stage: "research" as const, sessionIds: [], decisions: [] }
+    const result = await startResearchSessionWithDeps(researchItem, idea, "repo", { baseUrl: "http://chunky" }, {
+      resolveBaseUrl: async (url) => url ?? null,
+      listInsights: async () => ({ ok: true, insights: [] }),
+      create: async () => ({ sessionId: "unlinked-session", incognito: false }),
+      goal: async () => null,
+      update: async () => ({ ok: false, error: "disk unavailable" }),
+    })
+    expect(result).toMatchObject({ ok: false, sessionId: "unlinked-session", error: expect.stringContaining("Research started") })
+  })
 })

@@ -16,7 +16,7 @@ import { errorMessage } from "./zooExtraction"
 
 export type ItemFlowResult =
   | { ok: true; item: ZooItem; sessionId?: string }
-  | { ok: false; error: string; item?: ZooItem }
+  | { ok: false; error: string; item?: ZooItem; sessionId?: string }
 
 export type ResearchSessionDeps = {
   resolveBaseUrl: (baseUrl?: string | null) => Promise<string | null>
@@ -105,7 +105,8 @@ export async function promoteIdea(
   }
 
   const started = await startResearchSession(item, idea, repoId, { ...opts, decisionNote: "Promoted for research" })
-  return started.ok ? started : noteFailure(started.error)
+  if (started.ok || started.sessionId) return started
+  return noteFailure(started.error)
 }
 
 /** Start the canonical goal session for an existing research item. This is also
@@ -122,7 +123,7 @@ export async function startResearchSessionWithDeps(item: ZooItem, idea: ZooIdea,
   try { sessionId = (await deps.create(baseUrl, repoId)).sessionId } catch (err) { return { ok: false, error: errorMessage(err, "Could not create a research session."), item } }
   try { await deps.goal(baseUrl, sessionId, { objective: brief, mode: "direct" }) } catch (err) { return { ok: false, error: errorMessage(err, "Could not set the research goal."), item } }
   const updated = await deps.update(item.id, { addSessionId: sessionId, addDecision: { actor: "user", note: opts.decisionNote ?? "Research session started" } })
-  return updated.ok ? { ok: true, item: updated.item, sessionId } : { ok: false, error: `Research started, but the Zoo could not link the session: ${updated.error}`, item }
+  return updated.ok ? { ok: true, item: updated.item, sessionId } : { ok: false, error: `Research started, but the Zoo could not link the session: ${updated.error}`, item, sessionId }
 }
 
 export const startResearchSession = (item: ZooItem, idea: ZooIdea, repoId: string | null | undefined, opts: { baseUrl?: string | null; decisionNote?: string } = {}) => startResearchSessionWithDeps(item, idea, repoId, opts, { resolveBaseUrl, listInsights: zooListInsights, create: createSession, goal: setGoal, update: zooUpdateItem })
