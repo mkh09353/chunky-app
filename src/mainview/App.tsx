@@ -192,6 +192,7 @@ import {
   type FeedRepo,
 } from "./lib/homeFeed"
 import { HomeView } from "./components/HomeView"
+import { UsageView } from "./components/UsageView"
 import { useAttachedSession, type AppMode, type ConnectionState } from "./hooks/useAttachedSession"
 import hornUrl from "./assets/horn.wav"
 
@@ -334,7 +335,7 @@ export function App() {
   // a thing you open, not a mode the app remembers for you. The chat column
   // stays MOUNTED behind it so a round-trip cannot cost the reader their scroll
   // position (or a re-attach).
-  const [mainView, setMainView] = useState<"chat" | "home">("chat")
+  const [mainView, setMainView] = useState<"chat" | "home" | "usage">("chat")
   // sessionId -> when THIS client first saw the session busy, for Home's
   // elapsed times. Absent = we started watching mid-run and cannot say.
   const [busySince, setBusySince] = useState<ReadonlyMap<string, number>>(new Map())
@@ -2060,6 +2061,9 @@ export function App() {
       text: string,
       opts?: { delivery?: MessageDelivery; images?: { base64: string; mediaType: string }[] },
     ) => {
+      // Sending is a request to watch the answer arrive: any full-page view
+      // (Home, Usage) steps aside, same as picking a thread does.
+      setMainView("chat")
       void handleSend(text, {
         ...opts,
         delivery: opts?.delivery ?? (streaming ? "queue" : "auto"),
@@ -2122,11 +2126,14 @@ export function App() {
   )
 
   const openDialog = useCallback(async (kind: NonNullable<typeof dialog>) => {
-    if (!live || !config || !sessionId) return
+    // Usage graduated to a full page, so the old "stats" entry point lands
+    // there instead of the modal — and, unlike the modal, it needs no session.
+    // The scoreboard tab is still reached through /scoreboard and the palette.
     if (kind === "stats") {
-      await openStats("usage", "all")
+      setMainView("usage")
       return
     }
+    if (!live || !config || !sessionId) return
     setDialogText(kind === "rename" ? (sessions.find((s) => s.sessionId === sessionId)?.title ?? "") : "")
     setSelectedRewind(null)
     if (kind === "rewind") setRewindPoints(await getRewindPoints(config.baseUrl, sessionId).catch(() => []))
@@ -2375,14 +2382,18 @@ export function App() {
           await openDialog("rewind")
           return true
         case "/usage":
+          // The full page, not the dialog: it spans days and sessions, so it
+          // works before this thread has sent anything.
+          setMainView("usage")
+          return true
         case "/scoreboard": {
           if (!sessionId) {
             setNotice(`No session yet — send a message first, then ${head}.`)
             return true
           }
           // `/scoreboard session` scopes to this thread (TUI parity).
-          const scope = head === "/scoreboard" && !/^session\b/i.test(rest) ? "all" : "session"
-          await openStats(head === "/usage" ? "usage" : "scoreboard", scope)
+          const scope = /^session\b/i.test(rest) ? "session" : "all"
+          await openStats("scoreboard", scope)
           return true
         }
         case "/cacheguard":
@@ -2558,10 +2569,12 @@ export function App() {
   const paletteActions = useMemo<PaletteAction[]>(() => [
     { id: "new", label: "New session", hint: "⌘N", group: "Session" },
     { id: "home", label: "Go Home", hint: "⌘0", group: "Session" },
+    { id: "usage", label: "Usage", group: "Session" },
+    { id: "scoreboard", label: "Scoreboard", group: "Session" },
     ...repos.map((repo) => ({ id: `repo:${repo.id}`, label: `Switch repo: ${repo.name}`, group: "Repositories" })),
     ...sessions.map((session) => ({ id: `session:${session.sessionId}`, label: `Switch session: ${session.title || session.sessionId.slice(0, 8)}`, group: "Sessions" })),
     ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
-    ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it", "Usage & scoreboard"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
+    ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
     { id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" },
     { id: "theme", label: "Toggle theme", group: "Appearance" },
     { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
@@ -2605,6 +2618,8 @@ export function App() {
     (a: PaletteAction) => {
       if (a.id === "new") dispatchAppAction({ type: "new-session" })
       else if (a.id === "home") setMainView("home")
+      else if (a.id === "usage") setMainView("usage")
+      else if (a.id === "scoreboard") void openStats("scoreboard", "all")
       else if (a.id === "terminal") setTerminalsOpen((value) => !value)
       else if (a.id === "theme") toggle()
       else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => { if (!open) setFactoryOpen(false); return !open }) }
@@ -2614,9 +2629,9 @@ export function App() {
       else if (a.id.startsWith("repo:")) dispatchAppAction({ type: "select-repo", repoId: a.id.slice(5) })
       else if (a.id.startsWith("session:")) dispatchAppAction({ type: "select-session", sessionId: a.id.slice(8) })
       else if (a.id.startsWith("model:")) { const model = uiModels.find((item) => item.id === a.id.slice(6)); if (model) void handleModelChange(model) }
-      else if (a.id.startsWith("action:")) { const kind = a.id.slice(7); const map: Record<string, NonNullable<typeof dialog>> = { "Rename session": "rename", "Fork session": "fork", "Rewind to turn": "rewind", "Goal mode": "goal", "Ship it": "ship", "Usage & scoreboard": "stats" }; void openDialog(map[kind]!) }
+      else if (a.id.startsWith("action:")) { const kind = a.id.slice(7); const map: Record<string, NonNullable<typeof dialog>> = { "Rename session": "rename", "Fork session": "fork", "Rewind to turn": "rewind", "Goal mode": "goal", "Ship it": "ship" }; void openDialog(map[kind]!) }
     },
-    [dispatchAppAction, toggle, uiModels, handleModelChange, openDialog, live],
+    [dispatchAppAction, toggle, uiModels, handleModelChange, openDialog, openStats, live],
   )
 
   // Chips and their hotkeys mirror the composer: no sending while a run streams,
@@ -2800,6 +2815,8 @@ export function App() {
           // without a server behind it.
           onOpenHome={live ? () => setMainView("home") : undefined}
           homeActive={mainView === "home"}
+          onOpenUsage={live ? () => setMainView("usage") : undefined}
+          usageActive={mainView === "usage"}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
@@ -2867,9 +2884,9 @@ export function App() {
             <div
               className={cn(
                 "min-h-0 min-w-0 flex-1 flex-col",
-                mainView === "home" ? "hidden" : "flex",
+                mainView === "chat" ? "flex" : "hidden",
               )}
-              aria-hidden={mainView === "home"}
+              aria-hidden={mainView !== "chat"}
             >
               {statusBanner}
               <ChatView
@@ -2940,6 +2957,12 @@ export function App() {
                 />
               </div>
             </div>
+            {mainView === "usage" && (
+              <UsageView
+                baseUrl={live && config ? config.baseUrl : null}
+                sessionId={live ? sessionId : null}
+              />
+            )}
             {mainView === "home" && (
               <HomeView
                 feed={homeFeed}

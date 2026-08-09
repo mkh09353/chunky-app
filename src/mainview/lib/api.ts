@@ -513,6 +513,63 @@ export const getUsage = (baseUrl: string, id: string) => jsonRequest<unknown>(`$
 export const getScoreboard = (baseUrl: string, id?: string) => jsonRequest<unknown>(`${baseUrl}/api/scoreboard${id ? `?session=${encodeURIComponent(id)}` : ""}`)
 
 /**
+ * Usage history (/api/usage/series, /api/usage/breakdown).
+ *
+ * These routes are newer than some servers this app talks to, so "the server
+ * doesn't have them" is a first-class outcome rather than an error: a 404/501
+ * resolves to `unsupported` and the Usage page renders its explanatory state.
+ * Bodies come back as `unknown` on purpose — lib/stats.ts owns the coercion.
+ *
+ * The paths are literals rather than ROUTES entries on purpose: the protocol
+ * package only grew ROUTES.usageSeries/usageBreakdown in unlanded sibling work,
+ * and a missing route should degrade to the unsupported state at runtime rather
+ * than fail this build. Swap to ROUTES once that change ships (see lib/stats.ts).
+ */
+export type UsageQuery = {
+  scope: "all" | "session"
+  session?: string | null
+  from: string
+  to: string
+}
+
+export type UsageFetch =
+  | { status: "ok"; body: unknown }
+  | { status: "unsupported" }
+  | { status: "error"; message: string }
+
+function usageQueryString(query: UsageQuery): string {
+  const params = new URLSearchParams({ scope: query.scope, from: query.from, to: query.to })
+  // scope=session without a session id would ask the server for "this session"
+  // with no referent; the caller is expected to pass one, but never send a
+  // half-formed query if it didn't.
+  if (query.scope === "session" && query.session) params.set("session", query.session)
+  return params.toString()
+}
+
+async function usageRequest(baseUrl: string, path: string, query: UsageQuery): Promise<UsageFetch> {
+  if (!baseUrl) return { status: "error", message: "Chunky server is unavailable" }
+  try {
+    const res = await fetch(`${baseUrl}${path}?${usageQueryString(query)}`)
+    // 404 = route absent (old server); 501 = present but not implemented.
+    if (res.status === 404 || res.status === 501) return { status: "unsupported" }
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    if (!res.ok) {
+      return { status: "error", message: body?.error || `request failed (${res.status})` }
+    }
+    // A 200 with an unparseable body is still "nothing to show", not a crash:
+    // the stats parsers turn null into an empty payload.
+    return { status: "ok", body }
+  } catch (err) {
+    return { status: "error", message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+export const getUsageSeries = (baseUrl: string, query: UsageQuery) =>
+  usageRequest(baseUrl, "/api/usage/series", query)
+export const getUsageBreakdown = (baseUrl: string, query: UsageQuery) =>
+  usageRequest(baseUrl, "/api/usage/breakdown", query)
+
+/**
  * Open a session's SSE stream. Resolves when the server closes it.
  * `onOpen` fires once the response is accepted (the only "connected" signal —
  * empty sessions send no events until the first turn).

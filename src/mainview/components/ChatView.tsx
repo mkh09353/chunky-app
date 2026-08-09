@@ -182,7 +182,7 @@ export function ChatTopBar({
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onStats}>
               <BarChart3 />
-              Usage & scoreboard
+              Usage
             </DropdownMenuItem>
             {(onToggleTerminal || onToggleTheme) && <DropdownMenuSeparator />}
             {onToggleTerminal && (

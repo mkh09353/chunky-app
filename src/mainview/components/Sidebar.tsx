@@ -1,6 +1,7 @@
 import {
   Archive,
   ArchiveRestore,
+  BarChart3,
   ChevronDown,
   GitBranch,
   History,
@@ -25,7 +26,7 @@ import { avatarInitial, resolveDisplayName } from "~/lib/identity"
 import { collapseList } from "~/lib/sessionList"
 import { groupByWorktree } from "~/lib/sessionGroups"
 import { cn } from "~/lib/cn"
-import { DRAG_REGION } from "~/lib/dragRegion"
+import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
@@ -288,6 +289,8 @@ export function Sidebar({
   onNewThread,
   onOpenHome,
   homeActive = false,
+  onOpenUsage,
+  usageActive = false,
   onOpenSettings,
   onOpenPalette,
   connectionLabel,
@@ -315,6 +318,11 @@ export function Sidebar({
   /** Home currently owns the main panel: the button reads as engaged, and the
    *  thread list below is still this repo's — nothing in it is selected. */
   homeActive?: boolean
+  /** Swap the main panel for the full-page Usage view. Same live-only rule as
+   *  Home: without a server there is no spend history to show. */
+  onOpenUsage?: () => void
+  /** Usage currently owns the main panel (mirrors `homeActive`). */
+  usageActive?: boolean
   onOpenSettings: () => void
   onOpenPalette: () => void
   /** Optional live/demo connection badge in the footer. */
@@ -485,6 +493,7 @@ export function Sidebar({
                   aria-pressed={homeActive}
                   aria-label="Home"
                   className={cn(
+                    NO_DRAG_REGION,
                     "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                     homeActive
                       ? "border-primary/40 bg-primary/10 text-primary"
@@ -496,6 +505,30 @@ export function Sidebar({
               <House className="size-4" />
             </TooltipTrigger>
             <TooltipPopup>Home · ⌘0</TooltipPopup>
+          </Tooltip>
+        )}
+        {onOpenUsage && (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  onClick={onOpenUsage}
+                  aria-pressed={usageActive}
+                  aria-label="Usage"
+                  className={cn(
+                    NO_DRAG_REGION,
+                    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                    usageActive
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border bg-background/50 text-muted-foreground hover:border-ring/40 hover:bg-accent hover:text-foreground",
+                  )}
+                />
+              }
+            >
+              <BarChart3 className="size-4" />
+            </TooltipTrigger>
+            <TooltipPopup>Usage</TooltipPopup>
           </Tooltip>
         )}
         <Tooltip>
