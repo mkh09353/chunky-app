@@ -2,7 +2,7 @@
 //   bun test src/mainview/lib/modes.test.ts
 import { describe, expect, it } from "bun:test"
 import type { ModeInfo, ModeSpec } from "@chunky/protocol"
-import { activeModeName, DEFAULT_MODE_EMOJI, modeEmoji } from "./modes"
+import { activeModeName, DEFAULT_MODE_EMOJI, modeEmoji, sessionModeName } from "./modes"
 
 const fire: ModeInfo = {
   name: "fire",
@@ -55,6 +55,29 @@ describe("activeModeName", () => {
     const noAdvisor: ModeInfo = { ...fire, name: "solo", advisor: null }
     expect(activeModeName([noAdvisor], current)).toBeNull()
     expect(activeModeName([noAdvisor], { ...current, advisor: null })).toBe("solo")
+  })
+
+  it("does not call a mode active when a declared agent effort or seat differs", () => {
+    expect(
+      activeModeName([{ ...fire, advisor: { ...fire.advisor!, effort: "high" } }], current),
+    ).toBeNull()
+    expect(
+      activeModeName(
+        [{ ...fire, sidekickSeats: { frontend: { provider: "zen", model: "opus", effort: "high" } } }],
+        { ...current, sidekickSeats: { frontend: { provider: "zen", model: "opus", effort: "low" } } },
+      ),
+    ).toBeNull()
+  })
+})
+
+describe("sessionModeName", () => {
+  it("uses the derived global mode for an inheriting new session", () => {
+    expect(sessionModeName("global", null, "fire")).toBe("fire")
+  })
+
+  it("keeps session-pinned identity authoritative", () => {
+    expect(sessionModeName("session-mode", "ice", "fire")).toBe("ice")
+    expect(sessionModeName("session-selection", null, "fire")).toBeNull()
   })
 })
 

@@ -18,7 +18,11 @@ const norm = (value: string | null | undefined): string =>
 /** Two paired-model slots (advisor / sidekick / reviewer). Absent === off. */
 function samePairing(a: ModeAdvisor | null, b: ModeAdvisor | null | undefined): boolean {
   if (!a || !b) return !a && !b
-  return norm(a.provider) === norm(b.provider) && norm(a.model) === norm(b.model)
+  return (
+    norm(a.provider) === norm(b.provider) &&
+    norm(a.model) === norm(b.model) &&
+    (!a.effort || norm(a.effort) === norm(b.effort))
+  )
 }
 
 /**
@@ -27,8 +31,8 @@ function samePairing(a: ModeAdvisor | null, b: ModeAdvisor | null | undefined): 
  * don't constrain it (per ModeSpec: absent = "leave this alone"), so they
  * neither match nor disqualify.
  *
- * `sidekickSeats` is deliberately not compared: named seats can be overridden
- * per session, so folding them in would produce false negatives.
+ * Named seats follow the same partial-mode rule: when a mode declares them,
+ * each declared seat must match; undeclared seats don't constrain the match.
  */
 function matchScore(mode: ModeSpec, current: ModeSpec): number | null {
   if (norm(mode.provider) !== norm(current.provider)) return null
@@ -47,6 +51,18 @@ function matchScore(mode: ModeSpec, current: ModeSpec): number | null {
     if (want === undefined) continue
     if (!samePairing(want, current[key])) return null
     score++
+  }
+
+  if (mode.sidekickSeats !== undefined) {
+    if (mode.sidekickSeats === null) {
+      if (current.sidekickSeats && Object.keys(current.sidekickSeats).length > 0) return null
+    } else {
+      const currentSeats = current.sidekickSeats ?? {}
+      for (const [name, seat] of Object.entries(mode.sidekickSeats)) {
+        if (!samePairing(seat, currentSeats[name])) return null
+        score++
+      }
+    }
   }
 
   return score
@@ -70,6 +86,21 @@ export function activeModeName(
     if (!best || score > best.score) best = { name: mode.name, score }
   }
   return best?.name ?? null
+}
+
+/**
+ * The label for one session's effective mode. Session-pinned mode identity is
+ * authoritative. An unpinned session inherits the global pairing, whose name
+ * has to be derived from `ModesResponse.current` because the session snapshot
+ * deliberately reports `activeMode: null` for `source: "global"`.
+ */
+export function sessionModeName(
+  source: "session-mode" | "session-selection" | "global" | undefined,
+  activeMode: string | null | undefined,
+  globalMode: string | null,
+): string | null {
+  if (source === "global") return globalMode
+  return activeMode ?? null
 }
 
 /** Keyword → emoji. A mode name is free text the user picked, so match on

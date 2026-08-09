@@ -80,6 +80,7 @@ import {
 import { applyMode, deleteMode, getCacheGuard, getModes, getSessionAgentConfig, getSoloAdvisorStatus, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SessionAgentConfig, type SidekickConfig } from "./lib/configApi"
 import { buildComposerStatus } from "./lib/composerStatus"
 import { isSoloActive } from "./lib/solo"
+import { activeModeName, sessionModeName } from "./lib/modes"
 import { ComposerStatus } from "./components/ComposerStatus"
 import {
   defaultCloneParent,
@@ -457,6 +458,7 @@ export function App() {
   // Saved definitions are global, but applied/effective configuration is keyed
   // by session so switching chats can never carry a label or delegate display.
   const [savedModes, setSavedModes] = useState<ModeInfo[]>([])
+  const [globalMode, setGlobalMode] = useState<string | null>(null)
   const [sessionAgentConfig, setSessionAgentConfig] = useState<Record<string, SessionAgentConfig>>({})
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
   // `/sidekick` inside a live chat edits THIS session only (Settings stays global).
@@ -608,9 +610,16 @@ export function App() {
     return list.length > 0 ? list : [modelSelectionToUi(effectiveModelSel, modelRows)]
   }, [live, modelRows, effectiveModelSel])
 
-  // Mode identity is authoritative per session. Never derive this label from
-  // global /api/modes.current: that is the Settings default, not chat state.
-  const activeMode = live && sessionId ? (sessionAgentConfig[sessionId]?.activeMode ?? null) : null
+  // Pinned mode identity is authoritative per session. Inheriting sessions use
+  // the saved mode matching the global pairing; their snapshot intentionally
+  // has activeMode=null even though the complete default mode is in effect.
+  const activeMode = live && sessionId
+    ? sessionModeName(
+        sessionAgentConfig[sessionId]?.source,
+        sessionAgentConfig[sessionId]?.activeMode,
+        globalMode,
+      )
+    : null
 
   // SOLO: a raw model pick runs the model alone (see lib/solo). Session-pinned
   // solo applies to the ATTACHED session only; with no pin the global state
@@ -1405,12 +1414,14 @@ export function App() {
     if (appMode !== "live") {
       setSlashModes([])
       setSavedModes([])
+      setGlobalMode(null)
       return
     }
     try {
-      const { modes } = await getModes()
+      const { modes, current } = await getModes()
       setSlashModes(modeCommands(modes, (m) => `Apply mode: ${prettyModel(m.model)}`))
       setSavedModes(modes)
+      setGlobalMode(activeModeName(modes, current))
     } catch {
       /* keep the last known aliases; the menu is a convenience, not state */
     }
@@ -1420,6 +1431,7 @@ export function App() {
     if (appMode !== "live") {
       setSlashModes([])
       setSavedModes([])
+      setGlobalMode(null)
       setSessionAgentConfig({})
       return
     }

@@ -8,8 +8,9 @@ import {
   providerLabel,
   saveMode,
 } from "~/lib/configApi"
-import type { ModeAdvisor, ModeInfo, ModeSpec, ModesResponse } from "~/lib/configApi"
+import type { ModeAdvisor, ModeSpec, ModesResponse } from "~/lib/configApi"
 import { confirm } from "~/lib/confirm"
+import { activeModeName } from "~/lib/modes"
 import { Button } from "../ui/button"
 import {
   Badge,
@@ -57,14 +58,6 @@ function specLabel(spec: ModeSpec): string {
     bits.push(`reviewer ${spec.review ? agentLabel(spec.review) : "off"}`)
   }
   return bits.join(" · ")
-}
-
-function sameAsCurrent(mode: ModeInfo, current: ModeSpec): boolean {
-  return (
-    mode.provider === current.provider &&
-    mode.model === current.model &&
-    (mode.effort ?? null) === (current.effort ?? null)
-  )
 }
 
 export function ModesSection({ onApplied }: { onApplied?: () => void } = {}) {
@@ -153,7 +146,7 @@ export function ModesSection({ onApplied }: { onApplied?: () => void } = {}) {
             ) : (
               <div className="flex flex-col gap-2">
                 {modes.data.modes.map((mode) => {
-                  const active = sameAsCurrent(mode, modes.data!.current)
+                  const active = activeModeName(modes.data!.modes, modes.data!.current) === mode.name
                   return (
                     <Card key={mode.name}>
                       <div className="flex items-center justify-between gap-3">
