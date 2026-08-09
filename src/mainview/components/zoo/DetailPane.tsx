@@ -85,7 +85,7 @@ export function DetailPane({
   return (
     <aside
       aria-label="Detail"
-      className="flex min-h-0 w-[clamp(16rem,32vw,26rem)] shrink-0 flex-col border-border/70 border-l bg-background/60"
+      className="flex min-h-0 w-[clamp(16rem,32vw,26rem)] shrink-0 flex-col border-border/70 border-l bg-background/60 @max-[46rem]/zoo-body:w-full @max-[46rem]/zoo-body:border-l-0"
     >
       <header className="flex min-h-[52px] shrink-0 items-start gap-2 border-border/70 border-b px-4 py-3">
         <div className="min-w-0 flex-1">
@@ -98,7 +98,8 @@ export function DetailPane({
             <span className="text-[11px] text-muted-foreground">{relativeTime(entry.at)}</span>
           </div>
         </div>
-        <Button variant="ghost" size="icon-sm" aria-label="Close detail" onClick={onClose}>
+        <Button className={`${NO_DRAG_REGION} @max-[46rem]/zoo-body:w-auto @max-[46rem]/zoo-body:px-2.5`} variant="ghost" size="icon-sm" aria-label="Close detail" onClick={onClose}>
+          <span className="hidden text-[11.5px] @max-[46rem]/zoo-body:inline">Back</span>
           <X />
         </Button>
       </header>

@@ -447,7 +447,7 @@ export function ZooWorkspace({
         </div>
       )}
 
-      <div className="flex min-h-0 min-w-0 flex-1">
+      <div className="@container/zoo-body flex min-h-0 min-w-0 flex-1">
         <nav
           aria-label="Zoo views"
           className="flex w-[4.75rem] shrink-0 flex-col items-stretch gap-1 border-border/70 border-r px-2 py-3"
@@ -480,7 +480,7 @@ export function ZooWorkspace({
           })}
         </nav>
 
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">{main}</main>
+        <main className={cn("min-h-0 min-w-0 flex-1 flex-col", selected ? "flex @max-[46rem]/zoo-body:hidden" : "flex")}>{main}</main>
 
         {selected && (
           <DetailPane

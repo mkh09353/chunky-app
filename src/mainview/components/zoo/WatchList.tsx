@@ -129,11 +129,14 @@ export function WatchList({
   }
 
   return (
-    <section className={cn(NO_DRAG_REGION, "flex min-w-0 flex-col gap-2 rounded-xl border border-border/70 bg-card/60 p-3")}>
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <Binoculars className="size-4 shrink-0 text-primary" />
-        <p className="min-w-0 flex-1 font-medium text-[13px] text-foreground">Competitor watch</p>
-        <label className="flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
+    <section className={cn(NO_DRAG_REGION, "@container/watch flex min-w-0 flex-col gap-2 rounded-xl border border-border/70 bg-card/60 p-3")}>
+      <div className="flex min-w-0 flex-col gap-2 @min-[32rem]/watch:flex-row @min-[32rem]/watch:items-center">
+        <div className="flex min-w-0 items-center gap-2">
+          <Binoculars className="size-4 shrink-0 text-primary" />
+          <p className="min-w-0 flex-1 font-medium text-[13px] text-foreground">Competitor watch</p>
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2 @min-[32rem]/watch:ml-auto">
+        <label className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
           Daily at
           <Select
             value={String(hour)}
@@ -156,6 +159,7 @@ export function WatchList({
           {busy === "all" ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
           Check all
         </Button>
+        </div>
       </div>
 
       <p className="text-[11.5px] text-muted-foreground">
@@ -174,17 +178,22 @@ export function WatchList({
                 key={watch.id}
                 className="flex min-w-0 flex-col gap-1 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2"
               >
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <Github className="size-3.5 shrink-0 text-muted-foreground" />
-                  <button
+                <div className="flex min-w-0 flex-col gap-2 @min-[32rem]/watch:flex-row @min-[32rem]/watch:items-center">
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <Github className="size-3.5 shrink-0 text-muted-foreground" />
+                    <Button
+                    variant="ghost"
+                    size="sm"
                     type="button"
-                    className="min-w-0 flex-1 cursor-pointer truncate text-left font-mono text-[12px] text-foreground hover:underline"
+                    className="h-auto min-w-0 flex-1 justify-start whitespace-normal px-0 text-left font-mono text-[12px] text-foreground hover:underline"
                     title={`Open ${watch.label} on GitHub`}
                     onClick={() => openExternal(`https://github.com/${watch.owner}/${watch.name}`)}
                   >
-                    {watch.label}
-                  </button>
-                  {area && <AreaBadge name={area} />}
+                    <span className="min-w-0 break-all">{watch.label}</span>
+                    </Button>
+                    {area && <AreaBadge name={area} />}
+                  </div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <AreaAssignMenu
                     areas={areas}
                     areaId={watch.areaId}
@@ -210,6 +219,7 @@ export function WatchList({
                   >
                     <Trash2 />
                   </Button>
+                  </div>
                 </div>
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <span className={cn("min-w-0 break-words text-[11.5px]", statusTone(watch))}>
@@ -227,7 +237,7 @@ export function WatchList({
         </ul>
       )}
 
-      <form onSubmit={add} className="flex min-w-0 flex-wrap items-center gap-1.5">
+      <form onSubmit={add} className="flex min-w-0 flex-col gap-1.5 @min-[24rem]/watch:flex-row @min-[24rem]/watch:items-center">
         <Input
           value={repo}
           onChange={(event) => setRepo(event.target.value)}
@@ -235,7 +245,7 @@ export function WatchList({
           spellCheck={false}
           autoComplete="off"
           aria-label="Repository to watch"
-          className="min-w-40 flex-1"
+          className="w-full min-w-0 flex-1"
         />
         <Button type="submit" size="sm" disabled={busy !== null || !repo.trim()}>
           {busy === "add" ? <LoaderCircle className="animate-spin" /> : null}

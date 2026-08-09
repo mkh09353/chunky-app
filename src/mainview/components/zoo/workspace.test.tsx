@@ -202,6 +202,15 @@ describe("DetailPane", () => {
     expect(html).toContain("s-42")
     expect(html).toContain("Jam")
   })
+
+  it("becomes a full-width detail surface with an explicit Back label in narrow Zoo containers", () => {
+    const entry = entries.find((row) => row.idea?.id === "d-2")!
+    const html = renderToStaticMarkup(<TooltipProvider><DetailPane entry={entry} areas={areas} onClose={() => {}} /></TooltipProvider>)
+    expect(html).toContain("@max-[46rem]/zoo-body:w-full")
+    expect(html).toContain("@max-[46rem]/zoo-body:border-l-0")
+    expect(html).toContain("Back")
+    expect(html).toContain('aria-label="Close detail"')
+  })
 })
 
 describe("card working sessions", () => {
@@ -376,6 +385,9 @@ describe("competitor watch section", () => {
     expect(html).toContain("Recorded 1 tag")
     expect(html).toContain("Synthesize new activity")
     expect(html).toContain("Area: Payments")
+    expect(html).toContain("@container/watch")
+    expect(html).toContain("@min-[32rem]/watch:flex-row")
+    expect(html).toContain("break-all")
   })
 })
 
@@ -389,5 +401,8 @@ describe("X Watch section", () => {
     expect(html).toContain("Extract new posts")
     expect(html).toContain("Area: Payments")
     expect(html).toContain("60 min")
+    expect(html).toContain("@container/x-watch")
+    expect(html).toContain("@min-[32rem]/x-watch:flex-row")
+    expect(html).toContain("break-all")
   })
 })
