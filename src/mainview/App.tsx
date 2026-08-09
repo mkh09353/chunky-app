@@ -177,6 +177,7 @@ import {
   mergeSummaryLists,
   sameSummaryList,
   sessionsInWorkspace,
+  sessionsWithoutRepository,
   trackCompletions,
   unionSummaries,
   type SummaryMap,
@@ -323,6 +324,9 @@ interface RepoCompletion {
   repoId: string
   done: string[]
 }
+
+/** Durable pseudo-tab key. Never sent to the server as a repository id. */
+const NO_REPO_SCOPE = "__no_repo__"
 
 export function App() {
   const { resolved, toggle } = useTheme()
@@ -539,7 +543,7 @@ export function App() {
   const refreshSessions = useCallback(
     async (baseUrl: string, repoId: string | null = activeRepoIdRef.current) => {
       const gen = ++repoListGen.current
-      const list = await listSessions(baseUrl, repoId)
+      const list = await listSessions(baseUrl, repoId, repoId === null ? "none" : undefined)
       if (gen !== repoListGen.current) return list
       // Authoritative rows (they carry `busy`) — fold them into the shared map
       // so a later streamed row can inherit what only a poll can know.
@@ -865,9 +869,10 @@ export function App() {
   // wins, then the open repo, then the server workspace.
   const gitCwd = useMemo(() => {
     if (!live) return undefined
-    const sessionWorkspace = sessions.find((s) => s.sessionId === sessionId)?.workspace
-    return sessionWorkspace || activeRepo?.path || workspace || config?.workspace || undefined
-  }, [live, sessions, sessionId, activeRepo, workspace, config])
+    const summary = sessions.find((s) => s.sessionId === sessionId)
+    if (activeRepoId === null || summary?.repositoryScope === "none") return undefined
+    return summary?.workspace || activeRepo?.path || workspace || config?.workspace || undefined
+  }, [live, sessions, sessionId, activeRepoId, activeRepo, workspace, config])
 
   // Sidebar identity: the user's git display name (name only — never the email),
   // read from whichever git directory the window is pointed at so a per-repo
@@ -900,7 +905,7 @@ export function App() {
       const list = await refreshSessions(baseUrl, repoId)
       if (repoId != null && repoId !== activeRepoIdRef.current) return
 
-      const remembered = repoId ? lastSessionByRepo.current[repoId] : undefined
+      const remembered = lastSessionByRepo.current[repoId ?? NO_REPO_SCOPE]
       const pick =
         (remembered && list.find((s) => s.sessionId === remembered)?.sessionId) ||
         list[0]?.sessionId
@@ -911,7 +916,7 @@ export function App() {
       }
 
       try {
-        const created = await createSession(baseUrl, repoId)
+        const created = await createSession(baseUrl, repoId, null, repoId === null ? "none" : undefined)
         if (repoId != null && repoId !== activeRepoIdRef.current) return
         await refreshSessions(baseUrl, repoId)
         void attachSession(baseUrl, created.sessionId)
@@ -999,11 +1004,12 @@ export function App() {
         let repoId: string | null = null
         if (reg) {
           const remembered = ui.activeRepoId
-          repoId =
-            (remembered && reg.repos.some((r) => r.id === remembered) ? remembered : null) ??
-            reg.activeId ??
-            reg.repos[0]?.id ??
-            null
+          repoId = remembered === NO_REPO_SCOPE
+            ? null
+            : (remembered && reg.repos.some((r) => r.id === remembered) ? remembered : null) ??
+              reg.activeId ??
+              reg.repos[0]?.id ??
+              null
           setRepos(reg.repos)
           setActiveRepoId(repoId)
           activeRepoIdRef.current = repoId
@@ -1189,6 +1195,11 @@ export function App() {
     const publishSummaries = (stale: string[]) => {
       if (stopped) return
       const completed: (RepoCompletion | null)[] = []
+      if (activeRepoIdRef.current === null) {
+        const rows = sessionsWithoutRepository(shellSummaries.current)
+        repoSessionCache.current.set(null, rows)
+        setSessions((prev) => (sameSummaryList(prev, rows) ? prev : rows))
+      }
       for (const repo of repos) {
         const rows = sessionsInWorkspace(shellSummaries.current, repo.path)
         completed.push(applyRepoRows(repo, rows, false))
@@ -1518,7 +1529,7 @@ export function App() {
     if (!config) return
     const repoId = activeRepoIdRef.current
     try {
-      const created = await createSession(config.baseUrl, repoId)
+      const created = await createSession(config.baseUrl, repoId, null, repoId === null ? "none" : undefined)
       if (repoId != null && repoId !== activeRepoIdRef.current) return
       // Attach right away; the sidebar list can catch up in the background.
       void attachSession(config.baseUrl, created.sessionId, { fresh: true })
@@ -1542,7 +1553,7 @@ export function App() {
       setMainView("chat")
       const repoId = activeRepoIdRef.current
       try {
-        const created = await createSession(config.baseUrl, repoId)
+        const created = await createSession(config.baseUrl, repoId, null, repoId === null ? "none" : undefined)
         if (repoId != null && repoId !== activeRepoIdRef.current) return
         await sendMessage(config.baseUrl, created.sessionId, providerSetupBrief(providerName, baseURL))
         // Attach right away; the sidebar list can catch up in the background.
@@ -1605,6 +1616,36 @@ export function App() {
     },
     [config, openRepoThreads, attachSession, refreshSessions],
   )
+
+  /** Switch to the first-class conversational scope with no repository/cwd. */
+  const handleSelectNoRepo = useCallback(async (preferSessionId?: string) => {
+    if (!config) return
+    if (activeRepoIdRef.current === null) {
+      if (preferSessionId && preferSessionId !== sessionIdRef.current) {
+        void attachSession(config.baseUrl, preferSessionId)
+      }
+      return
+    }
+    setActiveRepoId(null)
+    activeRepoIdRef.current = null
+    rememberActiveRepo(NO_REPO_SCOPE)
+    stopStream()
+    const cached = repoSessionCache.current.get(null)
+    setSessions(cached ?? [])
+    setSessionId(null)
+    setTranscript(initialState)
+    setTranscriptLoading(!cached)
+    const remembered = lastSessionByRepo.current[NO_REPO_SCOPE]
+    const pick = preferSessionId ||
+      (remembered && cached?.find((s) => s.sessionId === remembered)?.sessionId) ||
+      cached?.[0]?.sessionId
+    if (pick) {
+      void attachSession(config.baseUrl, pick)
+      void refreshSessions(config.baseUrl, null).catch(() => {})
+    } else {
+      void openRepoThreads(config.baseUrl, null)
+    }
+  }, [config, attachSession, refreshSessions, openRepoThreads, stopStream])
 
   const handleAddRepo = useCallback(
     async (path: string) => {
@@ -2646,11 +2687,10 @@ export function App() {
       if (reg) {
         setRepos(reg.repos)
         const remembered = activeRepoIdRef.current
-        const repoId =
-          (remembered && reg.repos.some((r) => r.id === remembered) ? remembered : null) ??
-          reg.activeId ??
-          reg.repos[0]?.id ??
-          null
+        const repoId = remembered === null
+          ? null
+          : (reg.repos.some((r) => r.id === remembered) ? remembered : null) ??
+            reg.activeId ?? reg.repos[0]?.id ?? null
         setActiveRepoId(repoId)
         activeRepoIdRef.current = repoId
       }
@@ -2676,15 +2716,16 @@ export function App() {
     { id: "usage", label: "Usage", group: "Session" },
     { id: "scoreboard", label: "Scoreboard", group: "Session" },
     ...repos.map((repo) => ({ id: `repo:${repo.id}`, label: `Switch repo: ${repo.name}`, group: "Repositories" })),
+    { id: "scope:chats", label: "Switch to Chats (no repository)", group: "Repositories" },
     ...sessions.map((session) => ({ id: `session:${session.sessionId}`, label: `Switch session: ${session.title || session.sessionId.slice(0, 8)}`, group: "Sessions" })),
     ...uiModels.map((model) => ({ id: `model:${model.id}`, label: `Switch model: ${model.name}`, group: "Models" })),
-    ...["Rename session", "Fork session", "Rewind to turn", "Goal mode", "Ship it"].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
-    { id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" },
+    ...["Rename session", "Goal mode", ...(activeRepoId ? ["Fork session", "Rewind to turn", "Ship it"] : [])].map((label) => ({ id: `action:${label}`, label, group: "Session" })),
+    ...(activeRepoId ? [{ id: "terminal", label: "Toggle terminal", hint: "Ctrl+`", group: "Workspace" }] : []),
     { id: "theme", label: "Toggle theme", group: "Appearance" },
     { id: "browser", label: browserOpen ? "Close browser" : "Open browser", group: "Workspace" },
     { id: "settings", label: "Open Settings", hint: "⌘,", group: "Integration" },
     { id: "onboarding", label: "Run Onboarding", group: "Integration" },
-  ], [repos, sessions, uiModels, browserOpen])
+  ], [repos, sessions, uiModels, browserOpen, activeRepoId])
 
   /** Stable app-action dispatch shared by the palette and the voice agent. */
   const dispatchAppAction = useCallback(
@@ -2708,7 +2749,11 @@ export function App() {
       return (data.repos ?? []).map((repo) => ({ id: repo.id, name: repo.name, path: repo.path }))
     }, [config]),
     getSessions: useCallback(
-      async (repoId?: string | null) => (config ? listSessions(config.baseUrl, repoId ?? activeRepoIdRef.current) : []),
+      async (repoId?: string | null) => {
+        if (!config) return []
+        const scopeRepoId = repoId ?? activeRepoIdRef.current
+        return listSessions(config.baseUrl, scopeRepoId, scopeRepoId === null ? "none" : undefined)
+      },
       [config],
     ),
     dispatchAppAction,
@@ -2729,12 +2774,13 @@ export function App() {
       else if (a.id === "browser") { setFilesRepoId(null); setBrowserOpen((open) => !open) }
       else if (a.id === "settings") setSettingsOpen(true)
       else if (a.id === "onboarding") { if (live) setOnboardingOpen(true) }
+      else if (a.id === "scope:chats") void handleSelectNoRepo()
       else if (a.id.startsWith("repo:")) dispatchAppAction({ type: "select-repo", repoId: a.id.slice(5) })
       else if (a.id.startsWith("session:")) dispatchAppAction({ type: "select-session", sessionId: a.id.slice(8) })
       else if (a.id.startsWith("model:")) { const model = uiModels.find((item) => item.id === a.id.slice(6)); if (model) void handleModelChange(model) }
       else if (a.id.startsWith("action:")) { const kind = a.id.slice(7); const map: Record<string, NonNullable<typeof dialog>> = { "Rename session": "rename", "Fork session": "fork", "Rewind to turn": "rewind", "Goal mode": "goal", "Ship it": "ship" }; void openDialog(map[kind]!) }
     },
-    [dispatchAppAction, toggle, uiModels, handleModelChange, openDialog, openStats, live],
+    [dispatchAppAction, handleSelectNoRepo, toggle, uiModels, handleModelChange, openDialog, openStats, live],
   )
 
   // Chips and their hotkeys mirror the composer: no sending while a run streams,
@@ -2956,16 +3002,22 @@ export function App() {
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
-            repoStatus={live ? <GitToolbar cwd={gitCwd} /> : null}
+            repoStatus={live && activeRepoId ? <GitToolbar cwd={gitCwd} /> : null}
             headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} /></>}
             theme={resolved}
             onToggleTheme={toggle}
-            onRename={() => void openDialog("rename")} onFork={() => void openDialog("fork")} onRewind={() => void openDialog("rewind")} onGoal={() => void openDialog("goal")} onShip={() => void openDialog("ship")} onStats={() => void openDialog("stats")}
+            onRename={() => void openDialog("rename")}
+            onFork={activeRepoId ? () => void openDialog("fork") : undefined}
+            onRewind={activeRepoId ? () => void openDialog("rewind") : undefined}
+            onGoal={() => void openDialog("goal")}
+            onShip={activeRepoId ? () => void openDialog("ship") : undefined}
+            onStats={() => void openDialog("stats")}
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
             unreadRepoIds={repoTabUnreadIds}
             workingRepoIds={repoTabWorkingIds}
             onSelectRepo={(id) => void handleSelectRepo(id)}
+            onSelectNoRepo={() => void handleSelectNoRepo()}
             onAddRepo={handleAddRepo}
             onRemoveRepo={(id) => void handleRemoveRepo(id)}
             onOpenRepoFiles={openRepoFiles}
@@ -2979,7 +3031,7 @@ export function App() {
             reposBusy={addingRepo}
             reposDisabled={!live || connectionState === "booting"}
             onToggleBrowser={() => { setFilesRepoId(null); setBrowserOpen((open) => !open) }}
-            onToggleTerminal={() => setTerminalsOpen((value) => !value)}
+            onToggleTerminal={activeRepoId ? () => setTerminalsOpen((value) => !value) : undefined}
             terminalOpen={terminalsOpen}
           />
 
@@ -2998,7 +3050,7 @@ export function App() {
               {/* File paths in assistant prose resolve against the session's
                   own workspace (falling back to the open repo), so clicking
                   `src/a.ts` opens the right checkout. */}
-              <FileLinkProvider cwd={gitCwd}>
+              <FileLinkProvider cwd={gitCwd} enabled={activeRepoId !== null ? undefined : false}>
                 <ChatView
                   thread={activeThread}
                   streamingId={liveStreamingId}
@@ -3012,9 +3064,9 @@ export function App() {
               </FileLinkProvider>
               {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}
               <TerminalDrawer
-                open={terminalsOpen}
+                open={terminalsOpen && activeRepoId !== null}
                 onOpenChange={setTerminalsOpen}
-                cwd={activeRepo?.path || workspace || config?.workspace || undefined}
+                cwd={activeRepo?.path || undefined}
                 resolvedTheme={resolved}
               />
               <div className="flex flex-col gap-2">
@@ -3042,7 +3094,7 @@ export function App() {
                 onRefreshModels={live ? refreshModels : undefined}
                 // While the agent is running, plain ⏎ enqueues; ⌥⏎ interjects.
                 onSend={submitComposerMessage}
-                onSearchFiles={live && config ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
+                onSearchFiles={live && config && activeRepoId ? (query) => searchFiles(config.baseUrl, query, activeRepoId) : undefined}
                 commands={slashCommands}
                 modes={modeOptions}
                 modeSpecs={live ? savedModes : []}

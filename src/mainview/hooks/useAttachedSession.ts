@@ -165,11 +165,9 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       setGoalState(nextGoal)
       sessionCache.current.update(id, { goal: nextGoal })
     }).catch(() => {})
-    const repoForSession = activeRepoIdRef.current
-    if (repoForSession) {
-      lastSessionByRepo.current[repoForSession] = id
-      rememberLastSession(repoForSession, id)
-    }
+    const repoForSession = activeRepoIdRef.current ?? "__no_repo__"
+    lastSessionByRepo.current[repoForSession] = id
+    rememberLastSession(repoForSession, id)
     // Re-read on every (re)connection: a rebuild replaces the entry, and
     // remember() extends whichever one is current.
     let cached = sessionCache.current.get(id)

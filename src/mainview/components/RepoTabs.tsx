@@ -4,6 +4,7 @@ import {
   CloudDownload,
   Copy,
   Eye,
+  MessageCircle,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -84,6 +85,7 @@ export function RepoTabs({
   unreadRepoIds,
   workingRepoIds,
   onSelect,
+  onSelectNoRepo,
   onAdd,
   onRemove,
   onOpenRepoFiles,
@@ -102,6 +104,7 @@ export function RepoTabs({
    *  Takes precedence over the unread dot: work in flight is the louder news. */
   workingRepoIds?: Set<string>
   onSelect: (id: string) => void
+  onSelectNoRepo?: () => void
   onAdd: (path: string) => Promise<void>
   onRemove: (id: string) => void | Promise<void>
   onOpenRepoFiles?: (repoId: string) => void
@@ -634,6 +637,25 @@ export function RepoTabs({
           "flex min-w-0 grow items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
         )}
       >
+        {onSelectNoRepo && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeId === null}
+            disabled={disabled || busy}
+            onClick={onSelectNoRepo}
+            className={cn(
+              "inline-flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-[12px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+              activeId === null
+                ? "bg-background/80 text-foreground shadow-xs"
+                : "text-muted-foreground hover:bg-background/40 hover:text-foreground",
+              (disabled || busy) && "opacity-60",
+            )}
+          >
+            <MessageCircle className="size-3.5 shrink-0 opacity-80" />
+            <span>Chats</span>
+          </button>
+        )}
         {repos.map((r) => {
           const active = r.id === activeId
           const feedback = copyFeedback?.repoId === r.id ? copyFeedback : null

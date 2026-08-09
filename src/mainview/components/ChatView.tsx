@@ -33,11 +33,13 @@ import { AgentCard } from "./AgentCard"
 import { LiveRunsProvider, type LiveRunsValue } from "./LiveRun"
 import { cn } from "~/lib/cn"
 import {
-  BOTTOM_SLACK,
+  ANSWER_TOP_GAP,
   classifyScroll,
+  decideScroll,
   isAtBottom,
   reAnchor,
-  shouldPark,
+  resolveParkPosition,
+  type ParkReason,
 } from "~/lib/followBottom"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { applyRunAnchors } from "~/lib/mapTranscript"
@@ -52,6 +54,7 @@ export function ChatTopBar({
   unreadRepoIds,
   workingRepoIds,
   onSelectRepo,
+  onSelectNoRepo,
   onAddRepo,
   onRemoveRepo,
   onOpenRepoFiles,
@@ -78,6 +81,7 @@ export function ChatTopBar({
   /** Repositories with a session still working (root run or any delegate). */
   workingRepoIds?: Set<string>
   onSelectRepo?: (id: string) => void
+  onSelectNoRepo?: () => void
   onAddRepo?: (path: string) => Promise<void>
   onRemoveRepo?: (id: string) => void | Promise<void>
   onOpenRepoFiles?: (repoId: string) => void
@@ -119,6 +123,7 @@ export function ChatTopBar({
           unreadRepoIds={unreadRepoIds}
           workingRepoIds={workingRepoIds}
           onSelect={onSelectRepo}
+          onSelectNoRepo={onSelectNoRepo}
           onAdd={onAddRepo}
           onRemove={onRemoveRepo}
           onOpenRepoFiles={onOpenRepoFiles}
@@ -167,23 +172,29 @@ export function ChatTopBar({
               <Pencil />
               Rename session
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={onFork}>
-              <GitFork />
-              Fork session…
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={onRewind}>
-              <History />
-              Rewind to turn…
-            </DropdownMenuItem>
+            {onFork && (
+              <DropdownMenuItem onClick={onFork}>
+                <GitFork />
+                Fork session…
+              </DropdownMenuItem>
+            )}
+            {onRewind && (
+              <DropdownMenuItem onClick={onRewind}>
+                <History />
+                Rewind to turn…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={onGoal}>
               <Target />
               Goal mode…
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={onShip}>
-              <Rocket />
-              Ship it…
-            </DropdownMenuItem>
+            {onShip && (
+              <DropdownMenuItem onClick={onShip}>
+                <Rocket />
+                Ship it…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem onClick={onStats}>
               <BarChart3 />
               Usage
@@ -250,9 +261,6 @@ function glideTo(el: HTMLElement, top: number) {
 }
 
 
-/** Breathing room above the answer when we park its first line at the top. */
-const ANSWER_TOP_GAP = 12
-
 /** Id of the answer that just landed: the trailing assistant message. A turn
  *  that ended without one (stopped, error before any reply) yields undefined —
  *  nothing to re-anchor to, so the viewport is left where it is. */
@@ -316,6 +324,15 @@ export function ChatView({
   // scroll gesture clears this, and it is what lets an auto-continued turn (goal
   // mode: no user message to re-anchor on) start following again.
   const parkedByUs = useRef(false)
+  // rAF handle for a start-of-answer park. Kept outside the render-effect so a
+  // messages churn cleanup cannot drop the intent without decideScroll seeing
+  // the still-pending reason and re-scheduling.
+  const parkFrame = useRef<number | null>(null)
+  // Set while a park has been decided but not yet applied to the DOM. Survives
+  // cancelled animation frames; cleared only on successful apply or reader cancel.
+  const pendingParkReason = useRef<ParkReason | null>(null)
+  // First settled frame after a thread switch still needs open framing.
+  const openPending = useRef(true)
 
   const endPark = useCallback(() => {
     parkTarget.current = null
@@ -324,7 +341,21 @@ export function ChatView({
       parkTimer.current = null
     }
   }, [])
-  useEffect(() => endPark, [endPark])
+
+  const cancelParkFrame = useCallback(() => {
+    if (parkFrame.current != null) {
+      cancelAnimationFrame(parkFrame.current)
+      parkFrame.current = null
+    }
+  }, [])
+
+  useEffect(
+    () => () => {
+      endPark()
+      cancelParkFrame()
+    },
+    [endPark, cancelParkFrame],
+  )
 
   /** Follow the end of the transcript, remembering where we asked to land. */
   const followBottom = useCallback((el: HTMLElement) => {
@@ -376,7 +407,11 @@ export function ChatView({
     const el = scrollRef.current
     if (!el) return
     const onGesture = () => {
-      if (parkTarget.current == null) return
+      // A reader gesture cancels both an in-flight glide and a still-pending
+      // schedule — they asked to leave, so we must not re-arm the park.
+      if (parkTarget.current == null && pendingParkReason.current == null) return
+      cancelParkFrame()
+      pendingParkReason.current = null
       endPark()
       parkedByUs.current = false
       stuckToBottom.current = atBottom(el)
@@ -392,7 +427,7 @@ export function ChatView({
       el.removeEventListener("touchmove", onGesture)
       window.removeEventListener("keydown", onGesture, true)
     }
-  }, [endPark])
+  }, [endPark, cancelParkFrame])
 
   // Follow the bottom whenever the CONTENT grows, not just when React rows
   // change: tool output, live delegate streams, expanding cards, images and
@@ -447,10 +482,13 @@ export function ChatView({
   // summary. Because it only moves at turn end, a card the reader opens
   // afterwards stays open until the NEXT turn finishes.
   const [turnEnd, setTurnEnd] = useState(0)
-  const wasRunning = useRef(running)
+  // Session-scoped lifecycle: reset on thread.id so a prior running session
+  // cannot make an already-idle newly selected session look like live completion.
+  const wasRunning = useRef(false)
   const messageCount = thread.messages.length
-  const prevMessageCount = useRef(messageCount)
-  // Read at turn end (not a dep — the effect must fire on the transition only).
+  const prevMessageCount = useRef(0)
+  // Read when applying a park (not a dep — the effect must fire on transitions
+  // and message growth; the apply frame always reads the latest rows).
   const messagesRef = useRef(messages)
   messagesRef.current = messages
 
@@ -471,31 +509,117 @@ export function ChatView({
     () => thread.messages.reduce((n, m) => (m.role === "user" && !m.notice ? n + 1 : n), 0),
     [thread.messages],
   )
-  const prevUserMessageCount = useRef(userMessageCount)
-  useEffect(() => {
-    if (userMessageCount > prevUserMessageCount.current) {
-      stuckToBottom.current = true
-      parkedByUs.current = false
-      endPark()
-    }
-    prevUserMessageCount.current = userMessageCount
-  }, [userMessageCount, endPark])
+  const prevUserMessageCount = useRef(0)
 
-  // Switching sessions starts at the end of the new thread, not wherever the
-  // previous one had parked us.
+  // Switching sessions resets every lifecycle flag. Declared BEFORE the
+  // user-message re-arm effect so, on the same commit as a thread change,
+  // baselines and openPending are armed first and the count check sees the
+  // new thread's sizes (no synthetic 0→N append that cancels open framing).
+  //
+  // Count baselines snap to the NEW thread's current sizes (read from this
+  // render; deps stay thread.id-only so appends cannot re-arm open framing).
   useEffect(() => {
     stuckToBottom.current = true
     parkedByUs.current = false
     commandedTop.current = null
+    wasRunning.current = false
+    prevMessageCount.current = messageCount
+    prevUserMessageCount.current = userMessageCount
+    openPending.current = true
+    pendingParkReason.current = null
+    cancelParkFrame()
     endPark()
-  }, [thread.id, endPark])
+    // messageCount / userMessageCount: intentional stale-deps omission — only
+    // baseline on thread switch, using the new thread's sizes from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thread.id, endPark, cancelParkFrame])
+
+  // A fresh user turn always re-anchors to the bottom, even if the reader had
+  // scrolled away to re-read the previous answer. Runs after the thread-id
+  // reset so hydration of a newly selected session does not look like a send.
+  useEffect(() => {
+    if (userMessageCount > prevUserMessageCount.current) {
+      // Replay/hydration grows the user-message count while open framing is
+      // still pending — that is history arriving, not a turn the reader just
+      // sent. Only a genuine post-open append re-arms follow and cancels park.
+      if (!openPending.current) {
+        stuckToBottom.current = true
+        parkedByUs.current = false
+        // A new human turn supersedes any unfinished open/complete park.
+        cancelParkFrame()
+        pendingParkReason.current = null
+        endPark()
+      }
+    }
+    prevUserMessageCount.current = userMessageCount
+  }, [userMessageCount, endPark, cancelParkFrame])
+
+  /** Apply a start-of-answer park on the next frame. Pending reason stays set
+   *  until this lands (or the reader cancels), so a cancelled rAF from message
+   *  churn re-schedules via decideScroll instead of leaving follow off. */
+  const schedulePark = useCallback(
+    (el: HTMLElement) => {
+      // Disarm bottom-follow immediately so a ResizeObserver tick between this
+      // call and the animation frame cannot jump to the tail first.
+      stuckToBottom.current = false
+      cancelParkFrame()
+      parkFrame.current = requestAnimationFrame(() => {
+        parkFrame.current = null
+        // Reader cancelled (or a newer schedule replaced us) while we waited.
+        if (pendingParkReason.current == null) return
+
+        const answerId = lastAnswerId(messagesRef.current)
+        const inner = innerRef.current
+        const first = answerId
+          ? (inner?.querySelector<HTMLElement>(
+              `[data-msg-id="${CSS.escape(answerId)}"]`,
+            ) ?? null)
+          : null
+        const answerOffsetTop = first
+          ? first.getBoundingClientRect().top -
+            el.getBoundingClientRect().top +
+            el.scrollTop
+          : null
+        const resolved = resolveParkPosition({
+          answerOffsetTop,
+          scrollHeight: el.scrollHeight,
+          clientHeight: el.clientHeight,
+          gap: ANSWER_TOP_GAP,
+        })
+
+        pendingParkReason.current = null
+
+        if (resolved.kind === "follow") {
+          // No row, or a short answer whose start is already the tail: keep
+          // stickiness so later turns still follow. Instant jump so nothing
+          // races the ResizeObserver's own bottom-follow.
+          stuckToBottom.current = true
+          parkedByUs.current = false
+          followBottom(el)
+          return
+        }
+
+        // Long answer: park away from the end. Position is OURS so a later
+        // auto-continued turn can re-arm follow without mistaking this for a
+        // deliberate scroll into history.
+        parkedByUs.current = true
+        commandedTop.current = null
+        parkTarget.current = glideTo(el, resolved.top)
+        if (parkTimer.current != null) window.clearTimeout(parkTimer.current)
+        parkTimer.current = window.setTimeout(() => {
+          parkTimer.current = null
+          parkTarget.current = null
+        }, PARK_SETTLE_MS)
+      })
+    },
+    [cancelParkFrame, followBottom],
+  )
 
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const justEnded = wasRunning.current && !running
+
     const justStarted = !wasRunning.current && running
-    wasRunning.current = running
     const appended = messageCount > prevMessageCount.current
     prevMessageCount.current = messageCount
 
@@ -508,88 +632,65 @@ export function ChatView({
     //  · a row appends while the reader is VISUALLY at the end. Sitting at the
     //    end IS reading the end, whatever the flag says, so this also heals any
     //    stale "off" the flag ever picks up.
-    const anchored = reAnchor({
+    // Skip while a park is still pending: reAnchor must not clear parkedByUs
+    // / stuck under a schedule that has not applied yet.
+    if (pendingParkReason.current == null && parkTarget.current == null) {
+      const anchored = reAnchor({
+        stuck: stuckToBottom.current,
+        parkedByUs: parkedByUs.current,
+        parkInFlight: false,
+        justStarted,
+        appended,
+        atBottom: atBottom(el),
+      })
+      stuckToBottom.current = anchored.stuck
+      parkedByUs.current = anchored.parkedByUs
+    }
+
+    const decision = decideScroll({
+      loading,
+      catchingUp,
+      running,
+      wasRunning: wasRunning.current,
+      openPending: openPending.current,
       stuck: stuckToBottom.current,
       parkedByUs: parkedByUs.current,
       parkInFlight: parkTarget.current != null,
-      justStarted,
-      appended,
-      atBottom: atBottom(el),
+      pendingParkReason: pendingParkReason.current,
     })
-    stuckToBottom.current = anchored.stuck
-    parkedByUs.current = anchored.parkedByUs
 
-    if (!justEnded) {
-      // Streaming (or replaying): follow the bottom unless the reader left it.
-      // Instant, not smooth — the viewport's scroll-smooth would restart an
-      // animation on every delta and never catch up with a fast stream.
-      if (stuckToBottom.current && parkTarget.current == null) followBottom(el)
-      return
+    wasRunning.current = decision.next.wasRunning
+    openPending.current = decision.next.openPending
+    pendingParkReason.current = decision.next.pendingParkReason
+    if (decision.next.markTurnEnd) setTurnEnd((n) => n + 1)
+
+    switch (decision.action.type) {
+      case "hold":
+        return
+      case "follow-if-stuck":
+        // Streaming, replaying, or ordinary growth: follow the bottom unless
+        // the reader left it. Instant, not smooth — the viewport's scroll-smooth
+        // would restart an animation on every delta and never catch a fast stream.
+        if (stuckToBottom.current && parkTarget.current == null) followBottom(el)
+        return
+      case "schedule-park":
+        schedulePark(el)
+        return
     }
-
-    setTurnEnd((n) => n + 1)
-
-    // The turn is done: park the START of the answer at the top of the
-    // scrollport rather than leaving the reader at its tail. One frame later,
-    // so the cards settling have finished moving the layout first.
-    const answerId = lastAnswerId(messagesRef.current)
-    if (!answerId) return
-    // Stop the ResizeObserver's bottom-follow immediately. Otherwise a resize
-    // notification between this effect and the animation frame can jump to the
-    // tail just before we park at the answer's start.
-    const wasFollowing = stuckToBottom.current
-    // A reader who scrolled into history mid-turn keeps the viewport they chose:
-    // the park re-frames an answer they were WATCHING arrive (or one we parked
-    // them in ourselves), it is not a licence to move them at every turn end.
-    if (!shouldPark({ wasFollowing, parkedByUs: parkedByUs.current })) return
-    stuckToBottom.current = false
-    const frame = requestAnimationFrame(() => {
-      const inner = innerRef.current
-      const first =
-        inner?.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(answerId)}"]`) ?? null
-      if (!first) {
-        // No row to park against (the answer is not rendered as its own row).
-        // Returning here used to leave the follow OFF with the viewport never
-        // moved — the transcript then ignored every later message until the
-        // reader typed. Hand the follow back instead: nothing scrolled, so
-        // whatever was true an instant ago is still true.
-        stuckToBottom.current = wasFollowing || atBottom(el)
-        if (stuckToBottom.current) followBottom(el)
-        return
-      }
-      const top =
-        first.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop
-      const target = Math.max(0, top - ANSWER_TOP_GAP)
-      // A short answer starts within slack of the end: the browser would clamp
-      // this scroll to the bottom and fire NO scroll event, so the listener
-      // above could never re-arm the follow — the transcript would stay frozen
-      // for every later turn while the reader sees no room to scroll down.
-      // Treat that as "still reading the bottom": same resting place, and an
-      // instant jump so nothing races the ResizeObserver's own bottom-follow.
-      if (target >= el.scrollHeight - el.clientHeight - BOTTOM_SLACK) {
-        stuckToBottom.current = true
-        followBottom(el)
-        return
-      }
-      // A long answer genuinely parks away from the end. The follow stays off
-      // until the reader returns to the bottom, the next turn starts, or they
-      // send a message — but the position is remembered as OURS, so none of
-      // those is mistaken for a deliberate scroll into history.
-      parkedByUs.current = true
-      // We no longer own the bottom: forget the position, or a reader scrolling
-      // back to exactly it would be mistaken for our own follow and left unstuck.
-      commandedTop.current = null
-      parkTarget.current = glideTo(el, target)
-      if (parkTimer.current != null) window.clearTimeout(parkTimer.current)
-      parkTimer.current = window.setTimeout(() => {
-        parkTimer.current = null
-        parkTarget.current = null
-      }, PARK_SETTLE_MS)
-    })
-    return () => cancelAnimationFrame(frame)
-    // `messages` is a dep so this fires on every streamed delta, not just on
-    // turn boundaries; the follow above is what tracks mid-message growth.
-  }, [running, messageCount, streamingId, loading, messages, followBottom])
+    // `messages` is a dep so this fires on every streamed delta and on the
+    // commit that finishes catch-up with the final rows mounted; open framing
+    // and mid-message follow both need that. catchingUp/loading gate the
+    // decision so historical replay edges never look like live completion.
+  }, [
+    running,
+    messageCount,
+    streamingId,
+    loading,
+    catchingUp,
+    messages,
+    followBottom,
+    schedulePark,
+  ])
 
   // Distinct per (turn, fold-all) pair, so a turn ending and fold-all flipping
   // in the same commit can never cancel each other out.

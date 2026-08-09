@@ -102,6 +102,13 @@ export function sessionsInWorkspace(map: SummaryMap, workspace: string | null): 
   return rows.sort((a, b) => b.lastActivity - a.lastActivity)
 }
 
+/** Explicit repository-less rows from the global session stream. */
+export function sessionsWithoutRepository(map: SummaryMap): SessionSummary[] {
+  const rows: SessionSummary[] = []
+  for (const row of map.values()) if (row.repositoryScope === "none") rows.push(row)
+  return rows.sort((a, b) => b.lastActivity - a.lastActivity)
+}
+
 /**
  * Membership + field freshness from `next`, `busy` from whichever source knows.
  *

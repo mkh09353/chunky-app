@@ -26,14 +26,14 @@ export function threadLabel(title: string | undefined): string {
 }
 
 /** Short workspace label for sidebar (last path segment). */
-export function workspaceName(path: string | undefined): string {
+export function workspaceName(path: string | null | undefined): string {
   if (!path) return "workspace"
   const parts = path.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] || path
 }
 
 /** Project mark letter from a workspace path. */
-export function workspaceMark(path: string | undefined): string {
+export function workspaceMark(path: string | null | undefined): string {
   const name = workspaceName(path)
   return (name[0] ?? "?").toUpperCase()
 }

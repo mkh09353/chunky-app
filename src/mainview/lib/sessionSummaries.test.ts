@@ -12,6 +12,7 @@ import {
   needsAuthoritativeBusy,
   sameSummaryList,
   sessionsInWorkspace,
+  sessionsWithoutRepository,
   trackCompletions,
   unionSummaries,
 } from "./sessionSummaries"
@@ -88,6 +89,15 @@ describe("list shaping", () => {
     ])
     expect(sessionsInWorkspace(map, "/repo").map((s) => s.sessionId)).toEqual(["new", "old"])
     expect(sessionsInWorkspace(map, null)).toEqual([])
+  })
+
+  test("scopes explicit repository-less rows, newest first", () => {
+    const map = absorbAuthoritative(new Map(), [
+      row("repo"),
+      row("old-chat", { workspace: null, repositoryScope: "none", lastActivity: 2 }),
+      row("new-chat", { workspace: null, repositoryScope: "none", lastActivity: 8 }),
+    ])
+    expect(sessionsWithoutRepository(map).map((s) => s.sessionId)).toEqual(["new-chat", "old-chat"])
   })
 
   test("merging lists takes membership from the newer list and busy from either", () => {

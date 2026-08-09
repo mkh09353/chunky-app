@@ -228,13 +228,15 @@ export async function fetchServerInfo(baseUrl: string): Promise<ServerInfoRespon
 export async function listSessions(
   baseUrl: string,
   repoId?: string | null,
+  scope?: "none",
 ): Promise<SessionSummary[]> {
   const path = baseUrl.replace(/\/$/, "") + ROUTES.listSessions
   const url =
     path.startsWith("http://") || path.startsWith("https://")
       ? new URL(path)
       : new URL(path, typeof window !== "undefined" ? window.location.origin : "http://localhost")
-  if (repoId) url.searchParams.set("repo", repoId)
+  if (scope === "none") url.searchParams.set("scope", "none")
+  else if (repoId) url.searchParams.set("repo", repoId)
   const res = await fetch(url)
   if (!res.ok) throw new Error(`list sessions failed (${res.status})`)
   const data = (await res.json()) as ListSessionsResponse
@@ -330,10 +332,12 @@ export async function createSession(
   baseUrl: string,
   repoId?: string | null,
   cwd?: string | null,
+  repositoryScope?: "none",
 ): Promise<CreatedSession> {
   const body: CreateSessionRequest = {
     ...(repoId ? { repoId } : {}),
     ...(cwd ? { cwd } : {}),
+    ...(repositoryScope ? { repositoryScope } : {}),
   }
   const res = await fetch(baseUrl + ROUTES.createSession, {
     method: "POST",

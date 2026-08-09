@@ -360,14 +360,14 @@ export function sessionToThread(
   const status = threadStatusFromSession(s, opts.isActive ? opts.liveBusy : undefined, !!s.attached, opts.unread)
   return {
     id: s.sessionId,
-    projectId: `ws:${s.workspace}`,
+    projectId: s.repositoryScope === "none" ? "scope:none" : `ws:${s.workspace ?? ""}`,
     title: threadLabel(s.title),
     updated: relativeTime(s.lastActivity),
     preview: threadLabel(s.title),
     status,
     // Folder basename, NOT a git branch. Long-standing behaviour the sidebar
     // search depends on; the real branch rides alongside it below.
-    branch: workspaceName(s.workspace),
+    branch: s.repositoryScope === "none" ? "No repository" : workspaceName(s.workspace),
     // Server-resolved git identity, spread so an older server (which sends
     // neither field) produces a row with neither key rather than `undefined`
     // values — that absence is exactly what keeps the sidebar flat.
@@ -404,7 +404,7 @@ export function buildActiveThread(
   const streaming = isStreaming(transcript)
   return {
     id: session.sessionId,
-    projectId: `ws:${session.workspace}`,
+    projectId: session.repositoryScope === "none" ? "scope:none" : `ws:${session.workspace ?? ""}`,
     title: threadLabel(session.title),
     updated: relativeTime(session.lastActivity),
     // Injected notices are not something a human said, so they never stand in
@@ -414,7 +414,7 @@ export function buildActiveThread(
     status: streaming
       ? { kind: "working", label: "" }
       : { kind: "idle", ago: relativeTime(session.lastActivity) },
-    branch: workspaceName(session.workspace),
+    branch: session.repositoryScope === "none" ? "No repository" : workspaceName(session.workspace),
     messages,
   }
 }
