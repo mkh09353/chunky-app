@@ -337,6 +337,9 @@ export function ZooWorkspace({
       selectedId={selectedId}
       onSelectIdea={(idea: ZooIdea) => setSelectedId(`idea:${idea.id}`)}
       onSelectItem={(item: ZooItem) => setSelectedId(`item:${item.id}`)}
+      onStartIdeaJam={(idea) => void startCardJam(entryForIdea(idea, insights))}
+      onStartItemJam={(item) => void startCardJam(entryForItem(item, ideas, insights))}
+      actionBusyId={cardActionBusy}
     />
   ) : view === "sources" ? (
     <SourcesView

@@ -6,8 +6,8 @@ import { expect, describe, it } from "bun:test"
 import { renderToStaticMarkup } from "react-dom/server"
 import { TooltipProvider } from "../ui/tooltip"
 import { ZooWorkspace } from "./ZooWorkspace"
-import { InboxView } from "./InboxView"
-import { BoardView } from "./BoardView"
+import { InboxView, invokeInboxJam } from "./InboxView"
+import { BoardView, invokeBoardJam } from "./BoardView"
 import { DetailPane } from "./DetailPane"
 import { IDLE_RUNS, SourcesView } from "./SourcesView"
 import { buildInbox } from "~/lib/zooInbox"
@@ -143,6 +143,45 @@ describe("Inbox decision cards", () => {
   it("offers synthesis on signals nothing cites yet", () => {
     expect(html).toContain("1 fresh signal with nothing proposed yet")
     expect(html).toContain("Synthesize ideas")
+  })
+
+  it("gives an ordinary proposed idea a direct Jam action without selecting or promoting it", () => {
+    const ideaEntry = entries.find((entry) => entry.kind === "idea" && entry.idea?.status === "proposed")!
+    const direct = renderToStaticMarkup(<TooltipProvider><InboxView entries={[ideaEntry]} inFlight={[]} selectedId={null} onSelect={() => {}} context={{ repoId: "r-1", baseUrl: "http://chunky" }} areas={areas} showAreas={false} onRefresh={async () => {}} onSetAside={() => {}} loading={false} onStartJam={() => {}} /></TooltipProvider>)
+    expect(direct).toContain("Go — promote it")
+    expect(direct).toContain("Jam")
+    const calls = { jammed: "", selected: false, prevented: 0, stopped: 0 }
+    invokeInboxJam({ preventDefault: () => { calls.prevented++ }, stopPropagation: () => { calls.stopped++ } }, ideaEntry, (entry) => { calls.jammed = entry.idea?.id ?? "" })
+    expect(calls.jammed).toBe("d-2"); expect(calls.selected).toBe(false); expect(ideaEntry.idea?.status).toBe("proposed"); expect(calls.prevented).toBe(1); expect(calls.stopped).toBe(1)
+  })
+
+  it("gives an ordinary item a direct Jam action without selecting or advancing it", () => {
+    const itemEntry = entries.find((entry) => entry.kind === "item")!
+    const direct = renderToStaticMarkup(<TooltipProvider><InboxView entries={[itemEntry]} inFlight={[]} selectedId={null} onSelect={() => {}} context={{ repoId: "r-1", baseUrl: "http://chunky" }} areas={areas} showAreas={false} onRefresh={async () => {}} onSetAside={() => {}} loading={false} onStartJam={() => {}} /></TooltipProvider>)
+    expect(direct).toContain("Go — approve")
+    expect(direct).toContain("Jam")
+    const calls = { jammed: "", selected: false }
+    invokeInboxJam({ preventDefault: () => {}, stopPropagation: () => {} }, itemEntry, (entry) => { calls.jammed = entry.item?.id ?? "" })
+    expect(calls.jammed).toBe("t-1"); expect(calls.selected).toBe(false); expect(itemEntry.item?.stage).toBe("decision")
+  })
+})
+
+describe("Board direct Jam actions", () => {
+  it("offers proposed ideas a direct Jam callback without selecting or promoting", () => {
+    const idea = ideas.find((entry) => entry.status === "proposed")!
+    const html = renderToStaticMarkup(<TooltipProvider><BoardView ideas={ideas} items={items} areas={areas} showAreas selectedId={null} onSelectIdea={() => {}} onSelectItem={() => {}} onStartIdeaJam={() => {}} onStartItemJam={() => {}} /></TooltipProvider>)
+    expect(html).toContain("Move the export button")
+    expect((html.match(/Jam/g) ?? []).length).toBe(2)
+    const calls = { jammed: "", selected: false, stopped: 0 }
+    invokeBoardJam({ preventDefault: () => {}, stopPropagation: () => { calls.stopped++ } }, idea, (target) => { calls.jammed = target.id })
+    expect(calls.jammed).toBe("d-2"); expect(calls.selected).toBe(false); expect(idea.status).toBe("proposed"); expect(calls.stopped).toBe(1)
+  })
+
+  it("offers items a direct Jam callback without selecting or advancing", () => {
+    const item = items[0]!
+    const calls = { jammed: "", selected: false, prevented: 0 }
+    invokeBoardJam({ preventDefault: () => { calls.prevented++ }, stopPropagation: () => {} }, item, (target) => { calls.jammed = target.id })
+    expect(calls.jammed).toBe("t-1"); expect(calls.selected).toBe(false); expect(item.stage).toBe("decision"); expect(calls.prevented).toBe(1)
   })
 })
 

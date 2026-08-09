@@ -1,17 +1,18 @@
 // The Board: the pipeline at a glance.
 //
-// Read-only on purpose — decisions belong in the Inbox. This is where the user
-// checks what became of everything: proposed ideas on the left, then the items
-// they became, stage by stage. Selecting anything opens it in the detail pane.
+// Pipeline decisions still belong in the Inbox. The Board adds only the
+// non-disposition Jam action; selecting anything opens it in the detail pane.
 
-import { LayoutGrid } from "lucide-react"
-import type { ReactNode } from "react"
+import { LayoutGrid, LoaderCircle, MessageSquareMore } from "lucide-react"
+import type { MouseEvent, ReactNode } from "react"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { relativeTime } from "~/lib/format"
 import { ITEM_STAGES, type ZooArea, type ZooIdea, type ZooItem, type ZooItemStage } from "~/lib/zoo"
 import { areaName } from "~/lib/zooAreas"
 import { itemsByStage } from "~/lib/zooInbox"
 import { AreaBadge } from "./AreaSwitcher"
+import { Button } from "../ui/button"
 import { Badge, EmptyState, IDEA_TYPE_LABEL, IDEA_TYPE_TONE, STAGE_LABEL, STAGE_TONE, ViewHeader } from "./parts"
 
 function Column({
@@ -41,6 +42,8 @@ function Card({
   area,
   selected,
   onSelect,
+  onJam,
+  jamBusy,
 }: {
   title: string
   meta: string
@@ -48,29 +51,49 @@ function Card({
   area?: string | null
   selected: boolean
   onSelect: () => void
+  onJam?: (event: MouseEvent<HTMLButtonElement>) => void
+  jamBusy?: boolean
 }) {
   return (
     <li className="min-w-0">
-      <button
-        type="button"
-        onClick={onSelect}
-        aria-pressed={selected}
+      <article
         className={cn(
-          "flex w-full min-w-0 cursor-pointer flex-col gap-1.5 rounded-xl border bg-card/60 px-3 py-2 text-left",
+          "flex min-w-0 flex-col rounded-xl border bg-card/60",
           selected ? "border-primary/50 ring-1 ring-primary/20" : "border-border/70 hover:border-border",
         )}
       >
-        <span className="min-w-0 break-words font-medium text-[12.5px] text-foreground leading-snug">
-          {title}
-        </span>
-        <span className="flex min-w-0 flex-wrap items-center gap-1.5">
-          {badge}
-          {area && <AreaBadge name={area} />}
-          <span className="truncate text-[11px] text-muted-foreground">{meta}</span>
-        </span>
-      </button>
+        <Button
+          variant="ghost"
+          onClick={onSelect}
+          aria-pressed={selected}
+          className={`${NO_DRAG_REGION} h-auto w-full min-w-0 flex-col items-start gap-1.5 whitespace-normal rounded-xl border-0 px-3 py-2 text-left shadow-none`}
+        >
+          <span className="min-w-0 break-words font-medium text-[12.5px] text-foreground leading-snug">
+            {title}
+          </span>
+          <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+            {badge}
+            {area && <AreaBadge name={area} />}
+            <span className="truncate text-[11px] text-muted-foreground">{meta}</span>
+          </span>
+        </Button>
+        {onJam && (
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-border/60 border-t px-3 py-2">
+            <Button className={NO_DRAG_REGION} size="sm" variant="outline" disabled={jamBusy} onClick={onJam}>
+              {jamBusy ? <LoaderCircle className="animate-spin" /> : <MessageSquareMore />} Jam
+            </Button>
+          </div>
+        )}
+      </article>
     </li>
   )
+}
+
+/** Keep a card's direct action independent from its row-selection gesture. */
+export function invokeBoardJam<T>(event: Pick<MouseEvent<HTMLButtonElement>, "preventDefault" | "stopPropagation">, target: T, onJam: (target: T) => void): void {
+  event.preventDefault()
+  event.stopPropagation()
+  onJam(target)
 }
 
 export function BoardView({
@@ -81,6 +104,9 @@ export function BoardView({
   selectedId,
   onSelectIdea,
   onSelectItem,
+  onStartIdeaJam,
+  onStartItemJam,
+  actionBusyId,
 }: {
   ideas: readonly ZooIdea[]
   items: readonly ZooItem[]
@@ -90,6 +116,9 @@ export function BoardView({
   selectedId: string | null
   onSelectIdea: (idea: ZooIdea) => void
   onSelectItem: (item: ZooItem) => void
+  onStartIdeaJam?: (idea: ZooIdea) => void
+  onStartItemJam?: (item: ZooItem) => void
+  actionBusyId?: string | null
 }) {
   const proposed = ideas.filter((idea) => idea.status === "proposed")
   const columns = itemsByStage(items, ITEM_STAGES as readonly ZooItemStage[])
@@ -119,6 +148,8 @@ export function BoardView({
                 area={showAreas ? areaName(areas, idea.areaId) : null}
                 selected={selectedId === `idea:${idea.id}`}
                 onSelect={() => onSelectIdea(idea)}
+                onJam={onStartIdeaJam ? (event) => invokeBoardJam(event, idea, onStartIdeaJam) : undefined}
+                jamBusy={actionBusyId === `idea:${idea.id}`}
               />
             ))}
           </Column>
@@ -133,6 +164,8 @@ export function BoardView({
                   area={showAreas ? areaName(areas, item.areaId) : null}
                   selected={selectedId === `item:${item.id}`}
                   onSelect={() => onSelectItem(item)}
+                  onJam={onStartItemJam ? (event) => invokeBoardJam(event, item, onStartItemJam) : undefined}
+                  jamBusy={actionBusyId === `item:${item.id}`}
                 />
               ))}
             </Column>

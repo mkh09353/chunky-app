@@ -9,6 +9,7 @@
 import { CheckCircle2, FlaskConical, Inbox, LoaderCircle, MessageSquare, MessageSquareMore, Sparkles } from "lucide-react"
 import { useState } from "react"
 import { cn } from "~/lib/cn"
+import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { relativeTime } from "~/lib/format"
 import { decide, goBlockedReason, noteTarget, type DecisionContext } from "~/lib/zooDecisions"
 import type { InboxEntry } from "~/lib/zooInbox"
@@ -33,6 +34,13 @@ import {
 /** Evidence shown on the card itself — the rest waits in the detail pane. */
 const INLINE_INSIGHTS = 2
 const INLINE_QUOTES = 1
+
+/** A Jam action is not a verdict and must not bubble into card selection. */
+export function invokeInboxJam(event: { preventDefault(): void; stopPropagation(): void }, entry: InboxEntry, onStartJam: (entry: InboxEntry) => void): void {
+  event.preventDefault()
+  event.stopPropagation()
+  onStartJam(entry)
+}
 
 export function InboxView({
   entries,
@@ -111,11 +119,11 @@ export function InboxView({
             selected ? "border-primary/50 ring-1 ring-primary/20" : "border-border/70",
           )}
         >
-          <button
-            type="button"
+          <Button
+            variant="ghost"
             onClick={() => onSelect(entry.id)}
             aria-pressed={selected}
-            className="flex w-full min-w-0 cursor-pointer flex-col gap-1.5 rounded-t-2xl px-4 pt-3.5 pb-2 text-left"
+            className={`${NO_DRAG_REGION} h-auto w-full min-w-0 flex-col items-start gap-1.5 whitespace-normal rounded-t-2xl border-0 px-4 pt-3.5 pb-2 text-left shadow-none`}
           >
             <span className="flex min-w-0 flex-wrap items-center gap-1.5">
               {entry.item && (
@@ -139,7 +147,7 @@ export function InboxView({
             <span className="min-w-0 whitespace-pre-wrap break-words text-[12.5px] text-muted-foreground leading-relaxed">
               {entry.why}
             </span>
-          </button>
+          </Button>
 
           {entry.insights.length > 0 && (
             <div className="flex min-w-0 flex-col gap-2 px-4 pb-2">
@@ -154,14 +162,15 @@ export function InboxView({
                 </div>
               ))}
               {entry.insights.length > INLINE_INSIGHTS && (
-                <button
-                  type="button"
+                <Button
+                  size="sm"
+                  variant="ghost"
                   onClick={() => onSelect(entry.id)}
-                  className="cursor-pointer self-start text-[11.5px] text-muted-foreground hover:text-foreground"
+                  className={`${NO_DRAG_REGION} h-auto self-start px-0 text-[11.5px] text-muted-foreground hover:text-foreground`}
                 >
                   +{entry.insights.length - INLINE_INSIGHTS} more insight
                   {entry.insights.length - INLINE_INSIGHTS === 1 ? "" : "s"} in the detail pane
-                </button>
+                </Button>
               )}
             </div>
           )}
@@ -170,6 +179,7 @@ export function InboxView({
             {signals ? (
               <>
                 <Button
+                  className={NO_DRAG_REGION}
                   size="sm"
                   disabled={synthesizing || !onSynthesize}
                   title={onSynthesize ? undefined : "Runs need a connected Chunky server"}
@@ -179,17 +189,18 @@ export function InboxView({
                   Synthesize ideas
                 </Button>
                 {entry.idea && (
-                  <Button size="sm" variant="outline" disabled={busyId !== null || actionBusyId === entry.id || !onStartJam} onClick={() => onStartJam?.(entry)}>
+                  <Button className={NO_DRAG_REGION} size="sm" variant="outline" disabled={busyId !== null || actionBusyId === entry.id || !onStartJam} onClick={(event) => onStartJam && invokeInboxJam(event, entry, onStartJam)}>
                     {actionBusyId === entry.id ? <LoaderCircle className="animate-spin" /> : <MessageSquareMore />} Jam
                   </Button>
                 )}
-                <Button size="sm" variant="outline" onClick={() => onSetAside(entry.id)}>
+                <Button className={NO_DRAG_REGION} size="sm" variant="outline" onClick={() => onSetAside(entry.id)}>
                   Not now
                 </Button>
               </>
             ) : (
               <>
                 <Button
+                  className={NO_DRAG_REGION}
                   size="sm"
                   disabled={busyId !== null || !!blocked}
                   title={blocked ?? undefined}
@@ -199,6 +210,7 @@ export function InboxView({
                   {entry.kind === "idea" ? "Go — promote it" : "Go — approve"}
                 </Button>
                 <Button
+                  className={NO_DRAG_REGION}
                   size="sm"
                   variant="outline"
                   disabled={busyId !== null}
@@ -207,6 +219,7 @@ export function InboxView({
                   Not now
                 </Button>
                 <Button
+                  className={NO_DRAG_REGION}
                   size="sm"
                   variant="ghost"
                   disabled={busyId !== null}
@@ -219,12 +232,21 @@ export function InboxView({
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="ml-auto"
+                    className={`${NO_DRAG_REGION} ml-auto`}
                     onClick={() => onOpenSession(sessionId)}
                   >
                     Open session
                   </Button>
                 )}
+                <Button
+                  className={NO_DRAG_REGION}
+                  size="sm"
+                  variant="outline"
+                  disabled={busyId !== null || actionBusyId === entry.id || !onStartJam}
+                  onClick={(event) => onStartJam && invokeInboxJam(event, entry, onStartJam)}
+                >
+                  {actionBusyId === entry.id ? <LoaderCircle className="animate-spin" /> : <MessageSquareMore />} Jam
+                </Button>
               </>
             )}
             {blocked && <span className="text-[11.5px] text-muted-foreground">{blocked}</span>}
@@ -242,11 +264,12 @@ export function InboxView({
                     ? "Anything the research session should know — sent when you hit Go."
                     : "What should change? This goes to the session and onto the decision log."
                 }
-                className="min-h-16 rounded-lg border border-input p-2 text-[12.5px] focus:border-ring"
+                className={`${NO_DRAG_REGION} min-h-16 rounded-lg border border-input p-2 text-[12.5px] focus:border-ring`}
               />
               <div className="flex flex-wrap gap-1.5">
                 {target === "session" && (
                   <Button
+                    className={NO_DRAG_REGION}
                     size="sm"
                     disabled={busyId !== null || !noteValue.trim()}
                     onClick={() => void run(entry, "note")}
@@ -318,12 +341,12 @@ export function InboxView({
                       {relativeTime(item.updatedAt)}
                     </span>
                     {sessionId && onOpenSession && (
-                      <Button size="sm" variant="ghost" onClick={() => onOpenSession(sessionId)}>
+                      <Button className={NO_DRAG_REGION} size="sm" variant="ghost" onClick={() => onOpenSession(sessionId)}>
                         Open
                       </Button>
                     )}
                     {!sessionId && item.stage === "research" && (
-                      <Button size="sm" variant="outline" disabled={!onStartResearch || actionBusyId === `item:${item.id}`} onClick={() => onStartResearch?.(fullEntry)}>
+                      <Button className={NO_DRAG_REGION} size="sm" variant="outline" disabled={!onStartResearch || actionBusyId === `item:${item.id}`} onClick={() => onStartResearch?.(fullEntry)}>
                         {actionBusyId === `item:${item.id}` ? <LoaderCircle className="animate-spin" /> : <FlaskConical />} Start research
                       </Button>
                     )}
