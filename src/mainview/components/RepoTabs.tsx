@@ -38,6 +38,7 @@ import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
 import { joinPath, parseGitUrl } from "~/lib/cloneRepo"
 import { scmClone } from "~/lib/git"
 import { nativeRpcAvailable } from "~/lib/rpc"
+import { WorkingSpinner } from "./ui/status-indicator"
 import { Button } from "./ui/button"
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover"
 import {
@@ -81,6 +82,7 @@ export function RepoTabs({
   repos,
   activeId,
   unreadRepoIds,
+  workingRepoIds,
   onSelect,
   onAdd,
   onRemove,
@@ -96,6 +98,9 @@ export function RepoTabs({
   repos: Repo[]
   activeId: string | null
   unreadRepoIds?: Set<string>
+  /** Repositories with a session still working (root run or any delegate).
+   *  Takes precedence over the unread dot: work in flight is the louder news. */
+  workingRepoIds?: Set<string>
   onSelect: (id: string) => void
   onAdd: (path: string) => Promise<void>
   onRemove: (id: string) => void | Promise<void>
@@ -680,9 +685,11 @@ export function RepoTabs({
                   <Folder className="size-3.5 shrink-0 opacity-80" />
                 )}
                 <span className="truncate">{r.name}</span>
-                {unreadRepoIds?.has(r.id) && (
+                {workingRepoIds?.has(r.id) ? (
+                  <WorkingSpinner className="size-2.5" aria-label="Working" />
+                ) : unreadRepoIds?.has(r.id) ? (
                   <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="unread completion" />
-                )}
+                ) : null}
               </button>
               {repos.length > 1 && (
                 <DropdownMenu>

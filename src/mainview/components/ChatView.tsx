@@ -50,6 +50,7 @@ export function ChatTopBar({
   repos,
   activeRepoId,
   unreadRepoIds,
+  workingRepoIds,
   onSelectRepo,
   onAddRepo,
   onRemoveRepo,
@@ -74,6 +75,8 @@ export function ChatTopBar({
   repos?: Repo[]
   activeRepoId?: string | null
   unreadRepoIds?: Set<string>
+  /** Repositories with a session still working (root run or any delegate). */
+  workingRepoIds?: Set<string>
   onSelectRepo?: (id: string) => void
   onAddRepo?: (path: string) => Promise<void>
   onRemoveRepo?: (id: string) => void | Promise<void>
@@ -114,6 +117,7 @@ export function ChatTopBar({
           repos={repos}
           activeId={activeRepoId ?? null}
           unreadRepoIds={unreadRepoIds}
+          workingRepoIds={workingRepoIds}
           onSelect={onSelectRepo}
           onAdd={onAddRepo}
           onRemove={onRemoveRepo}

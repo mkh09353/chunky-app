@@ -29,6 +29,7 @@ import { cn } from "~/lib/cn"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
+import { StatusGlyph, type StatusGlyphState } from "./ui/status-indicator"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 import {
   DropdownMenu,
@@ -36,24 +37,22 @@ import {
   DropdownMenuItem,
 } from "./ui/dropdown-menu"
 
-/** The row's whole status, in six pixels.
+/** The row's whole status, in one glyph.
  *
- *  A running session pulses; a finished one the reader hasn't looked at yet
- *  keeps a solid dot until they select it (the unread rule lives in App: set on
- *  running→idle while unselected or manually from this row's context menu,
- *  then acknowledged by clicking the row — this only paints it).
+ *  A session with work in flight — its own turn OR any delegate (sidekick,
+ *  spawned subagent, workflow leg) — spins; a finished one the reader hasn't
+ *  looked at yet keeps a solid dot until they select it (the unread rule lives
+ *  in App: set on running→idle while unselected or manually from this row's
+ *  context menu, then acknowledged by clicking the row — this only paints it).
  *  Everything settled and seen shows nothing at all, which is what lets a long
  *  list read as titles instead of badges.
  *
- *  The slot is always rendered so titles stay aligned down the column. */
+ *  The slot is always rendered, at the same size in every state, so titles stay
+ *  aligned down the column (see components/ui/status-indicator). */
 function StatusDot({ status }: { status: ThreadStatus }) {
-  const dot =
-    status.kind === "working" ? (
-      <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Working" />
-    ) : status.kind === "done" && status.unread ? (
-      <span className="size-1.5 rounded-full bg-primary" aria-label="Unread" />
-    ) : null
-  return <span className="flex size-1.5 shrink-0 items-center justify-center">{dot}</span>
+  const state: StatusGlyphState =
+    status.kind === "working" ? "working" : status.kind === "done" && status.unread ? "unread" : "idle"
+  return <StatusGlyph state={state} />
 }
 
 /** Header for one worktree/branch group in the working list.
@@ -205,7 +204,7 @@ function ThreadRow({
           </span>
         </div>
         {showProject && (
-          <span className="flex min-w-0 items-center gap-1.5 ps-[14px] text-[11px] text-muted-foreground/60">
+          <span className="flex min-w-0 items-center gap-1.5 ps-5 text-[11px] text-muted-foreground/60">
             <RepoMark mark={project?.mark ?? "?"} />
             <span className="min-w-0 truncate">
               {project ? `${project.owner}/${project.name}` : "unknown"}

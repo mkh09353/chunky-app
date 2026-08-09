@@ -15,6 +15,7 @@ import { House, Loader2 } from "lucide-react"
 import { useMemo } from "react"
 import { cn } from "~/lib/cn"
 import { relativeTime, threadLabel } from "~/lib/format"
+import { WorkingSpinner } from "./ui/status-indicator"
 import {
   homeFeedCounts,
   type FeedRepo,
@@ -247,12 +248,7 @@ export function HomeView({
                     key={row.sessionId}
                     row={row}
                     accent={accentOf(row.repoId)}
-                    glyph={
-                      <span
-                        aria-label="Working"
-                        className="size-1.5 animate-pulse rounded-full bg-primary"
-                      />
-                    }
+                    glyph={<WorkingSpinner aria-label="Working" />}
                     trailing={
                       row.elapsedMs == null ? null : (
                         <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">

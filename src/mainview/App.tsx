@@ -677,7 +677,17 @@ export function App() {
       const t = sessionToThread(s, {
         // `undefined` hands the row back to its own summary — which is what a
         // transcript still catching up cannot speak for.
-        liveBusy: s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : undefined,
+        //
+        // For the attached session the live tree is the FASTER answer, but not
+        // the complete one: the server counts work the transcript may never see
+        // as a thread (a detached spawn outliving the turn, a delegate whose
+        // `thread.status` we missed). So the two are OR-ed — either source
+        // saying "still working" keeps the row spinning, and the row settles
+        // only when both agree it is done.
+        liveBusy:
+          s.sessionId === sessionId && !catchingUp
+            ? !isTreeIdle(transcript) || isSessionBusy(s)
+            : undefined,
         isActive: s.sessionId === sessionId,
         modelName: modelSelectionToUi(rowSel, modelRows).name,
         unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
@@ -711,8 +721,12 @@ export function App() {
     const out = new Set<string>()
     if (!live) return out
     for (const s of sessions) {
+      // Same OR as the `threads` memo above: the shelf must not file a thread
+      // into history while a detached delegate is still working on it.
       const busy =
-        s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : isSessionBusy(s)
+        s.sessionId === sessionId && !catchingUp
+          ? !isTreeIdle(transcript) || isSessionBusy(s)
+          : isSessionBusy(s)
       const shelf = classifyShelf({
         busy,
         unread: unreadDone.has(s.sessionId) && s.sessionId !== sessionId,
@@ -758,6 +772,23 @@ export function App() {
     }
     return out
   }, [activeRepoId, sessions, unreadDone, unreadRepoIds, sessionId, settledThreadIds])
+
+  /** Which repository tabs have work in flight.
+   *
+   *  Read off the same cross-repo rows the far-left overview uses, through the
+   *  shared `isSessionBusy` — so a tab spins for a sidekick or a detached spawn
+   *  exactly as its sidebar row does, not only for a root turn. Working beats
+   *  unread on the tab: "something is happening here" is the more urgent of the
+   *  two, and a repo that is still running will produce its own unread mark
+   *  when it finishes. */
+  const repoTabWorkingIds = useMemo(() => {
+    const out = new Set<string>()
+    if (!live) return out
+    for (const [repoId, rows] of repoRows) {
+      if (rows.some((s) => isSessionBusy(s))) out.add(repoId)
+    }
+    return out
+  }, [live, repoRows])
 
   // Which optimistic rows are still worth showing, DERIVED from the transcript
   // that is actually on screen. Deriving it (rather than deleting the row when
@@ -1285,11 +1316,16 @@ export function App() {
       sessions.map((s) => ({
         key: s.sessionId,
         sessionId: s.sessionId,
-        // The attached session's live transcript is authoritative — EXCEPT
-        // while replay is in flight, when it is last-seen state and the
-        // server's own summary is the only honest answer.
+        // The attached session's live transcript is the fastest signal, OR-ed
+        // with the server's own `busy` so delegate work it cannot see still
+        // counts — EXCEPT while replay is in flight, when the transcript is
+        // last-seen state and the summary is the only honest answer.
+        // The completion rules themselves are unchanged: this only feeds the
+        // same delegate-inclusive definition of "running" the other repos use.
         running:
-          s.sessionId === sessionId && !catchingUp ? !isTreeIdle(transcript) : isSessionBusy(s),
+          s.sessionId === sessionId && !catchingUp
+            ? !isTreeIdle(transcript) || isSessionBusy(s)
+            : isSessionBusy(s),
       })),
       Date.now(),
       MIN_COMPLETION_NOTIFY_MS,
@@ -1846,12 +1882,14 @@ export function App() {
     setPrUnsupported(false)
   }, [config?.baseUrl])
 
-  /** Is the session linked to a PR card still working? The attached session's
-   *  live transcript is authoritative; everything else uses the polled summary. */
+  /** Is the session linked to a PR card still working? The attached session
+   *  adds its live transcript to the server's `busy`; everything else uses the
+   *  polled summary alone. */
   const isPrSessionBusy = useCallback(
     (id: string) => {
-      if (id === sessionId && !catchingUp) return !isTreeIdle(transcript)
       const summary = sessions.find((s) => s.sessionId === id)
+      // Attached: the live tree OR the server's `busy` (see the `threads` memo).
+      if (id === sessionId && !catchingUp) return !isTreeIdle(transcript) || isSessionBusy(summary)
       return isSessionBusy(summary)
     },
     [sessionId, transcript, sessions, catchingUp],
@@ -2910,6 +2948,7 @@ export function App() {
             repos={live ? repos : undefined}
             activeRepoId={activeRepoId}
             unreadRepoIds={repoTabUnreadIds}
+            workingRepoIds={repoTabWorkingIds}
             onSelectRepo={(id) => void handleSelectRepo(id)}
             onAddRepo={handleAddRepo}
             onRemoveRepo={(id) => void handleRemoveRepo(id)}

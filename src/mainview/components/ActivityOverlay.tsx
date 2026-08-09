@@ -20,6 +20,7 @@ import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
 import { relativeTime, threadLabel } from "~/lib/format"
 import { HoverIntent } from "~/lib/hoverIntent"
+import { WorkingSpinner } from "./ui/status-indicator"
 import { activityCounts, type ActivityRow, type RepoActivity } from "~/lib/repoActivity"
 
 /** Clear of the traffic lights, which own the top-left corner of the window. */
@@ -33,14 +34,17 @@ const OPEN_DELAY_MS = 200
  *  brief overshoot past its edge) does not close it mid-reach. */
 const CLOSE_DELAY_MS = 180
 
-/** The same six pixels the sidebar uses: pulsing = working, solid = unread. */
+/** The same glyph the sidebar uses: spinner = working, solid dot = unread. */
 function ActivityDot({ row }: { row: ActivityRow }) {
-  const dot = row.busy ? (
-    <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-label="Working" />
-  ) : row.unread ? (
-    <span className="size-1.5 rounded-full bg-primary" aria-label="Just finished" />
-  ) : null
-  return <span className="flex size-1.5 shrink-0 items-center justify-center">{dot}</span>
+  return (
+    <span className="flex size-3 shrink-0 items-center justify-center">
+      {row.busy ? (
+        <WorkingSpinner aria-label="Working" />
+      ) : row.unread ? (
+        <span className="size-1.5 rounded-full bg-primary" aria-label="Just finished" />
+      ) : null}
+    </span>
+  )
 }
 
 function ActivityRowButton({
