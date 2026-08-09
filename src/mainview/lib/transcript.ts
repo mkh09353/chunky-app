@@ -381,6 +381,11 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
       // into a rendered transcript item, whatever `default` does later.
       return state
 
+    case "app.request_api_key":
+      // Likewise live-only, and it must stay that way: rendering it would put
+      // a credential prompt (and an invitation to type a key) in history.
+      return state
+
     case "background.changed":
       return { ...state, background: { tasks: ev.tasks, monitors: ev.monitors } }
 

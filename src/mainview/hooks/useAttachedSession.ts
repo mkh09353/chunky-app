@@ -33,6 +33,7 @@ import { TranscriptCoalescer } from "../lib/replayCoalescer"
 import { ReplayReconciler } from "../lib/replayReconciler"
 import { isIntentionalAbort, reconnectDelay, sleep } from "../lib/reconnect"
 import { reresolveConnection, shouldReresolve } from "../lib/reresolve"
+import { consumeApiKeyRequest } from "../lib/apiKeyRequest"
 import { consumeAppOpenUrl } from "../lib/browserNav"
 import { rememberLastSession } from "../lib/desktopState"
 import type { SessionSummary } from "../lib/api"
@@ -297,6 +298,10 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         // and never reduced, so it cannot become a rendered transcript item.
         // Only http(s) actually opens the pane — openInAppBrowser owns that rule.
         if (consumeAppOpenUrl(ev)) { rememberEvent(ev); return }
+        // The agent asking us to collect a provider API key. Live-only for the
+        // same reason and then some: claimed here so neither the request nor
+        // anything it leads to can become a transcript item.
+        if (consumeApiKeyRequest(ev)) { rememberEvent(ev); return }
         rememberEvent(ev, live.push(ev))
         return
       }

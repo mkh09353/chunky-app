@@ -31,6 +31,7 @@ import { BrowserPane } from "./components/BrowserPane"
 import { FactoryPane } from "./components/FactoryPane"
 import { RepoFilesPane } from "./components/RepoFilesPane"
 import { ExternalLinkMenu } from "./components/ExternalLinkMenu"
+import { ApiKeyRequestHost } from "./components/ApiKeyDialog"
 import { ConfirmHost } from "./components/ConfirmDialog"
 import { confirm } from "./lib/confirm"
 import { FileLinkProvider } from "./lib/fileLinkContext"
@@ -305,9 +306,10 @@ function providerSetupBrief(providerName: string, baseURL?: string): string {
     `I want to add ${providerName} as a model provider in Chunky.${where} ` +
     `Work out how ${providerName} exposes an OpenAI-compatible API — the base URL and chat-completions route — ` +
     `and whether it authenticates with an API key or with OAuth, then tell me in a sentence or two what you found. ` +
-    `Use the tools and settings you have (for example manage_models or the Chunky server configuration) to add it where you can, ` +
-    `and otherwise walk me through getting credentials. ` +
-    `Don't ask me to paste an API key into this chat — send me to Settings → Providers → + Custom to enter it.`
+    `Register it with the manage_providers tool, then call request_api_key so the app can collect the key from me securely, ` +
+    `and finish with a manage_providers test to confirm the credential works. ` +
+    `Never ask me to type or paste the key into this chat — request_api_key opens a secure dialog in the app for that. ` +
+    `If you need me to fetch the key from ${providerName} first, tell me where to get it and then request it.`
   )
 }
 
@@ -3111,6 +3113,9 @@ export function App() {
 
         {/* One host for every in-app confirmation (lib/confirm.ts). */}
         <ConfirmHost />
+        {/* The agent asking for a provider API key (lib/apiKeyRequest.ts). At
+            the root because the user is looking at the chat when it arrives. */}
+        <ApiKeyRequestHost />
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} onRun={runAction} actions={paletteActions} />
         <SettingsCenter
           open={settingsOpen}

@@ -18,6 +18,8 @@ import type { ModelRow, ModelSelection } from "./api"
 export type {
   AuthLogoutResult,
   AuthTestResult,
+  ProviderKeyRequest,
+  ProviderKeyResponse,
   CacheGuardResponse,
   LoginInitiation,
   ManagedSkill,
@@ -41,6 +43,7 @@ import { ROUTES } from "@chunky/protocol"
 import type {
   AuthLogoutResult,
   AuthTestResult,
+  ProviderKeyResponse,
   CacheGuardResponse,
   LoginInitiation,
   ManageSkillReposRequest,
@@ -226,10 +229,18 @@ export interface ProviderTestResult extends AuthTestResult {
   unsupported?: boolean
 }
 
+/** Same graceful shape for the key hand-off: a too-old server/bundle reports
+ *  `unsupported` rather than looking like a rejected key. */
+export interface ProviderKeyResult extends ProviderKeyResponse {
+  unsupported?: boolean
+}
+
 export const UNSUPPORTED_TEST =
   "This Chunky server does not support testing a provider connection yet. Update the server to use this."
 export const UNSUPPORTED_LOGOUT =
   "This Chunky server does not support disconnecting a provider yet. Update the server to use this."
+export const UNSUPPORTED_PROVIDER_KEY =
+  "This Chunky server does not support collecting a provider API key yet. Update the server to use this."
 
 /**
  * The slice of ROUTES the auth calls need, with every member optional and
@@ -244,6 +255,7 @@ export const UNSUPPORTED_LOGOUT =
 export interface AuthRouteTable {
   authTest?: unknown
   authLogout?: unknown
+  providerKey?: unknown
 }
 
 /**
@@ -259,6 +271,7 @@ export interface AuthRouteTable {
 interface RequiredAuthRoutes {
   authTest: (provider: string) => string
   authLogout: (provider: string) => string
+  providerKey: (provider: string) => string
 }
 type Assert<T extends true> = T
 export type AssertAuthRoutesPresent = Assert<
@@ -289,6 +302,11 @@ export function authTestRoute(routes: AuthRouteTable, provider: string): string 
 /** POST path for removing a stored credential, or null when unavailable. */
 export function authLogoutRoute(routes: AuthRouteTable, provider: string): string | null {
   return routeFor(routes, "authLogout", provider)
+}
+
+/** POST path for handing the server a provider key, or null when unavailable. */
+export function providerKeyRoute(routes: AuthRouteTable, provider: string): string | null {
+  return routeFor(routes, "providerKey", provider)
 }
 
 /**
@@ -333,6 +351,48 @@ export async function logoutProvider(
     if (isMissingRoute(err)) throw new Error(UNSUPPORTED_LOGOUT)
     throw err
   }
+}
+
+/**
+ * Answer an agent's `app.request_api_key`: hand the server the key the user
+ * typed, or cancel the request by answering with no key at all.
+ *
+ * The secret goes straight from the dialog's state into this POST body — never
+ * a URL, a log line, a transcript or storage — and the server never returns it.
+ *
+ * Never throws: the dialog renders every outcome inline, including "this bundle
+ * or server has no such route", which reuses the graceful `unsupported` result
+ * the auth preflight already established. `routes` is injectable so the
+ * missing-route path is testable without mutating the canonical ROUTES.
+ */
+export async function submitProviderKey(
+  provider: string,
+  input: { requestId?: string; key?: string },
+  routes: AuthRouteTable = ROUTES,
+): Promise<ProviderKeyResult> {
+  const path = providerKeyRoute(routes, provider)
+  if (!path) return { ok: false, unsupported: true, error: UNSUPPORTED_PROVIDER_KEY }
+  const body: { requestId?: string; key?: string } = {}
+  if (input.requestId) body.requestId = input.requestId
+  // An absent/empty key IS the cancel signal, so it is only sent when present.
+  if (input.key) body.key = input.key
+  try {
+    const data = await req<Partial<ProviderKeyResponse>>(path, jsonInit("POST", body))
+    if (data?.ok === true) return { ok: true }
+    return { ok: false, error: data?.error || "The server did not accept that key." }
+  } catch (err) {
+    if (isMissingRoute(err)) return { ok: false, unsupported: true, error: UNSUPPORTED_PROVIDER_KEY }
+    return { ok: false, error: (err as Error).message }
+  }
+}
+
+/** Cancel a pending key request: the same route, answered with no key. */
+export async function cancelProviderKeyRequest(
+  provider: string,
+  requestId: string,
+  routes: AuthRouteTable = ROUTES,
+): Promise<ProviderKeyResult> {
+  return submitProviderKey(provider, { requestId }, routes)
 }
 
 /** Make a provider the active one. */

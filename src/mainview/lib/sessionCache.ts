@@ -7,7 +7,8 @@ export function isPersistedSessionEvent(event: AgentEvent): boolean {
     event.type !== "session.rewound" &&
     event.type !== "background.changed" &&
     event.type !== "mode.applied" &&
-    event.type !== "app.open_url"
+    event.type !== "app.open_url" &&
+    event.type !== "app.request_api_key"
 }
 
 export function rebuildTranscript(events: readonly AgentEvent[]): TranscriptState {
