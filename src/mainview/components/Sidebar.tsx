@@ -465,9 +465,80 @@ export function Sidebar({
           />
         </div>
         <span className="font-semibold text-[15px] tracking-tight">Chunky</span>
-        <span className="rounded-full bg-primary/15 px-1.5 py-0.5 font-medium text-[10px] text-primary">
-          beta
-        </span>
+        <div className="ml-auto flex items-center gap-0.5">
+          {onOpenHome && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={onOpenHome}
+                    aria-pressed={homeActive}
+                    aria-label="Home"
+                    className={cn(
+                      NO_DRAG_REGION,
+                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      homeActive
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  />
+                }
+              >
+                <House className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup>Home · ⌘0</TooltipPopup>
+            </Tooltip>
+          )}
+          {onOpenZoo && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={onOpenZoo}
+                    aria-pressed={zooActive}
+                    aria-label="The Zoo"
+                    className={cn(
+                      NO_DRAG_REGION,
+                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      zooActive
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  />
+                }
+              >
+                <PawPrint className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup>The Zoo</TooltipPopup>
+            </Tooltip>
+          )}
+          {onOpenUsage && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={onOpenUsage}
+                    aria-pressed={usageActive}
+                    aria-label="Usage"
+                    className={cn(
+                      NO_DRAG_REGION,
+                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      usageActive
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  />
+                }
+              >
+                <BarChart3 className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup>Usage</TooltipPopup>
+            </Tooltip>
+          )}
+        </div>
       </div>
 
       {/* Search + compose */}
@@ -489,78 +560,6 @@ export function Sidebar({
             <Kbd className="bg-transparent transition-colors hover:border-ring/40 hover:text-foreground">⌘K</Kbd>
           </button>
         </div>
-        {onOpenHome && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  onClick={onOpenHome}
-                  aria-pressed={homeActive}
-                  aria-label="Home"
-                  className={cn(
-                    NO_DRAG_REGION,
-                    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-                    homeActive
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border bg-background/50 text-muted-foreground hover:border-ring/40 hover:bg-accent hover:text-foreground",
-                  )}
-                />
-              }
-            >
-              <House className="size-4" />
-            </TooltipTrigger>
-            <TooltipPopup>Home · ⌘0</TooltipPopup>
-          </Tooltip>
-        )}
-        {onOpenZoo && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  onClick={onOpenZoo}
-                  aria-pressed={zooActive}
-                  aria-label="The Zoo"
-                  className={cn(
-                    NO_DRAG_REGION,
-                    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-                    zooActive
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border bg-background/50 text-muted-foreground hover:border-ring/40 hover:bg-accent hover:text-foreground",
-                  )}
-                />
-              }
-            >
-              <PawPrint className="size-4" />
-            </TooltipTrigger>
-            <TooltipPopup>The Zoo</TooltipPopup>
-          </Tooltip>
-        )}
-        {onOpenUsage && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  onClick={onOpenUsage}
-                  aria-pressed={usageActive}
-                  aria-label="Usage"
-                  className={cn(
-                    NO_DRAG_REGION,
-                    "flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
-                    usageActive
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border bg-background/50 text-muted-foreground hover:border-ring/40 hover:bg-accent hover:text-foreground",
-                  )}
-                />
-              }
-            >
-              <BarChart3 className="size-4" />
-            </TooltipTrigger>
-            <TooltipPopup>Usage</TooltipPopup>
-          </Tooltip>
-        )}
         <Tooltip>
           <TooltipTrigger
             render={
