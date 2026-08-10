@@ -13,6 +13,7 @@ import type { AreaSelection } from "~/lib/zooAreas"
 import type { ExtractionPhase } from "~/lib/zooExtraction"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
+import type { AreaRepo, CreateAreaResult } from "./AreaSwitcher"
 import { EmptyState, Notice, ViewHeader } from "./parts"
 import { WatchList } from "./WatchList"
 import { XWatchList } from "./XWatchList"
@@ -80,6 +81,8 @@ export function SourcesView({
   xWatchIntervalMinutes,
   xWatchLastSuccessAt,
   onAssignArea,
+  repos = [],
+  onCreateArea,
   onOpenSetup,
 }: {
   status: ZooStatus | null
@@ -104,6 +107,10 @@ export function SourcesView({
   xWatchIntervalMinutes: number
   xWatchLastSuccessAt: number | null
   onAssignArea: (sourceId: string, areaId: string | null) => void
+  /** Registered repositories, for the assignment menus' inline create dialog. */
+  repos?: readonly AreaRepo[]
+  /** Create an area inline; the watch being edited moves into it on success. */
+  onCreateArea?: (name: string, repoPaths: string[]) => Promise<CreateAreaResult>
   onOpenSetup: () => void
 }) {
   const [apiKey, setApiKey] = useState("")
@@ -189,8 +196,10 @@ export function SourcesView({
           baseUrl={baseUrl}
           onRefresh={onRefresh}
           onAssignArea={onAssignArea}
+          repos={repos}
+          {...(onCreateArea ? { onCreateArea } : {})}
         />
-        <XWatchList watches={xWatches} areas={areas} intervalMinutes={xWatchIntervalMinutes} lastSuccessAt={xWatchLastSuccessAt} areaId={areaId} baseUrl={baseUrl} onRefresh={onRefresh} onAssignArea={onAssignArea} />
+        <XWatchList watches={xWatches} areas={areas} intervalMinutes={xWatchIntervalMinutes} lastSuccessAt={xWatchLastSuccessAt} areaId={areaId} baseUrl={baseUrl} onRefresh={onRefresh} onAssignArea={onAssignArea} repos={repos} {...(onCreateArea ? { onCreateArea } : {})} />
 
         {connected.length === 0 ? (
           <EmptyState

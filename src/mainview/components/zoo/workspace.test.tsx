@@ -9,6 +9,7 @@ import { ZooWorkspace } from "./ZooWorkspace"
 import { InboxView, invokeInboxJam } from "./InboxView"
 import { BoardView, invokeBoardJam } from "./BoardView"
 import { DetailPane } from "./DetailPane"
+import { addPaths, createAndAssignArea, togglePath } from "./AreaSwitcher"
 import { IDLE_RUNS, SourcesView } from "./SourcesView"
 import { buildInbox } from "~/lib/zooInbox"
 import type { ZooArea, ZooIdea, ZooInsight, ZooItem } from "~/lib/zoo"
@@ -408,5 +409,39 @@ describe("X Watch section", () => {
     expect(html).toContain("@container/x-watch")
     expect(html).toContain("@min-[32rem]/x-watch:flex-row")
     expect(html).toContain("break-all")
+  })
+})
+
+describe("inline area creation from the assignment menu", () => {
+  it("assigns the row to the area it just created", async () => {
+    const assigned: string[] = []
+    const failure = await createAndAssignArea(
+      async () => ({ ok: true, areaId: "a-new" }),
+      (areaId) => assigned.push(areaId),
+    )
+    expect(failure).toBeNull()
+    expect(assigned).toEqual(["a-new"])
+  })
+
+  it("leaves the row where it was when the create fails", async () => {
+    const assigned: string[] = []
+    const failure = await createAndAssignArea(
+      async () => ({ ok: false, error: "An area named “Payments” already exists." }),
+      (areaId) => assigned.push(areaId),
+    )
+    expect(failure).toContain("already exists")
+    expect(assigned).toEqual([])
+  })
+})
+
+describe("area repository picker", () => {
+  it("checks and unchecks a registered repository, keeping order", () => {
+    expect(togglePath(["/tmp/a"], "/tmp/b")).toEqual(["/tmp/a", "/tmp/b"])
+    // Trailing slashes are the same repository, as the binding sees it.
+    expect(togglePath(["/tmp/a", "/tmp/b"], "/tmp/a/")).toEqual(["/tmp/b"])
+  })
+
+  it("adds hand-typed paths without duplicating what is already configured", () => {
+    expect(addPaths(["/tmp/a"], " /tmp/b \n/tmp/a\n\n")).toEqual(["/tmp/a", "/tmp/b"])
   })
 })

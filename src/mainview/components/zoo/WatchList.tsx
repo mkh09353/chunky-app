@@ -13,7 +13,7 @@ import { openExternal } from "~/lib/openExternal"
 import { zooAddRepoWatch, zooRemoveRepoWatch, zooSetWatchSchedule, type ZooArea, type ZooRepoWatch } from "~/lib/zoo"
 import { areaName, type AreaSelection } from "~/lib/zooAreas"
 import { checkAndSynthesize, needsSynthesis, summarizeCheck, synthesizePending, watchStatusLabel, type WatchRunPhase } from "~/lib/zooWatch"
-import { AreaAssignMenu, AreaBadge } from "./AreaSwitcher"
+import { AreaAssignMenu, AreaBadge, type AreaRepo, type CreateAreaResult } from "./AreaSwitcher"
 import { Select } from "../settings/common"
 import { Button } from "../ui/button"
 import { Input } from "../ui/input"
@@ -44,6 +44,8 @@ export function WatchList({
   baseUrl,
   onRefresh,
   onAssignArea,
+  repos = [],
+  onCreateArea,
 }: {
   watches: ZooRepoWatch[]
   areas: ZooArea[]
@@ -55,6 +57,10 @@ export function WatchList({
   baseUrl?: string | null
   onRefresh: () => Promise<void>
   onAssignArea: (sourceId: string, areaId: string | null) => void
+  /** Registered repositories, for the assignment menu's inline create dialog. */
+  repos?: readonly AreaRepo[]
+  /** Create an area inline; this watch moves into it on success. */
+  onCreateArea?: (name: string, repoPaths: string[]) => Promise<CreateAreaResult>
 }) {
   const [repo, setRepo] = useState("")
   const [busy, setBusy] = useState<string | null>(null)
@@ -198,6 +204,8 @@ export function WatchList({
                     areas={areas}
                     areaId={watch.areaId}
                     disabled={busy !== null}
+                    repos={repos}
+                    {...(onCreateArea ? { onCreateArea } : {})}
                     onAssign={(next) => onAssignArea(watch.sourceId, next)}
                   />
                   <Button

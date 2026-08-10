@@ -13,7 +13,7 @@ import { zooGetArtifact, type ZooArea, type ZooAreaKind, type ZooArtifactDetail 
 import type { InboxEntry } from "~/lib/zooInbox"
 import { latestSessionId } from "~/lib/zooItemFlow"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
-import { AreaAssignMenu } from "./AreaSwitcher"
+import { AreaAssignMenu, type AreaRepo, type CreateAreaResult } from "./AreaSwitcher"
 import { Button } from "../ui/button"
 import {
   Badge,
@@ -39,6 +39,8 @@ export function DetailPane({
   entry,
   areas,
   onAssignArea,
+  repos = [],
+  onCreateArea,
   areaBusy = false,
   onClose,
   onOpenSession,
@@ -50,6 +52,10 @@ export function DetailPane({
   areas: ZooArea[]
   /** Reassign this row to another area (or to none). */
   onAssignArea?: (kind: ZooAreaKind, id: string, areaId: string | null) => void
+  /** Registered repositories, for the assignment menu's inline create dialog. */
+  repos?: readonly AreaRepo[]
+  /** Create an area inline; the row being edited moves into it on success. */
+  onCreateArea?: (name: string, repoPaths: string[]) => Promise<CreateAreaResult>
   areaBusy?: boolean
   onClose: () => void
   onOpenSession?: (sessionId: string) => void
@@ -111,6 +117,8 @@ export function DetailPane({
               <AreaAssignMenu
                 areas={areas}
                 areaId={entry.areaId}
+                repos={repos}
+                {...(onCreateArea ? { onCreateArea } : {})}
                 disabled={areaBusy || !onAssignArea}
                 onAssign={(areaId) => {
                   // An idea and the item it became always move together, so

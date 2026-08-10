@@ -38,7 +38,7 @@ import { buildInbox, entryForIdea, entryForItem, inFlightItems, type InboxEntry 
 import { runSynthesis, runTriage } from "~/lib/zooSynthesis"
 import { startJam, type JamTarget } from "~/lib/zooJam"
 import { startResearchSession } from "~/lib/zooItemFlow"
-import { AreaSwitcher } from "./AreaSwitcher"
+import { AreaSwitcher, type AreaRepo, type CreateAreaResult } from "./AreaSwitcher"
 import { Button } from "../ui/button"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip"
 import { BoardView } from "./BoardView"
@@ -59,6 +59,7 @@ const VIEWS: { id: ZooView; label: string; icon: typeof Inbox }[] = [
 export function ZooWorkspace({
   baseUrl,
   repoId,
+  repos = [],
   onOpenSession,
   onOpenChat,
 }: {
@@ -66,6 +67,8 @@ export function ZooWorkspace({
   baseUrl?: string | null
   /** Selected repository; promotion and triage bind their sessions to it. */
   repoId?: string | null
+  /** The server's registered repositories, offered when editing an area. */
+  repos?: readonly AreaRepo[]
   /** Show a session in the (secondary) chat surface. */
   onOpenSession?: (sessionId: string) => void
   onOpenChat: () => void
@@ -161,6 +164,24 @@ export function ZooWorkspace({
       if (result.ok) setSelectedArea(result.area.id)
       return result
     })
+
+  /**
+   * Create an area for a caller that needs its id back — the assignment menu
+   * moves the row it is editing into the area it just made. The error is
+   * returned rather than raised into the header so the caller's own dialog can
+   * show it and stay open.
+   */
+  const createAreaFor = useCallback(
+    async (name: string, repoPaths: string[]): Promise<CreateAreaResult> => {
+      setAreaBusy(true)
+      setAreaError(null)
+      const result = await zooCreateArea(name, repoPaths)
+      setAreaBusy(false)
+      await refresh()
+      return result.ok ? { ok: true, areaId: result.area.id } : { ok: false, error: result.error }
+    },
+    [refresh],
+  )
 
   const renameArea = (areaId: string, name: string, repoPaths: string[]) =>
     void areaAction(() => zooUpdateArea(areaId, { name, repoPaths }))
@@ -362,6 +383,8 @@ export function ZooWorkspace({
       xWatchIntervalMinutes={board.xWatchIntervalMinutes}
       xWatchLastSuccessAt={board.xWatchLastSuccessAt}
       onAssignArea={(sourceId, next) => assignArea("source", sourceId, next)}
+      repos={repos}
+      onCreateArea={createAreaFor}
       onOpenSetup={() => void openSetup()}
     />
   ) : (
@@ -394,6 +417,7 @@ export function ZooWorkspace({
             onDelete={deleteArea}
             busy={areaBusy}
             error={areaError}
+            repos={repos}
             disabled={!board.available}
           />
         </div>
@@ -487,6 +511,8 @@ export function ZooWorkspace({
             entry={selected}
             areas={areas}
             onAssignArea={assignArea}
+            repos={repos}
+            onCreateArea={createAreaFor}
             areaBusy={areaBusy}
             onClose={() => setSelectedId(null)}
             {...(openSession ? { onOpenSession: openSession } : {})}

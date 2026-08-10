@@ -3162,6 +3162,7 @@ export function App() {
               <ZooWorkspace
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
                 repoId={activeRepoId}
+                repos={repos}
                 onOpenChat={() => setMainView("chat")}
                 onOpenSession={
                   live
