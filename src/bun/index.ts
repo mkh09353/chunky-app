@@ -56,6 +56,9 @@ const workspace = process.env.CHUNKY_WORKSPACE || process.cwd()
 const extraRoots = [parentRoot(workspace)].filter((p): p is string => !!p)
 
 let updateInProgress = false
+// Version we already offered to install and the user declined; periodic checks
+// stay quiet about it, but the explicit menu action always re-prompts.
+let declinedUpdateVersion: string | null = null
 
 /**
  * Keep the installed Chunky server (~/.chunky/app) current. Silent on success:
@@ -118,6 +121,9 @@ async function checkForUpdates({ interactive = false } = {}): Promise<void> {
       return
     }
 
+    const version = (downloaded as { version?: string }).version ?? (update as { version?: string }).version ?? "unknown"
+    if (!interactive && declinedUpdateVersion === version) return
+
     const { response } = await Utils.showMessageBox({
       type: "question",
       title: "Update Ready",
@@ -128,6 +134,7 @@ async function checkForUpdates({ interactive = false } = {}): Promise<void> {
       cancelId: 1,
     })
     if (response === 0) await Updater.applyUpdate()
+    else declinedUpdateVersion = version
   } catch (error) {
     // Update failures must never interfere with using the app.
     console.warn("[chunky] update failed:", error)
@@ -704,5 +711,9 @@ void win
 console.log("[chunky] window ready")
 
 // Do not delay window startup or surface a dialog unless an update exists.
-// checkForUpdates also refreshes the installed Chunky server runtime.
+// checkForUpdates also refreshes the installed Chunky server runtime. Check
+// shortly after boot, then periodically so long-running apps still hear about
+// new releases and get prompted to update.
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 setTimeout(() => void checkForUpdates(), 4_000)
+setInterval(() => void checkForUpdates(), UPDATE_CHECK_INTERVAL_MS)
