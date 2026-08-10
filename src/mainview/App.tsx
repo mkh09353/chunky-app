@@ -98,6 +98,7 @@ import {
 } from "./lib/setupStatus"
 import { OldServersNotice } from "./components/OldServersNotice"
 import { classifyServers, subscribeOldServers } from "./lib/oldServers"
+import { serverMismatchWarning } from "./lib/serverMismatch"
 import { inspectChunkyServers, type ServerInspection } from "./lib/serverLifecycle"
 import {
   desktopUiSnapshot,
@@ -335,6 +336,7 @@ export function App() {
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>("booting")
   const [connError, setConnError] = useState<string | null>(null)
+  const [serverWarning, setServerWarning] = useState<string | null>(null)
   // First-run install progress pushed by Bun. Disposable: null on a warm launch
   // (and cleared once the connection resolves), so the banner keeps its usual
   // wording whenever there is nothing extra to say.
@@ -988,6 +990,7 @@ export function App() {
         ])
         if (cancelled) return
 
+        setServerWarning(serverMismatchWarning(cfg.baseUrl, cfg.installedRuntime, info))
         setWorkspace(info.workspace || cfg.workspace || "")
         setModelSel(sel)
         setModelRows(rows)
@@ -2679,6 +2682,7 @@ export function App() {
         fetchModel(baseUrl),
         listAllModels(baseUrl).catch(() => [] as ModelRow[]),
       ])
+      setServerWarning(serverMismatchWarning(baseUrl, resolved.installedRuntime, info))
       setWorkspace(info.workspace || "")
       setModelSel(sel)
       setModelRows(rows)
@@ -2922,6 +2926,20 @@ export function App() {
           className="cursor-pointer font-medium underline-offset-2 hover:underline"
         >
           Connect
+        </button>
+      </div>
+    ) : serverWarning && connectionState === "connected" ? (
+      <div className="flex items-center justify-between gap-3 border-border border-b bg-amber-500/10 px-4 py-1.5 text-[12px] text-amber-700 dark:text-amber-300">
+        <span className="flex min-w-0 items-center gap-2">
+          <AlertCircle className="size-3.5 shrink-0" />
+          <span className="truncate">{serverWarning}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setServerWarning(null)}
+          className="shrink-0 cursor-pointer font-medium underline-offset-2 hover:underline"
+        >
+          Dismiss
         </button>
       </div>
     ) : sendError ? (

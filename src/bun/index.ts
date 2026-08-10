@@ -16,6 +16,7 @@ import { openInEditor as runOpenInEditor, type EditorDeps } from "./openInEditor
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
 import {
+  installedRuntimeIdentity,
   refreshChunkyConnection,
   releaseChunkyConnection,
   rememberChunkyWorkspace,
@@ -308,6 +309,7 @@ rpc = createRPC({
       const config = await resolveChunkyConnection()
       return {
         ...config,
+        installedRuntime: installedRuntimeIdentity() ?? null,
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
       }
     },
@@ -323,6 +325,7 @@ rpc = createRPC({
       const config = await refreshChunkyConnection()
       return {
         ...config,
+        installedRuntime: installedRuntimeIdentity() ?? null,
         workspaceName: (config.workspace || workspace).split(/[\\/]/).filter(Boolean).pop() || "workspace",
       }
     },

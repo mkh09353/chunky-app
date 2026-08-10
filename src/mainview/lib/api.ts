@@ -40,6 +40,7 @@ export interface AppConfig {
   /** Present for auth; never log or render. */
   serverToken?: string
   workspace: string
+  installedRuntime?: { version: string; buildId: string } | null
   /** Bun-side startup/discovery failure safe to show in the connection banner. */
   connectionError?: string
 }
@@ -129,6 +130,7 @@ export async function reresolveConfig(): Promise<AppConfig> {
           baseUrl: data.baseUrl,
           serverToken: data.serverToken,
           workspace: data.workspace || DEFAULT_CONFIG.workspace,
+          installedRuntime: data.installedRuntime,
           connectionError: data.connectionError,
         }
       }
@@ -183,6 +185,7 @@ export async function loadConfig(): Promise<AppConfig> {
           baseUrl: data.baseUrl,
           serverToken: data.serverToken,
           workspace: data.workspace || DEFAULT_CONFIG.workspace,
+          installedRuntime: data.installedRuntime,
           connectionError: data.connectionError,
         }
       }
@@ -205,6 +208,7 @@ export async function loadConfig(): Promise<AppConfig> {
         baseUrl: data.baseUrl || DEFAULT_CONFIG.baseUrl,
         serverToken: injectedToken,
         workspace: data.workspace || DEFAULT_CONFIG.workspace,
+        installedRuntime: data.installedRuntime,
       }
     }
   } catch {
