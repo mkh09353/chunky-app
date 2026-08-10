@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import type { AgentEvent } from "@chunky/protocol"
 import { initialState, reduce } from "./transcript"
 import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "./sessionCache"
 
@@ -47,5 +48,72 @@ describe("SessionCache", () => {
     const shadow = replay.reduce(reduce, initialState)
     expect(shadow).toEqual(rebuildTranscript(replay))
     expect(shadow.threads.main!.items).toHaveLength(2)
+  })
+})
+
+describe("ports.changed is live-only and session-scoped", () => {
+  const portsEvent = (sessionId: string, port: number): AgentEvent =>
+    ({
+      type: "ports.changed",
+      sessionId,
+      ports: [
+        {
+          port,
+          address: "127.0.0.1",
+          pid: 42,
+          command: "bun run dev",
+          taskId: "t1",
+          url: `http://localhost:${port}`,
+        },
+      ],
+    })
+
+  test("never enters the persisted replay prefix", () => {
+    const ev = portsEvent("s", 5173)
+    expect(isPersistedSessionEvent(ev)).toBe(false)
+
+    const cache = new SessionCache()
+    const transcript = reduce(initialState, ev)
+    cache.remember("s", transcript, null, "repo", ev)
+    // First event for the session: the entry exists, but with an empty prefix.
+    expect(cache.get("s")!.events).toEqual([])
+    expect(cache.get("s")!.transcript.ports).toHaveLength(1)
+
+    const user: AgentEvent = { type: "message.user", text: "hi" }
+    const withUser = reduce(transcript, user)
+    cache.remember("s", withUser, null, "repo", user)
+    cache.remember("s", reduce(withUser, portsEvent("s", 4620)), null, "repo", portsEvent("s", 4620))
+    expect(cache.get("s")!.events).toEqual([user])
+    // …and rebuilding that prefix (what a replay does) yields no ports at all.
+    expect(rebuildTranscript(cache.get("s")!.events).ports).toEqual([])
+    // The live projection still holds the latest snapshot.
+    expect(cache.get("s")!.transcript.ports.map((p) => p.port)).toEqual([4620])
+  })
+
+  test("does not leak across cached sessions", () => {
+    const cache = new SessionCache()
+    const a = portsEvent("a", 5173)
+    cache.remember("a", reduce(initialState, a), null, "repo", a)
+    cache.remember("b", initialState, null, "repo", { type: "message.user", text: "hi" })
+
+    expect(cache.get("a")!.transcript.ports.map((p) => p.port)).toEqual([5173])
+    expect(cache.get("b")!.transcript.ports).toEqual([])
+    // A fresh snapshot for b leaves a alone.
+    const b = portsEvent("b", 4620)
+    cache.remember("b", reduce(cache.get("b")!.transcript, b), null, "repo", b)
+    expect(cache.get("a")!.transcript.ports.map((p) => p.port)).toEqual([5173])
+    expect(cache.get("b")!.transcript.ports.map((p) => p.port)).toEqual([4620])
+  })
+
+  test("an attach-time snapshot corrects a stale cached projection", () => {
+    const cache = new SessionCache()
+    const stale = portsEvent("s", 5173)
+    cache.remember("s", reduce(initialState, stale), null, "repo", stale)
+    // The task died while the session was not attached; the server's attach
+    // snapshot is empty and authoritative.
+    const empty: AgentEvent = { type: "ports.changed", sessionId: "s", ports: [] }
+    cache.remember("s", reduce(cache.get("s")!.transcript, empty), null, "repo", empty)
+    expect(cache.get("s")!.transcript.ports).toEqual([])
+    expect(cache.get("s")!.events).toEqual([])
   })
 })

@@ -3,6 +3,7 @@
 import type {
   AgentEvent,
   GoalStatus,
+  ListeningPort,
   MessageEndReason,
   QueueEntry,
   TodoSnapshot,
@@ -10,6 +11,10 @@ import type {
 } from "@chunky/protocol"
 
 export const MAIN = "main"
+
+/** The protocol's live-only listening-port event type, as a value: the session
+ *  cache needs it to keep the event out of the persisted replay prefix. */
+export const PORTS_CHANGED = "ports.changed" satisfies AgentEvent["type"]
 
 export type Item =
   | { kind: "user"; text: string; from?: string; interjection?: boolean; imageCount?: number }
@@ -92,6 +97,9 @@ export interface TranscriptState {
   compacted: number
   /** Delegated runs in spawn order — drives the transcript's agent cards. */
   runs: RunRecord[]
+  /** Listening ports owned by this session's background tasks (ports.changed).
+   *  Live-only and authoritative: each event replaces the whole array. */
+  ports: ListeningPort[]
 }
 
 export const initialState: TranscriptState = {
@@ -106,6 +114,7 @@ export const initialState: TranscriptState = {
   usage: null,
   compacted: 0,
   runs: [],
+  ports: [],
 }
 
 /** The tool pill a delegate hangs off: the last tool item in the parent when the
@@ -388,6 +397,12 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
 
     case "background.changed":
       return { ...state, background: { tasks: ev.tasks, monitors: ev.monitors } }
+
+    case "ports.changed":
+      // Authoritative live-only snapshot: the array is replaced wholesale, and
+      // an empty snapshot clears it. A malformed frame degrades to empty rather
+      // than putting a non-array where the UI expects to map over one.
+      return { ...state, ports: Array.isArray(ev.ports) ? ev.ports : [] }
 
     case "todos.update":
       // Live plan/checklist snapshot for the Todos panel.

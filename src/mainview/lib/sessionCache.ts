@@ -1,10 +1,11 @@
 import type { AgentEvent, GoalSnapshot } from "@chunky/protocol"
-import { initialState, reduce, type TranscriptState } from "./transcript"
+import { initialState, PORTS_CHANGED, reduce, type TranscriptState } from "./transcript"
 
 /** These are deliberately sent live-only by the server and never appear in history. */
 export function isPersistedSessionEvent(event: AgentEvent): boolean {
   return event.type !== "tool.progress" &&
     event.type !== "session.rewound" &&
+    event.type !== PORTS_CHANGED &&
     event.type !== "background.changed" &&
     event.type !== "mode.applied" &&
     event.type !== "app.open_url" &&

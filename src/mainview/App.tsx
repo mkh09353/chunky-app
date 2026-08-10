@@ -2,6 +2,7 @@ import { AlertCircle, EyeOff, WifiOff } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChatTopBar, ChatView } from "./components/ChatView"
 import { CommandPalette } from "./components/CommandPalette"
+import { SessionPortsPopover } from "./components/SessionPortsPopover"
 import { VoiceButton } from "./components/VoiceButton"
 import { VoiceHud } from "./components/VoiceHud"
 import { codeToLabel } from "./lib/pushToTalk"
@@ -896,6 +897,9 @@ export function App() {
   const liveUsage = live ? transcript.usage : null
   const liveCompacted = live ? transcript.compacted : 0
   const liveQueue = live ? transcript.queue.entries : []
+  // Live-only port snapshot: empty in demo/offline mode and on any server that
+  // never emits `ports.changed`, which simply hides the header trigger.
+  const livePorts = live ? transcript.ports : []
 
 
 
@@ -3021,7 +3025,7 @@ export function App() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ChatTopBar
             repoStatus={live && activeRepoId ? <GitToolbar cwd={gitCwd} /> : null}
-            headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} /></>}
+            headerRight={<>{incognitoSession && <span title="This session is off the record — nothing is written to disk." className="flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-1 font-medium text-[11px] text-destructive"><EyeOff className="size-3" />Incognito</span>}{goal && <button type="button" onClick={() => void openDialog("goal")} className="rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary">Goal · {goal.status}{goal.turns != null ? ` · ${goal.turns} turns` : ""}</button>}<SessionPortsPopover ports={livePorts} /><VoiceButton state={voice.state} active={voice.active} error={voice.error} disabled={!voiceEnabled} onToggle={voice.toggle} apiKeyPromptOpen={voice.apiKeyPromptOpen} onApiKeyPromptOpenChange={voice.setApiKeyPromptOpen} onSubmitApiKey={voice.submitApiKey} /></>}
             theme={resolved}
             onToggleTheme={toggle}
             onRename={() => void openDialog("rename")}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import type { AgentEvent } from "@chunky/protocol"
+import type { AgentEvent, ListeningPort } from "@chunky/protocol"
 import { initialState, isStreaming, isTreeIdle, mainItems, reduce, MAIN } from "./transcript"
 import type { Item, TranscriptState } from "./transcript"
 import { itemsToMessages, streamingMessageId } from "./mapTranscript"
@@ -168,5 +168,52 @@ describe("idle is authoritative for the composer", () => {
     // …but the root session is idle, so the composer is usable again.
     expect(isStreaming(state)).toBe(false)
     expect(composerRunning(state)).toBe(false)
+  })
+})
+
+describe("ports.changed snapshots", () => {
+  const PORT = (port: number, taskId = "t1"): ListeningPort => ({
+    port,
+    address: "127.0.0.1",
+    pid: 100 + port,
+    command: "bun run dev",
+    taskId,
+    url: `http://localhost:${port}`,
+  })
+  const PORTS = (ports: ListeningPort[], sessionId = "s"): AgentEvent =>
+    ({ type: "ports.changed", sessionId, ports })
+
+  test("starts empty so older servers that never emit the event are fine", () => {
+    expect(initialState.ports).toEqual([])
+    expect(play([RUNNING(), IDLE()]).ports).toEqual([])
+  })
+
+  test("replaces the whole array — the snapshot is authoritative", () => {
+    const first = play([PORTS([PORT(5173), PORT(4620, "t2")])])
+    expect(first.ports.map((p) => p.port)).toEqual([5173, 4620])
+
+    // A later snapshot omitting 5173 must not leave it behind.
+    const second = play([PORTS([PORT(4620, "t2")])], first)
+    expect(second.ports.map((p) => p.port)).toEqual([4620])
+    expect(second.ports[0]!.url).toBe("http://localhost:4620")
+  })
+
+  test("an empty snapshot clears the ports", () => {
+    const state = play([PORTS([]) ], play([PORTS([PORT(5173)])]))
+    expect(state.ports).toEqual([])
+  })
+
+  test("leaves the rest of the projection untouched", () => {
+    const before = play([RUNNING(), { type: "message.user", text: "hi" }])
+    const after = play([PORTS([PORT(3000)])], before)
+    expect(after.threads).toBe(before.threads)
+    expect(after.status).toBe("running")
+    expect(mainItems(after)).toEqual(mainItems(before))
+  })
+
+  test("a malformed frame cannot crash or corrupt the array", () => {
+    const state = play([{ type: "ports.changed", sessionId: "s" } as unknown as AgentEvent],
+      play([PORTS([PORT(5173)])]))
+    expect(state.ports).toEqual([])
   })
 })
