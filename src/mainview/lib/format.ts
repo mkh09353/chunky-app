@@ -41,3 +41,17 @@ export function workspaceMark(path: string | null | undefined): string {
 export function sessionPreview(s: SessionSummary): string {
   return isPlaceholderTitle(s.title) ? "Start a conversation…" : s.title
 }
+
+/** Compact home-relative display for long absolute paths. */
+export function compactPath(abs: string): string {
+  // Avoid importing node:os in the browser bundle — string replace is enough.
+  const home =
+    typeof window !== "undefined"
+      ? // best-effort: paths like /Users/name/...
+        abs.match(/^(\/Users\/[^/]+)/)?.[1] ??
+        abs.match(/^(\/home\/[^/]+)/)?.[1] ??
+        ""
+      : ""
+  if (home && abs.startsWith(home)) return `~${abs.slice(home.length)}`
+  return abs
+}

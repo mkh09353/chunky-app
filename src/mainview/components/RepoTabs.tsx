@@ -10,7 +10,6 @@ import {
   FolderPlus,
   Loader2,
   Plus,
-  Search,
   X,
 } from "lucide-react"
 import {
@@ -20,20 +19,18 @@ import {
   useMemo,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import type { Repo } from "~/lib/api"
 import { copyText } from "~/lib/clipboard"
+import { compactPath } from "~/lib/format"
+import { useDirSearch } from "~/hooks/useDirSearch"
+import { DirSearchField } from "./DirSearchField"
 import { cn } from "~/lib/cn"
 import { clampDragOffset } from "~/lib/browserOverlay"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
-import {
-  nativeDirSearchAvailable,
-  searchDirectories,
-  type DirSearchHit,
-} from "~/lib/dirSearch"
+import type { DirSearchHit } from "~/lib/dirSearch"
 import { createDirectory, folderNameError, nativeFsAvailable } from "~/lib/fsOps"
 import { nativePickerAvailable, pickFolder } from "~/lib/pickFolder"
 import { joinPath, parseGitUrl } from "~/lib/cloneRepo"
@@ -51,7 +48,6 @@ import {
   DropdownMenuTrigger,
 } from "./ui/dropdown-menu"
 
-const SEARCH_DEBOUNCE_MS = 180
 /** How long a tab shows the "copied" check before returning to its folder icon. */
 const COPY_FEEDBACK_MS = 1500
 /**
@@ -148,12 +144,8 @@ export function RepoTabs({
 
   // Native-only fuzzy directory discovery (hidden in web mode).
   const canNative = nativePickerAvailable()
-  const canSearch = nativeDirSearchAvailable()
-  const [query, setQuery] = useState("")
-  const [hits, setHits] = useState<DirSearchHit[]>([])
-  const [searching, setSearching] = useState(false)
-  const [searchError, setSearchError] = useState<string | null>(null)
-  const [activeHit, setActiveHit] = useState(-1)
+  const search = useDirSearch({ enabled: adding })
+  const canSearch = search.available
 
   // Clone-from-URL form. `cloneDest` starts from the app-provided default and
   // is then the user's to change (folder picker or free text).
@@ -180,9 +172,7 @@ export function RepoTabs({
 
   const pathInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
-  const searchSeq = useRef(0)
   const formId = useId()
-  const listboxId = useId()
 
   // The default only seeds the fields; never clobber what the user typed.
   useEffect(() => {
@@ -256,13 +246,10 @@ export function RepoTabs({
     setNewError(null)
     setCreatedPath(null)
     setCloneError(null)
-    setQuery("")
-    setHits([])
-    setSearchError(null)
-    setActiveHit(-1)
+    search.reset()
     setPicking(false)
     setAddOffset({ x: 0, y: 0 })
-  }, [])
+  }, [search.reset])
 
   const beginAddDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || cloning) return
@@ -356,34 +343,6 @@ export function RepoTabs({
     }, 0)
     return () => window.clearTimeout(t)
   }, [adding, addInitialFocus])
-
-  // Debounced FFF directory search.
-  useEffect(() => {
-    if (!adding || !canSearch) return
-    const q = query.trim()
-    if (!q) {
-      // Invalidate any in-flight search so a slow response cannot repopulate hits.
-      searchSeq.current += 1
-      setHits([])
-      setSearching(false)
-      setSearchError(null)
-      setActiveHit(-1)
-      return
-    }
-    const seq = ++searchSeq.current
-    setSearching(true)
-    const t = window.setTimeout(() => {
-      void (async () => {
-        const res = await searchDirectories(q, 12)
-        if (seq !== searchSeq.current) return
-        setHits(res.items)
-        setSearchError(res.error ?? null)
-        setActiveHit(res.items.length > 0 ? 0 : -1)
-        setSearching(false)
-      })()
-    }, SEARCH_DEBOUNCE_MS)
-    return () => window.clearTimeout(t)
-  }, [query, adding, canSearch])
 
   // Cmd+1..9 / Cmd+Shift+[ ] tab switch (parity with old app).
   useEffect(() => {
@@ -590,28 +549,6 @@ export function RepoTabs({
     },
     [canNative, picking, submitting],
   )
-
-  const onSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "ArrowDown") {
-      if (hits.length === 0) return
-      e.preventDefault()
-      setActiveHit((i) => (i + 1) % hits.length)
-      return
-    }
-    if (e.key === "ArrowUp") {
-      if (hits.length === 0) return
-      e.preventDefault()
-      setActiveHit((i) => (i <= 0 ? hits.length - 1 : i - 1))
-      return
-    }
-    if (e.key === "Enter") {
-      if (activeHit >= 0 && hits[activeHit]) {
-        e.preventDefault()
-        fillFromHit(hits[activeHit]!)
-        return
-      }
-    }
-  }
 
   return (
     // The row itself stays draggable (it sits in the window's titlebar strip);
@@ -932,86 +869,14 @@ export function RepoTabs({
                 )}
 
                 {canSearch && (
-                  <div className="mb-2.5">
-                    <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                      Find a project
-                    </label>
-                    <div className="relative">
-                      <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                      <input
-                        ref={searchInputRef}
-                        value={query}
-                        spellCheck={false}
-                        disabled={submitting}
-                        placeholder="e.g. budg, chunky-site"
-                        onChange={(e) => setQuery(e.target.value)}
-                        onKeyDown={onSearchKeyDown}
-                        aria-controls={listboxId}
-                        aria-autocomplete="list"
-                        aria-activedescendant={
-                          activeHit >= 0 ? `${listboxId}-opt-${activeHit}` : undefined
-                        }
-                        className="h-9 w-full rounded-lg border border-border bg-background py-0 pr-2.5 pl-8 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus-visible:border-ring/50 focus-visible:ring-2 focus-visible:ring-ring/25"
-                      />
-                    </div>
-
-                    {(query.trim() || searching || searchError) && (
-                      <div
-                        id={listboxId}
-                        role="listbox"
-                        aria-label="Matching folders"
-                        className="mt-1.5 max-h-40 overflow-y-auto rounded-lg border border-border/80 bg-background/60"
-                      >
-                        {searching && hits.length === 0 && (
-                          <div className="flex items-center gap-2 px-2.5 py-2 text-[11px] text-muted-foreground">
-                            <Loader2 className="size-3 animate-spin" />
-                            Searching…
-                          </div>
-                        )}
-                        {!searching && searchError && (
-                          <div className="px-2.5 py-2 text-[11px] text-destructive">
-                            {searchError}
-                          </div>
-                        )}
-                        {!searching && !searchError && query.trim() && hits.length === 0 && (
-                          <div className="px-2.5 py-2 text-[11px] text-muted-foreground">
-                            No folders matched. Try another name or paste a path below.
-                          </div>
-                        )}
-                        {hits.map((hit, i) => {
-                          const active = i === activeHit
-                          return (
-                            <button
-                              key={hit.path}
-                              id={`${listboxId}-opt-${i}`}
-                              type="button"
-                              role="option"
-                              aria-selected={active}
-                              disabled={submitting}
-                              onMouseEnter={() => setActiveHit(i)}
-                              onClick={() => fillFromHit(hit)}
-                              onDoubleClick={() => void submitAdd(hit.path)}
-                              className={cn(
-                                "flex w-full cursor-pointer flex-col gap-0.5 px-2.5 py-1.5 text-left outline-none transition-colors",
-                                active ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
-                              )}
-                            >
-                              <span className="truncate text-[12px] font-medium">{hit.name}</span>
-                              <span
-                                className={cn(
-                                  "truncate font-mono text-[10px]",
-                                  active ? "text-accent-foreground/70" : "text-muted-foreground",
-                                )}
-                                title={hit.path}
-                              >
-                                {compactPath(hit.path)}
-                              </span>
-                            </button>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
+                  <DirSearchField
+                    className="mb-2.5"
+                    search={search}
+                    disabled={submitting}
+                    onChoose={fillFromHit}
+                    emptyHint="No folders matched. Try another name or paste a path below."
+                    inputRef={searchInputRef}
+                  />
                 )}
 
                 <label className="mb-1 block text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -1315,16 +1180,4 @@ export function RepoTabs({
   )
 }
 
-/** Compact home-relative display for long absolute paths. */
-function compactPath(abs: string): string {
-  // Avoid importing node:os in the browser bundle — string replace is enough.
-  const home =
-    typeof window !== "undefined"
-      ? // best-effort: paths like /Users/name/...
-        abs.match(/^(\/Users\/[^/]+)/)?.[1] ??
-        abs.match(/^(\/home\/[^/]+)/)?.[1] ??
-        ""
-      : ""
-  if (home && abs.startsWith(home)) return `~${abs.slice(home.length)}`
-  return abs
-}
+

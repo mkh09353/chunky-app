@@ -142,6 +142,30 @@ export function DropdownMenuRadioItem({
   )
 }
 
+export function DropdownMenuCheckboxItem({
+  className,
+  children,
+  ...props
+}: MenuPrimitive.CheckboxItem.Props) {
+  return (
+    <MenuPrimitive.CheckboxItem
+      data-slot="dropdown-checkbox-item"
+      className={cn(
+        "relative flex min-h-8 cursor-pointer select-none items-center gap-2 rounded-lg py-1 pr-2.5 pl-8 text-sm outline-none transition-colors data-[highlighted]:bg-accent data-[highlighted]:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        className,
+      )}
+      {...props}
+    >
+      <span className="absolute left-2.5 inline-flex items-center">
+        <MenuPrimitive.CheckboxItemIndicator>
+          <Check className="size-4 text-primary" />
+        </MenuPrimitive.CheckboxItemIndicator>
+      </span>
+      {children}
+    </MenuPrimitive.CheckboxItem>
+  )
+}
+
 // A visual menu section label. Base UI's GroupLabel throws unless it is a
 // direct descendant of <Menu.Group>; our menus also use labels for popup
 // headers and lightweight sections, so render a non-interactive div instead.

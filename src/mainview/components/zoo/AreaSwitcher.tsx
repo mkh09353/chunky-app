@@ -5,9 +5,12 @@
 // and new areas are created from the same menu. Base UI's Menu owns the
 // keyboard and focus behaviour; this only supplies rows and styling.
 
-import { Check, Layers, Pencil, Plus, Trash2, X } from "lucide-react"
+import { ChevronDown, Check, Folder, Layers, Pencil, Plus, Trash2, X } from "lucide-react"
 import { useEffect, useState, type FormEvent } from "react"
 import { cn } from "~/lib/cn"
+import { compactPath } from "~/lib/format"
+import { useDirSearch } from "~/hooks/useDirSearch"
+import { DirSearchField } from "../DirSearchField"
 import type { ZooArea } from "~/lib/zoo"
 import { areaCounts, type AreaSelection, type Board } from "~/lib/zooAreas"
 import { Button } from "../ui/button"
@@ -21,6 +24,7 @@ import {
 } from "../ui/dialog"
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -89,113 +93,172 @@ export async function createAndAssignArea(
   return null
 }
 
-/** The registered-repository checklist plus whatever paths it cannot explain. */
+/** How a chosen path is labelled: its registered name, else its folder name. */
+function pathLabel(path: string, repos: readonly AreaRepo[]): string {
+  const repo = repos.find((entry) => samePath(entry.path, path))
+  if (repo) return repo.name || repo.path
+  const parts = path.replace(/\/+$/, "").split("/")
+  return parts[parts.length - 1] || path
+}
+
+/**
+ * Which repositories an area ships from.
+ *
+ * Two ways in, both of them the app's existing ones: the registered
+ * repositories (the same list the header's repo tabs show) as a menu of
+ * checkboxes, and the header's own fuzzy directory search for anything that
+ * isn't registered yet. Chosen repositories — including paths the registry
+ * cannot explain, which are kept rather than dropped — are removable rows.
+ */
 function RepoPicker({
   repos,
   paths,
   onChange,
+  open,
 }: {
   repos: readonly AreaRepo[]
   paths: readonly string[]
   onChange: (paths: string[]) => void
+  /** Only search while the dialog is open. */
+  open: boolean
 }) {
+  const search = useDirSearch({ enabled: open })
   const [manual, setManual] = useState("")
 
   const has = (path: string) => paths.some((entry) => samePath(entry, path))
-  const toggle = (path: string) => onChange(togglePath(paths, path))
+  const remove = (path: string) => onChange(paths.filter((entry) => !samePath(entry, path)))
+  const add = (path: string) => onChange(addPaths(paths, path))
   const addManual = () => {
     onChange(addPaths(paths, manual))
     setManual("")
   }
-  // Paths the registry cannot explain stay visible (and removable) rather than
-  // being silently dropped when the dialog saves.
-  const extras = paths.filter((path) => !repos.some((repo) => samePath(repo.path, path)))
+
+  useEffect(() => {
+    if (!open) {
+      search.reset()
+      setManual("")
+    }
+    // `search.reset` is stable; re-running on every render would clear typing.
+  }, [open, search.reset])
 
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
       <span className="font-medium text-[12px] text-foreground">
         Repositories <span className="text-muted-foreground">· optional</span>
       </span>
-      {repos.length > 0 ? (
-        <ul className="flex max-h-44 min-w-0 flex-col gap-0.5 overflow-y-auto rounded-lg border border-input p-1">
-          {repos.map((repo) => {
-            const checked = has(repo.path)
+
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button type="button" variant="outline" size="sm" disabled={repos.length === 0} />}
+          >
+            <Folder />
+            <span className="min-w-0 truncate">
+              {repos.length === 0 ? "No registered repositories" : "Choose registered…"}
+            </span>
+            <ChevronDown />
+          </DropdownMenuTrigger>
+          {/* Base UI clamps/flips this against the viewport; long registries
+              scroll inside the popup rather than growing off-screen. */}
+          <DropdownMenuContent align="start" className="max-h-72 min-w-64 max-w-[min(24rem,calc(100vw-2rem))] overflow-y-auto">
+            <DropdownMenuLabel>Registered repositories</DropdownMenuLabel>
+            {repos.map((repo) => (
+              <DropdownMenuCheckboxItem
+                key={repo.id}
+                checked={has(repo.path)}
+                onCheckedChange={() => onChange(togglePath(paths, repo.path))}
+                closeOnClick={false}
+              >
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="min-w-0 truncate text-[12.5px]">{repo.name || repo.path}</span>
+                  <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">
+                    {compactPath(repo.path)}
+                  </span>
+                </span>
+              </DropdownMenuCheckboxItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <span className="text-[11px] text-muted-foreground">
+          {paths.length
+            ? `${paths.length} selected`
+            : "None yet — sessions fall back to the selected repository."}
+        </span>
+      </div>
+
+      {paths.length > 0 && (
+        <ul className="flex min-w-0 flex-col gap-1">
+          {paths.map((path) => {
+            const registered = repos.some((repo) => samePath(repo.path, path))
             return (
-              <li key={repo.id} className="min-w-0">
-                <button
-                  type="button"
-                  role="checkbox"
-                  aria-checked={checked}
-                  onClick={() => toggle(repo.path)}
-                  className="flex w-full min-w-0 cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/60"
-                >
-                  <span
-                    aria-hidden
-                    className={cn(
-                      "flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
-                      checked
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-input bg-background",
+              <li
+                key={path}
+                className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/30 py-1 pr-1 pl-2.5"
+              >
+                <Folder className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="min-w-0 truncate text-[12px] text-foreground">
+                    {pathLabel(path, repos)}
+                    {!registered && (
+                      <span className="ml-1.5 text-[10.5px] text-muted-foreground">
+                        not registered
+                      </span>
                     )}
+                  </span>
+                  <span
+                    className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground"
+                    title={path}
                   >
-                    {checked && <Check className="size-3" />}
+                    {compactPath(path)}
                   </span>
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="min-w-0 truncate text-[12px] text-foreground">
-                      {repo.name || repo.path}
-                    </span>
-                    <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">
-                      {repo.path}
-                    </span>
-                  </span>
-                </button>
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={`Remove ${path}`}
+                  onClick={() => remove(path)}
+                >
+                  <X />
+                </Button>
               </li>
             )
           })}
         </ul>
-      ) : (
-        <p className="text-[11.5px] text-muted-foreground">
-          No registered repositories — add a path by hand below.
-        </p>
       )}
-      {extras.length > 0 && (
-        <ul className="flex min-w-0 flex-col gap-0.5">
-          {extras.map((path) => (
-            <li key={path} className="flex min-w-0 items-center gap-1.5">
-              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">
-                {path}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={`Remove ${path}`}
-                onClick={() => onChange(paths.filter((entry) => !samePath(entry, path)))}
-              >
-                <X />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="flex min-w-0 items-center gap-1.5">
-        <Input
-          value={manual}
-          onChange={(event) => setManual(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return
-            // Enter here adds a path; it must not submit the whole dialog.
-            event.preventDefault()
-            addManual()
+
+      {search.available ? (
+        <DirSearchField
+          search={search}
+          label="Find another repository"
+          emptyHint="No folders matched. Try another name."
+          onChoose={(hit) => {
+            add(hit.path)
+            search.reset()
           }}
-          placeholder="/Users/me/code/payments"
-          spellCheck={false}
-          className="min-w-0 flex-1 font-mono text-[12px]"
         />
-        <Button type="button" variant="outline" size="sm" disabled={!manual.trim()} onClick={addManual}>
-          Add path
-        </Button>
-      </div>
+      ) : (
+        // No native bridge (browser build): typing a path is the only way in.
+        <div className="flex min-w-0 items-center gap-1.5">
+          <Input
+            value={manual}
+            onChange={(event) => setManual(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return
+              // Enter here adds a path; it must not submit the whole dialog.
+              event.preventDefault()
+              addManual()
+            }}
+            placeholder="/Users/me/code/payments"
+            spellCheck={false}
+            className="min-w-0 flex-1 font-mono text-[12px]"
+          />
+          <Button type="button" variant="outline" size="sm" disabled={!manual.trim()} onClick={addManual}>
+            Add path
+          </Button>
+        </div>
+      )}
+
       <span className="text-[11px] text-muted-foreground">
         Research and build sessions for this area bind to the first of these that is a registered
         repository.
@@ -264,7 +327,7 @@ function AreaDialog({
                 spellCheck={false}
               />
             </label>
-            <RepoPicker repos={repos} paths={paths} onChange={setPaths} />
+            <RepoPicker repos={repos} paths={paths} onChange={setPaths} open={open} />
             {error && <Notice text={error} />}
           </div>
           <DialogFooter>
