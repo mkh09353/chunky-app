@@ -61,9 +61,10 @@ export function OldServersNotice({
     setArmed(null)
     if (!result.ok) {
       setErrors((prev) => ({ ...prev, [id]: result.error || "The server did not respond." }))
-      return
     }
-    // The row may now be gone, still draining, or unchanged: ask rather than guess.
+    // The row may now be gone, still draining, or unchanged: ask rather than
+    // guess. Refresh even after a failure — "record not found" usually means
+    // the server is already draining and the row should disappear.
     await onRefresh()
   }
 

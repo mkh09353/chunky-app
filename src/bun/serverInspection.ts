@@ -44,7 +44,7 @@ export async function inspectServers(input: Partial<ServerInspectionDependencies
 async function verifiedEntry(id: string, deps: ServerInspectionDependencies): Promise<{ entry: { path: string; record: RecordFile }; identity: Identity } | { error: string }> {
   const env = deps.env || process.env, token = tokenFor(env)
   const entry = recordEntries(join(stateDir(env), "servers")).find((candidate) => candidate.record.id === id)
-  if (!entry) return { error: "Server record not found" }
+  if (!entry) return { error: "This server is already scheduled to stop — it will exit once its in-flight work finishes." }
   const identity = await probe(entry.record, token, deps)
   return identity ? { entry, identity } : { error: "Server identity could not be verified" }
 }
