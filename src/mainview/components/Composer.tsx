@@ -19,7 +19,7 @@ import { MODELS } from "~/lib/mock"
 import { cn } from "~/lib/cn"
 import { providerLabel } from "~/lib/api"
 import { filterCommands, type SlashCommand } from "~/lib/slashCommands"
-import { modeEmoji } from "~/lib/modes"
+import { modeChipLabel, modeEmoji } from "~/lib/modes"
 import { SOLO_EXPLAINER } from "~/lib/solo"
 import { ModeSlotsMenu } from "./ModeSlotsMenu"
 import { Button } from "./ui/button"
@@ -85,6 +85,7 @@ export function Composer({
   modes = [],
   modeSpecs = [],
   activeMode = null,
+  modePinned = false,
   solo = false,
   onSelectMode,
   onSaveMode,
@@ -113,10 +114,14 @@ export function Composer({
   /** The same modes as FULL specs, so each row's flyout can edit its slots.
    *  Matched to `modes` by name; a mode with no spec just has no flyout. */
   modeSpecs?: ModeInfo[]
-  /** Name of the mode whose pairing matches the live configuration — the
-   *  button's label, when set. In solo it is only a reference (the mode is NOT
-   *  in effect), so the selector falls back to the model name. */
+  /** The mode in effect — the button's label, when set. For an INHERITED
+   *  session (the global default's name, `modePinned: false`) solo means no
+   *  mode is really in effect, so the selector falls back to the model name. */
   activeMode?: string | null
+  /** True when `activeMode` is this session's OWN pinned mode rather than the
+   *  inherited default's name. Pinned mode identity is authoritative: it names
+   *  the selector even while the effective/global state reads solo. */
+  modePinned?: boolean
   /** SOLO (lib/solo): a raw model pick runs alone — the server suppresses the
    *  sidekick, its seats, the reviewer and the mode advisor. The selector must
    *  therefore stop presenting a saved mode as active. */
@@ -179,9 +184,10 @@ export function Composer({
   const dragDepth = useRef(0)
 
   const busy = switchingId !== null
-  // A mode names the selector only while it is actually in effect; solo means a
-  // raw model pick superseded it, so the model names the selector instead.
-  const modeLabel = solo ? null : activeMode
+  // A mode names the selector while it is actually in effect (lib/modes): a
+  // session's OWN pinned mode always is, while an inherited name yields to solo
+  // — there a raw model pick superseded the mode, so the model names it.
+  const modeLabel = modeChipLabel(activeMode, { pinned: modePinned, solo })
 
   const groups = useMemo(() => {
     const map = new Map<string, Model[]>()
@@ -659,9 +665,10 @@ export function Composer({
                     <>
                       <DropdownMenuLabel>Modes</DropdownMenuLabel>
                       {modes.map((m) => {
-                        // In solo no mode is in effect — a check here would
+                        // Same rule as the selector's label: an inherited name
+                        // in solo isn't in effect, and a check there would
                         // claim the mode's delegates are running.
-                        const selected = !solo && m.name === activeMode
+                        const selected = m.name === modeLabel
                         const spec = specByMode.get(m.name)
                         return (
                           // The row body applies the mode; the flyout beside it

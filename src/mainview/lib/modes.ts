@@ -103,6 +103,31 @@ export function sessionModeName(
   return activeMode ?? null
 }
 
+/**
+ * What the composer's selector says: the mode's own name while a mode is in
+ * effect, or null so the caller falls back to the executor's model name.
+ *
+ * The distinction that matters is WHOSE mode it is. A session-pinned mode
+ * (`source: "session-mode"`, i.e. the server kept an `activeMode` for THIS
+ * chat) is identity: it holds until the session is repinned, so nothing about
+ * the effective executor — solo included — may demote the chip to a model
+ * name. Solo can be true here for reasons that have nothing to do with this
+ * chat: the pin map may not be hydrated yet, or the GLOBAL default may be solo
+ * while this session runs a mode.
+ *
+ * An INHERITED session (`source: "global"`) has no identity of its own; it is
+ * only wearing the default pairing's name. Solo on that scope means no mode is
+ * in effect, so the label falls back — the pre-existing behaviour for a raw
+ * model pick, which is what solo describes.
+ */
+export function modeChipLabel(
+  activeMode: string | null,
+  { pinned, solo }: { pinned: boolean; solo: boolean },
+): string | null {
+  if (!activeMode) return null
+  return pinned || !solo ? activeMode : null
+}
+
 /** Keyword → emoji. A mode name is free text the user picked, so match on
  *  substrings rather than demanding a whole word; the LONGEST matching keyword
  *  wins (so "starship" reads as a ship, not a star), ties by table order. */

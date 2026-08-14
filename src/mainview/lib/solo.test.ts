@@ -49,6 +49,30 @@ describe("isSoloActive", () => {
     ).toBe(false)
   })
 
+  it("prefers the session's own snapshot over the global default", () => {
+    // Applying a mode to a session clears its raw pin server-side, so the
+    // client can hold no pin for a session that is nonetheless NOT solo.
+    expect(
+      isSoloActive({ live: true, sessionId: "s1", modelSel: sel({ solo: true }), sessionSolo: false }),
+    ).toBe(false)
+    expect(
+      isSoloActive({ live: true, sessionId: "s1", modelSel: sel({ solo: false }), sessionSolo: true }),
+    ).toBe(true)
+    // A fresh local pin still wins: it is the newer of the two after a raw pick.
+    expect(
+      isSoloActive({
+        live: true,
+        sessionId: "s1",
+        sessionModelSel: { s1: sel({ solo: true }) },
+        sessionSolo: false,
+      }),
+    ).toBe(true)
+    // No session snapshot yet → the global default still answers.
+    expect(
+      isSoloActive({ live: true, sessionId: "s1", modelSel: sel({ solo: true }), sessionSolo: null }),
+    ).toBe(true)
+  })
+
   it("falls back to /api/modes current.solo only when the selection is silent", () => {
     expect(isSoloActive({ live: true, sessionId: null, modelSel: sel(), currentSolo: true })).toBe(
       true,

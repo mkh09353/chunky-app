@@ -25,6 +25,11 @@ export interface SoloResolutionInput {
   sessionModelSel?: Record<string, ModelSelection | undefined> | null
   /** The global default selection (App's `modelSel`). */
   modelSel?: ModelSelection | null
+  /** `SessionAgentConfigResponse.selection.solo` for the attached session — the
+   *  server's own answer for THIS session. It outranks the global default
+   *  (which describes another scope entirely) but not the session's pin, whose
+   *  optimistic write is the newer of the two right after a raw pick. */
+  sessionSolo?: boolean | null
   /** `ModesResponse.current.solo` — the global state as /api/modes reports it,
    *  used only when the global selection hasn't been re-read yet. */
   currentSolo?: boolean | null
@@ -35,13 +40,20 @@ export interface SoloResolutionInput {
  *
  * A session-pinned selection is authoritative FOR THAT SESSION: its `solo`
  * decides even when the global default disagrees (another session may still be
- * running a mode). With no pin the global state answers, preferring the
- * selection's own flag and falling back to /api/modes' `current.solo`.
+ * running a mode). With no local pin, the session's own authoritative snapshot
+ * (`sessionSolo`) answers next — a session running a mode has no raw pin left,
+ * and the global default describes a different scope. Only then does the global
+ * state answer, preferring the selection's own flag and falling back to
+ * /api/modes' `current.solo`.
  */
 export function isSoloActive(input: SoloResolutionInput): boolean {
   if (!input.live) return false
   const pinned = input.sessionId ? input.sessionModelSel?.[input.sessionId] : undefined
   if (pinned) return pinned.solo === true
+  // A session the client holds no pin for may still be isolated from the global
+  // default server-side (applying a mode to it clears the raw pin), so its own
+  // authoritative snapshot answers before the global state gets a say.
+  if (input.sessionId && typeof input.sessionSolo === "boolean") return input.sessionSolo
   if (typeof input.modelSel?.solo === "boolean") return input.modelSel.solo
   return input.currentSolo === true
 }

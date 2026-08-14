@@ -81,7 +81,7 @@ import {
 import { applyMode, deleteMode, getCacheGuard, getModes, getSessionAgentConfig, getSoloAdvisorStatus, saveMode, setCacheGuard as saveCacheGuardTokens, type AdvisorStatus, type SessionAgentConfig, type SidekickConfig } from "./lib/configApi"
 import { buildComposerStatus } from "./lib/composerStatus"
 import { isSoloActive } from "./lib/solo"
-import { activeModeName, sessionModeName } from "./lib/modes"
+import { activeModeName, modeChipLabel, sessionModeName } from "./lib/modes"
 import { ComposerStatus } from "./components/ComposerStatus"
 import {
   defaultCloneParent,
@@ -637,6 +637,11 @@ export function App() {
         globalMode,
       )
     : null
+  // Does the mode belong to THIS session (the server kept an activeMode for it)
+  // rather than being the inherited default's name? A pinned mode is identity
+  // and outlives any solo flag; see lib/modes.modeChipLabel.
+  const modePinned =
+    live && sessionId ? sessionAgentConfig[sessionId]?.source === "session-mode" : false
 
   // SOLO: a raw model pick runs the model alone (see lib/solo). Session-pinned
   // solo applies to the ATTACHED session only; with no pin the global state
@@ -649,7 +654,7 @@ export function App() {
         sessionId,
         sessionModelSel,
         modelSel,
-        currentSolo: sessionId ? (sessionAgentConfig[sessionId]?.selection.solo ?? null) : null,
+        sessionSolo: sessionId ? (sessionAgentConfig[sessionId]?.selection.solo ?? null) : null,
       }),
     [live, sessionId, sessionModelSel, modelSel, sessionAgentConfig],
   )
@@ -3171,6 +3176,7 @@ export function App() {
                 modes={modeOptions}
                 modeSpecs={live ? savedModes : []}
                 activeMode={activeMode}
+                modePinned={modePinned}
                 solo={solo}
                 onSelectMode={live ? applyModeByName : undefined}
                 onSaveMode={live ? handleSaveModeSpec : undefined}
@@ -3178,7 +3184,7 @@ export function App() {
                 streaming={streaming}
                 onStop={handleStop}
                 contextMeter={<ContextMeter usage={liveUsage} limit={contextLimit} />}
-                status={<ComposerStatus chips={statusChips} selectorLabel={solo ? uiModel.name : (activeMode ?? uiModel.name)} />}
+                status={<ComposerStatus chips={statusChips} selectorLabel={modeChipLabel(activeMode, { pinned: modePinned, solo }) ?? uiModel.name} />}
                 cacheGuard={cacheGuard}
                 onCacheConfirm={() => void confirmCacheGuard()}
                 onCacheCancel={() => setCacheGuard(null)}

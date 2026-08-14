@@ -2,7 +2,13 @@
 //   bun test src/mainview/lib/modes.test.ts
 import { describe, expect, it } from "bun:test"
 import type { ModeInfo, ModeSpec } from "@chunky/protocol"
-import { activeModeName, DEFAULT_MODE_EMOJI, modeEmoji, sessionModeName } from "./modes"
+import {
+  activeModeName,
+  DEFAULT_MODE_EMOJI,
+  modeChipLabel,
+  modeEmoji,
+  sessionModeName,
+} from "./modes"
 
 const fire: ModeInfo = {
   name: "fire",
@@ -78,6 +84,33 @@ describe("sessionModeName", () => {
   it("keeps session-pinned identity authoritative", () => {
     expect(sessionModeName("session-mode", "ice", "fire")).toBe("ice")
     expect(sessionModeName("session-selection", null, "fire")).toBeNull()
+  })
+})
+
+describe("modeChipLabel", () => {
+  // The regression: applying "fire" to a session showed the executor's model
+  // name ("Fable") because a solo flag from another scope demoted the label.
+  it("keeps a session's own applied mode naming the chip, solo or not", () => {
+    const pinnedFire = sessionModeName("session-mode", "fire", null)
+    expect(modeChipLabel(pinnedFire, { pinned: true, solo: false })).toBe("fire")
+    expect(modeChipLabel(pinnedFire, { pinned: true, solo: true })).toBe("fire")
+    expect(modeEmoji(pinnedFire!)).toBe("\u{1F525}")
+  })
+
+  it("falls back to the model name for a raw selection", () => {
+    // A raw model pick carries no mode identity at all — null tells the caller
+    // to label the chip with the executor's model, exactly as before.
+    expect(modeChipLabel(sessionModeName("session-selection", null, "fire"), {
+      pinned: false,
+      solo: true,
+    })).toBeNull()
+    expect(modeChipLabel(null, { pinned: true, solo: false })).toBeNull()
+  })
+
+  it("lets solo suppress an INHERITED default's name only", () => {
+    const inherited = sessionModeName("global", null, "fire")
+    expect(modeChipLabel(inherited, { pinned: false, solo: false })).toBe("fire")
+    expect(modeChipLabel(inherited, { pinned: false, solo: true })).toBeNull()
   })
 })
 
