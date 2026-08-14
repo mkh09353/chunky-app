@@ -176,7 +176,10 @@ function ThreadRow({
   )
 
   return (
-    <div className="group relative" onContextMenu={openMenu}>
+    // select-none: macOS's two-finger/right click selects the word under the
+    // pointer on mousedown, BEFORE contextmenu fires — preventDefault there is
+    // too late. Row text is a label, not copy, so selection is disabled.
+    <div className="group relative select-none" onContextMenu={openMenu}>
       <button
         type="button"
         onClick={onSelect}
