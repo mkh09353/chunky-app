@@ -10,6 +10,8 @@ import {
 } from "~/lib/configApi"
 import type { ModelRow, SeatConfig, SidekickConfig } from "~/lib/configApi"
 import { confirm } from "~/lib/confirm"
+import { getEvals, setEvalsMode, statsLine } from "~/lib/evals"
+import type { EvalsResponse } from "~/lib/evals"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -17,6 +19,7 @@ import {
   Card,
   EffortSelect,
   ErrorNote,
+  FieldRow,
   InlineError,
   Loading,
   ModelSelect,
@@ -142,9 +145,72 @@ export function SidekickSection() {
               </div>
             )}
           </Card>
+
+          <AutoEvalsCard />
         </>
       )}
     </SectionShell>
+  )
+}
+
+/**
+ * Auto-evals: the server-side recorder that keeps every sidekick delegation
+ * (brief, transcript, report, rating) as a candidate you can promote into an
+ * eval suite. Off/record round-trips GET/POST /api/evals; the stats line is
+ * the server's own on-disk accounting, not a renderer estimate.
+ */
+function AutoEvalsCard() {
+  const evals = useAsync<EvalsResponse>(() => getEvals(), [])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const recording = evals.data?.mode === "record"
+
+  const toggle = (on: boolean) => {
+    void (async () => {
+      setSaving(true)
+      setError(null)
+      try {
+        evals.setData(await setEvalsMode(on ? "record" : "off"))
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setSaving(false)
+      }
+    })()
+  }
+
+  return (
+    <Card>
+      <SubLabel>Auto-evals</SubLabel>
+      {evals.loading ? (
+        <Loading rows={1} />
+      ) : evals.error ? (
+        <ErrorNote message={evals.error} onRetry={evals.reload} />
+      ) : (
+        <>
+          <FieldRow
+            title="Record delegations as eval candidates"
+            description="Keeps each sidekick brief, transcript, report and rating so you can promote the interesting ones into an eval suite."
+          >
+            <div className="flex items-center gap-2">
+              {saving && <Spinner />}
+              <Switch checked={recording} disabled={saving} onCheckedChange={toggle} />
+            </div>
+          </FieldRow>
+          {evals.data && (
+            <p className="border-border/60 border-t pt-3 text-[12px] text-muted-foreground tabular-nums">
+              {statsLine(evals.data.stats)}
+            </p>
+          )}
+          {error && (
+            <div className="pt-2">
+              <InlineError>{error}</InlineError>
+            </div>
+          )}
+        </>
+      )}
+    </Card>
   )
 }
 

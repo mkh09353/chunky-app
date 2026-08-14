@@ -2,6 +2,7 @@ import {
   Archive,
   ArchiveRestore,
   BarChart3,
+  FlaskConical,
   ChevronDown,
   GitBranch,
   History,
@@ -317,6 +318,8 @@ export function Sidebar({
   zooActive = false,
   onOpenUsage,
   usageActive = false,
+  onOpenEvals,
+  evalsActive = false,
   onOpenSettings,
   onOpenPalette,
   connectionLabel,
@@ -355,6 +358,11 @@ export function Sidebar({
   onOpenUsage?: () => void
   /** Usage currently owns the main panel (mirrors `homeActive`). */
   usageActive?: boolean
+  /** Swap the main panel for the full-page Evals review surface. Live-only,
+   *  like Home and Usage: candidates live on the server. */
+  onOpenEvals?: () => void
+  /** Evals currently owns the main panel. */
+  evalsActive?: boolean
   onOpenSettings: () => void
   onOpenPalette: () => void
   /** Optional live/demo connection badge in the footer. */
@@ -580,6 +588,30 @@ export function Sidebar({
                 <BarChart3 className="size-4" />
               </TooltipTrigger>
               <TooltipPopup>Usage</TooltipPopup>
+            </Tooltip>
+          )}
+          {onOpenEvals && (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    onClick={onOpenEvals}
+                    aria-pressed={evalsActive}
+                    aria-label="Evals"
+                    className={cn(
+                      NO_DRAG_REGION,
+                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      evalsActive
+                        ? "bg-primary/10 text-primary"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
+                    )}
+                  />
+                }
+              >
+                <FlaskConical className="size-4" />
+              </TooltipTrigger>
+              <TooltipPopup>Evals</TooltipPopup>
             </Tooltip>
           )}
         </div>

@@ -202,6 +202,7 @@ import {
 } from "./lib/homeFeed"
 import { HomeView } from "./components/HomeView"
 import { UsageView } from "./components/UsageView"
+import { EvalsView } from "./components/EvalsView"
 import { useAttachedSession, type AppMode, type ConnectionState } from "./hooks/useAttachedSession"
 import hornUrl from "./assets/horn.wav"
 
@@ -376,7 +377,7 @@ export function App() {
   // a thing you open, not a mode the app remembers for you. The chat column
   // stays MOUNTED behind it so a round-trip cannot cost the reader their scroll
   // position (or a re-attach).
-  const [mainView, setMainView] = useState<"chat" | "home" | "usage" | "zoo">("chat")
+  const [mainView, setMainView] = useState<"chat" | "home" | "usage" | "zoo" | "evals">("chat")
   // sessionId -> when THIS client first saw the session busy, for Home's
   // elapsed times. Absent = we started watching mid-run and cannot say.
   const [busySince, setBusySince] = useState<ReadonlyMap<string, number>>(new Map())
@@ -3042,6 +3043,8 @@ export function App() {
           zooActive={mainView === "zoo"}
           onOpenUsage={live ? () => setMainView("usage") : undefined}
           usageActive={mainView === "usage"}
+          onOpenEvals={live ? () => setMainView("evals") : undefined}
+          evalsActive={mainView === "evals"}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenPalette={() => setPaletteOpen(true)}
           onRenameThread={(id) => { if (live) { handleSelectThread(id); window.setTimeout(() => void openDialog("rename"), 0) } }}
@@ -3202,6 +3205,19 @@ export function App() {
               <UsageView
                 baseUrl={live && config ? config.baseUrl : null}
                 sessionId={live ? sessionId : null}
+              />
+            )}
+            {mainView === "evals" && (
+              <EvalsView
+                baseUrl={live && config ? config.baseUrl : null}
+                onOpenSession={
+                  live
+                    ? (id) => {
+                        setMainView("chat")
+                        handleSelectThread(id)
+                      }
+                    : undefined
+                }
               />
             )}
             {mainView === "home" && (

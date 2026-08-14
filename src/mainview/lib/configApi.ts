@@ -149,6 +149,33 @@ export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+/**
+ * Like req(), but for routes whose body is text rather than JSON (e.g. the
+ * eval transcript endpoint, which answers text/plain JSONL). Same base URL +
+ * auth path; errors still surface as HttpError with the raw body attached.
+ */
+export async function reqText(path: string, init?: RequestInit): Promise<string> {
+  const b = await base()
+  const method = init?.method ?? "GET"
+  let res: Response
+  try {
+    res = await fetch(b + path, init)
+  } catch (err) {
+    throw new Error(`Can't reach the Chunky server (${(err as Error).message})`)
+  }
+  const text = await res.text().catch(() => "")
+  if (!res.ok) {
+    let data: unknown = text
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      /* keep the raw text */
+    }
+    throw new HttpError(errText(data, `${method} ${path} failed (${res.status})`), res.status, data)
+  }
+  return text
+}
+
 /** Build a JSON request init. */
 export function jsonInit(method: string, body?: unknown): RequestInit {
   return {
