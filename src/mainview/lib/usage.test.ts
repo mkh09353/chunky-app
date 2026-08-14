@@ -3,6 +3,7 @@ import {
   asProviderQuotas,
   asUsageBreakdown,
   asUsageSeries,
+  kindLabel,
   scoreLabel,
   shareLabel,
   type ProviderQuota,
@@ -107,6 +108,54 @@ describe("asUsageBreakdown", () => {
   test("infers priced from cost when the server omits it", () => {
     const body = asUsageBreakdown({ rows: [{ provider: "a", model: "m", estimatedApiCost: 2 }] })
     expect(body.rows[0]!.priced).toBe(true)
+  })
+  test("keeps scoreBySeat in server order and coerces its fields", () => {
+    const body = asUsageBreakdown({
+      rows: [
+        {
+          provider: "a",
+          model: "m",
+          scoreBySeat: [
+            {
+              kind: "sidekick",
+              seat: null,
+              avgRating: 9.46,
+              ratedCount: 198,
+              reworkRate: 0.05,
+              samples: 200,
+            },
+            { kind: "sidekick", seat: "websearch", avgRating: "8", ratedCount: "3" },
+            { kind: "thread", avgRating: null, junk: true },
+          ],
+        },
+      ],
+    })
+    const scores = body.rows[0]!.scoreBySeat!
+    expect(scores.map((s) => kindLabel(s))).toEqual([
+      "sidekick",
+      "sidekick · websearch",
+      "thread",
+    ])
+    expect(scores.map((s) => scoreLabel(s))).toEqual(["9.5 (198)", "8.0 (3)", "—"])
+    expect(scores[1]).toEqual({
+      kind: "sidekick",
+      seat: "websearch",
+      avgRating: 8,
+      ratedCount: 3,
+      reworkRate: null,
+      samples: 0,
+    })
+  })
+  test("missing or malformed scoreBySeat leaves it undefined", () => {
+    const rows = asUsageBreakdown({
+      rows: [
+        { provider: "a", model: "none" },
+        { provider: "a", model: "empty", scoreBySeat: [] },
+        { provider: "a", model: "junk", scoreBySeat: [{ seat: "x" }, null, 7, "nope"] },
+        { provider: "a", model: "notarray", scoreBySeat: { kind: "sidekick" } },
+      ],
+    }).rows
+    for (const row of rows) expect(row.scoreBySeat).toBeUndefined()
   })
 })
 

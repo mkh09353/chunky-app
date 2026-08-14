@@ -31,6 +31,7 @@ import {
   bigCostLabel,
   compactTokens,
   costLabel,
+  kindLabel,
   modelRowLabel,
   modelTokens,
   percent,
@@ -711,10 +712,30 @@ function BreakdownTable({ rows, totalCost }: { rows: readonly UsageModelRow[]; t
   )
 }
 
+/** The per-seat score lines the hover adds under its summary: one per seat that
+ *  earned ratings on this model. A single unnamed seat says nothing the summary
+ *  line doesn't, so it is dropped; a single NAMED seat is worth showing. Server
+ *  order is kept. Absent/empty `scoreBySeat` yields no lines at all — exactly
+ *  today's tooltip. */
+function seatScoreLines(
+  row: UsageModelRow,
+): { key: string; label: string; score: string; rework: string | null }[] {
+  const splits = row.scoreBySeat ?? []
+  if (splits.length === 0) return []
+  if (splits.length === 1 && !splits[0]!.seat) return []
+  return splits.map((split, index) => ({
+    key: `${split.kind}:${split.seat ?? ""}:${index}`,
+    label: kindLabel(split),
+    score: scoreLabel(split),
+    rework: split.reworkRate == null ? null : percent(split.reworkRate),
+  }))
+}
+
 /** "8.4 (12)" with rework behind a tooltip; an unrated model is an em-dash and
  *  says so on hover, so it is never read as "rated badly". */
 function ScoreCell({ row }: { row: UsageModelRow }) {
   const label = scoreLabel(row)
+  const bySeat = seatScoreLines(row)
   return (
     <Tooltip>
       <TooltipTrigger
@@ -722,7 +743,7 @@ function ScoreCell({ row }: { row: UsageModelRow }) {
       >
         {label}
       </TooltipTrigger>
-      <TooltipPopup className="max-w-[240px]">
+      <TooltipPopup className="max-w-[280px]">
         {label === "—" ? (
           "Not rated yet — no delegated work from this model has been scored."
         ) : (
@@ -731,6 +752,24 @@ function ScoreCell({ row }: { row: UsageModelRow }) {
             <span className="mx-1 opacity-50">·</span>
             rework {percent(row.reworkRate)}
           </>
+        )}
+        {bySeat.length > 0 && (
+          <span className="mt-1 block space-y-0.5 border-border/40 border-t pt-1">
+            {bySeat.map((entry) => (
+              <span key={entry.key} className="flex items-baseline justify-between gap-3">
+                <span className="min-w-0 truncate">{entry.label}</span>
+                <span className="shrink-0 tabular-nums">
+                  {entry.score}
+                  {entry.rework && (
+                    <>
+                      <span className="mx-1 opacity-50">·</span>
+                      <span className="opacity-70">rework {entry.rework}</span>
+                    </>
+                  )}
+                </span>
+              </span>
+            ))}
+          </span>
         )}
       </TooltipPopup>
     </Tooltip>

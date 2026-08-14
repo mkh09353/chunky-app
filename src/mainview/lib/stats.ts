@@ -87,6 +87,19 @@ export interface UsageSeriesResponse {
   buckets: UsageSeriesBucket[]
 }
 
+/** A model row's score split by who earned it: the default seat of a kind, or a
+ *  named seat. Optional — older servers omit `scoreBySeat` and the hover keeps
+ *  its single summary line. */
+export interface UsageSeatScore {
+  kind: string
+  /** null for the default/unnamed seat of that kind; a slug otherwise. */
+  seat: string | null
+  avgRating: number | null
+  ratedCount: number
+  reworkRate: number | null
+  samples: number
+}
+
 export interface UsageModelRow {
   provider: string
   model: string
@@ -102,6 +115,8 @@ export interface UsageModelRow {
   avgRating: number | null
   ratedCount: number
   reworkRate: number | null
+  /** Absent on older servers. Server order is preserved verbatim. */
+  scoreBySeat?: UsageSeatScore[]
 }
 
 export interface UsageProviderRollup {
@@ -313,6 +328,7 @@ function asModelRow(data: unknown): UsageModelRow | null {
   const provider = str(row.provider)
   const model = str(row.model)
   if (!provider && !model) return null
+  const scoreBySeat = asSeatScores(row.scoreBySeat)
   return {
     provider,
     model,
@@ -329,7 +345,30 @@ function asModelRow(data: unknown): UsageModelRow | null {
     avgRating: numOrNull(row.avgRating),
     ratedCount: num(row.ratedCount),
     reworkRate: numOrNull(row.reworkRate),
+    ...(scoreBySeat ? { scoreBySeat } : {}),
   }
+}
+
+/** `scoreBySeat` or undefined — absent, empty, or all-malformed all mean "no
+ *  per-seat data", which the hover reads as "stay exactly as it is today". */
+function asSeatScores(value: unknown): UsageSeatScore[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const scores = value
+    .map((entry): UsageSeatScore | null => {
+      const e = (entry ?? {}) as Record<string, unknown>
+      const kind = str(e.kind)
+      if (!kind) return null
+      return {
+        kind,
+        seat: strOrNull(e.seat),
+        avgRating: numOrNull(e.avgRating),
+        ratedCount: num(e.ratedCount),
+        reworkRate: numOrNull(e.reworkRate),
+        samples: num(e.samples),
+      }
+    })
+    .filter((entry): entry is UsageSeatScore => entry !== null)
+  return scores.length > 0 ? scores : undefined
 }
 
 function asProviderRollup(data: unknown): UsageProviderRollup | null {
