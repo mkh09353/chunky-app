@@ -330,3 +330,104 @@ describe("session shelf pins", () => {
     }
   })
 })
+
+// The sidebar's "pin to top" choice. Like the shelves, the protocol has no such
+// concept, so this file is the only record of it.
+describe("pinned sessions", () => {
+  test("round trip, and unrelated keys are left alone", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1" }, env)
+      mergeDesktopState({ pinnedSessions: { s1: 1234 } }, env)
+
+      expect(readDesktopState(env).pinnedSessions).toEqual({ s1: 1234 })
+      expect(readDesktopState(env).activeRepoId).toBe("r1")
+
+      // Writing something else leaves the pins alone.
+      mergeDesktopState({ sessionShelves: { s2: { shelf: "settled", at: 5 } } }, env)
+      expect(readDesktopState(env).pinnedSessions).toEqual({ s1: 1234 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the renderer owns the map, so a patch replaces it wholesale", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ pinnedSessions: { s1: 1, s2: 2 } }, env)
+      mergeDesktopState({ pinnedSessions: { s2: 2 } }, env)
+      expect(readDesktopState(env).pinnedSessions).toEqual({ s2: 2 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("an empty map is stored as absence, not as an empty object", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ activeRepoId: "r1" }, env)
+      mergeDesktopState({ pinnedSessions: { s1: 1 } }, env)
+      mergeDesktopState({ pinnedSessions: {} }, env)
+
+      expect(readDesktopState(env).pinnedSessions).toBeUndefined()
+      expect("pinnedSessions" in onDisk(env)).toBe(false)
+      expect(readDesktopState(env).activeRepoId).toBe("r1")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("malformed pins are dropped and a rubbish timestamp reads as 0", () => {
+    const { env, dir } = temp()
+    try {
+      writeFileSync(
+        desktopStatePath(env),
+        JSON.stringify({
+          pinnedSessions: {
+            good: 99,
+            // Not a number at all: there is no pin to keep.
+            notANumber: "soon",
+            nested: { at: 1 },
+            // A pin with a rubbish/negative time survives, sorted to the front.
+            negative: -5,
+            fractional: 3.7,
+            "": 1,
+          },
+        }),
+      )
+      expect(readDesktopState(env).pinnedSessions).toEqual({
+        good: 99,
+        negative: 0,
+        fractional: 3,
+      })
+
+      // An array is not a map of pins.
+      writeFileSync(desktopStatePath(env), JSON.stringify({ pinnedSessions: ["s1"] }))
+      expect(readDesktopState(env).pinnedSessions).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the map is bounded so a hostile renderer cannot grow the file forever", () => {
+    const { env, dir } = temp()
+    try {
+      const huge: Record<string, number> = {}
+      for (let i = 0; i < 900; i++) huge[`s${i}`] = i
+      mergeDesktopState({ pinnedSessions: huge }, env)
+      expect(Object.keys(readDesktopState(env).pinnedSessions ?? {})).toHaveLength(500)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("an over-long session id is rejected", () => {
+    const { env, dir } = temp()
+    try {
+      mergeDesktopState({ pinnedSessions: { ["x".repeat(200)]: 1, ok: 2 } }, env)
+      expect(readDesktopState(env).pinnedSessions).toEqual({ ok: 2 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

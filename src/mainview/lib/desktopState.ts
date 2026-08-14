@@ -14,6 +14,7 @@
 import { getRpc, nativeRpcAvailable } from "./rpc"
 import { cleanQuickKeys, type QuickKey } from "./quickKeys"
 import { shelfPinsFromRecord, shelfPinsToRecord, type ShelfPin } from "./sessionShelf"
+import { pinsFromRecord, pinsToRecord } from "./sessionPins"
 
 export interface DesktopUiState {
   activeRepoId: string | null
@@ -27,6 +28,10 @@ export interface DesktopUiState {
   /** Session id -> the user's explicit sidebar shelf choice. Durable, because
    *  the protocol has no settled lifecycle and this is the only record of it. */
   sessionShelves: Record<string, ShelfPin>
+  /** Session id -> when it was pinned to the top of the sidebar (epoch ms).
+   *  Durable for the same reason as the shelves: the protocol has no pinned
+   *  thread, so desktop.json is the only record of the choice. */
+  pinnedSessions: Record<string, number>
 }
 
 const ACTIVE_REPO_KEY = "chunky.activeRepoId"
@@ -41,6 +46,7 @@ function emptyState(): DesktopUiState {
     quickKeys: [],
     displayName: "",
     sessionShelves: {},
+    pinnedSessions: {},
   }
 }
 
@@ -78,9 +84,9 @@ export function readLegacyUiState(): DesktopUiState {
   return state
 }
 
-// Only the two tab preferences are mirrored. Quick keys, the display name and
-// the shelf pins are user CONFIG, not disposable UI preferences, so desktop.json
-// is their only home.
+// Only the two tab preferences are mirrored. Quick keys, the display name, the
+// shelf pins and the sidebar pins are user CONFIG, not disposable UI
+// preferences, so desktop.json is their only home.
 function mirrorToStorage(state: DesktopUiState): void {
   const store = storage()
   if (!store) return
@@ -120,6 +126,7 @@ function parseState(value: unknown): DesktopUiState | null {
     quickKeys?: unknown
     displayName?: unknown
     sessionShelves?: unknown
+    pinnedSessions?: unknown
   }
   const state = emptyState()
   state.quickKeys = cleanQuickKeys(raw.quickKeys)
@@ -127,6 +134,9 @@ function parseState(value: unknown): DesktopUiState | null {
   // honest about a shape it is about to classify threads with.
   state.sessionShelves = shelfPinsToRecord(
     shelfPinsFromRecord(raw.sessionShelves as Record<string, ShelfPin> | undefined),
+  )
+  state.pinnedSessions = pinsToRecord(
+    pinsFromRecord(raw.pinnedSessions as Record<string, number> | undefined),
   )
   // Bun already trimmed, folded and bounded this; keep whatever it published.
   if (typeof raw.displayName === "string") state.displayName = raw.displayName
@@ -163,13 +173,14 @@ export function loadDesktopUiState(): Promise<DesktopUiState> {
         // Nothing durable yet: migrate whatever the webview still remembers.
         const hasLegacy = !!legacy.activeRepoId || Object.keys(legacy.lastSessionByRepo).length > 0
         if (hasLegacy) {
-          // The name and the shelf pins are durable config that localStorage
-          // never held, so they survive the migration rather than being reset
-          // by the legacy seed.
+          // The name, the shelf pins and the sidebar pins are durable config
+          // that localStorage never held, so they survive the migration rather
+          // than being reset by the legacy seed.
           cached = {
             ...legacy,
             displayName: durable.displayName,
             sessionShelves: durable.sessionShelves,
+            pinnedSessions: durable.pinnedSessions,
           }
           queue({ activeRepoId: legacy.activeRepoId, lastSessionByRepo: legacy.lastSessionByRepo })
         } else {
@@ -195,6 +206,7 @@ let pending: {
   quickKeys?: QuickKey[]
   displayName?: string
   sessionShelves?: Record<string, ShelfPin>
+  pinnedSessions?: Record<string, number>
 } = {}
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let hideHooked = false
@@ -213,6 +225,7 @@ function queue(patch: {
   quickKeys?: QuickKey[]
   displayName?: string
   sessionShelves?: Record<string, ShelfPin>
+  pinnedSessions?: Record<string, number>
 }): void {
   pending = { ...pending, ...patch }
   if (!nativeRpcAvailable()) {
@@ -322,6 +335,19 @@ export function saveSessionShelves(pins: ReadonlyMap<string, ShelfPin>): void {
   const state = ensureSeed()
   state.sessionShelves = shelfPinsToRecord(pins)
   queue({ sessionShelves: state.sessionShelves })
+}
+
+/** The sidebar pins last read from (or written to) desktop.json. */
+export function pinnedSessionsSnapshot(): Record<string, number> {
+  return ensureSeed().pinnedSessions
+}
+
+/** Persist the whole pin map; the Bun writer merges it into the file. An empty
+ *  map is stored as absence, which is what "nothing is pinned" means. */
+export function savePinnedSessions(pins: ReadonlyMap<string, number>): void {
+  const state = ensureSeed()
+  state.pinnedSessions = pinsToRecord(pins)
+  queue({ pinnedSessions: state.pinnedSessions })
 }
 
 /** Test-only: forget the process cache and any queued write. */

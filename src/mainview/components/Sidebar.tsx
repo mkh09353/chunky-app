@@ -11,6 +11,8 @@ import {
   MailOpen,
   PawPrint,
   PenSquare,
+  Pin,
+  PinOff,
   Search,
   Settings,
 } from "lucide-react"
@@ -25,6 +27,7 @@ import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { avatarInitial, resolveDisplayName } from "~/lib/identity"
 import { collapseList } from "~/lib/sessionList"
+import { partitionPinned, type SessionPins } from "~/lib/sessionPins"
 import { groupByWorktree } from "~/lib/sessionGroups"
 import { cn } from "~/lib/cn"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
@@ -113,6 +116,8 @@ function ThreadRow({
   archived = false,
   onSettledChange,
   settled = false,
+  onPinnedChange,
+  pinned = false,
   showProject = false,
 }: {
   thread: Thread
@@ -130,6 +135,11 @@ function ThreadRow({
   onSettledChange?: (settled: boolean) => void
   /** This row is on the history shelf: it renders slimmer and recedes. */
   settled?: boolean
+  /** Pin toggle (stick this thread to the top of the list); omitted → no action. */
+  onPinnedChange?: (pinned: boolean) => void
+  /** This row is pinned. Unlike the shelf, a pin says nothing about lifecycle —
+   *  it only decides where the row is drawn. */
+  pinned?: boolean
   /** Only when the list can span repos: name the one this row belongs to. */
   showProject?: boolean
 }) {
@@ -150,7 +160,10 @@ function ThreadRow({
   )
   const showUnreadItem = !!onUnreadChange && canMarkUnread
   const showShelfItem = !!onSettledChange && canChangeShelf
-  const hasMenu = showUnreadItem || showShelfItem
+  // Pinning is presentation, not lifecycle: a running thread can be pinned too,
+  // so this item has no status condition of its own.
+  const showPinItem = !!onPinnedChange
+  const hasMenu = showUnreadItem || showShelfItem || showPinItem
   const openMenu = useCallback(
     (event: ReactMouseEvent) => {
       if (!hasMenu) return
@@ -274,6 +287,17 @@ function ThreadRow({
                 {settled ? "Move to active" : "Settle thread"}
               </DropdownMenuItem>
             )}
+            {showPinItem && (
+              <DropdownMenuItem
+                onClick={() => {
+                  onPinnedChange?.(!pinned)
+                  setMenuPoint(null)
+                }}
+              >
+                {pinned ? <PinOff /> : <Pin />}
+                {pinned ? "Unpin" : "Pin to top"}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}
@@ -302,6 +326,8 @@ export function Sidebar({
   unreadThreadIds,
   settledThreadIds,
   onThreadSettledChange,
+  pinnedThreadIds,
+  onThreadPinnedChange,
   prWidget,
   showProjects = false,
 }: {
@@ -346,6 +372,12 @@ export function Sidebar({
   settledThreadIds?: Set<string>
   /** File a thread into history, or pull it back into the working list. */
   onThreadSettledChange?: (id: string, settled: boolean) => void
+  /** Threads stuck to the top of the list, mapped to when they were pinned —
+   *  the timestamp is the pinned block's order (oldest pin first). Absent
+   *  (demo) → no pinned section and no pin affordance. */
+  pinnedThreadIds?: SessionPins
+  /** Pin a thread to the top of the list, or release it. */
+  onThreadPinnedChange?: (id: string, pinned: boolean) => void
   /** Pinned above the footer, outside the scroll area (the PR reviews widget). */
   prWidget?: ReactNode
 }) {
@@ -374,7 +406,7 @@ export function Sidebar({
     [settledThreadIds],
   )
 
-  const { active, settled, archived } = useMemo(() => {
+  const { pinned, active, settled, archived } = useMemo(() => {
     const q = query.trim().toLowerCase()
     const match = (t: Thread) => {
       if (!q) return true
@@ -385,14 +417,20 @@ export function Sidebar({
         (p ? `${p.owner}/${p.name}`.toLowerCase().includes(q) : false)
       )
     }
+    // Search first, so the pinned block narrows with everything else.
     const list = threads.filter(match)
     const visible = list.filter((t) => !archivedIds.has(t.id))
+    // Pins are pulled out BEFORE the shelf split, so a pinned thread shows at
+    // the top whether it is working, settled or idle. Archiving still wins: it
+    // is the gesture that puts a row away, and a pin must not undo it.
+    const { pinned: pinnedRows, rest } = partitionPinned(visible, pinnedThreadIds ?? new Map())
     return {
-      active: visible.filter((t) => !isSettled(t)),
-      settled: visible.filter((t) => isSettled(t)),
+      pinned: pinnedRows,
+      active: rest.filter((t) => !isSettled(t)),
+      settled: rest.filter((t) => isSettled(t)),
       archived: list.filter((t) => archivedIds.has(t.id)),
     }
-  }, [threads, query, projectOf, archivedIds, isSettled])
+  }, [threads, query, projectOf, archivedIds, isSettled, pinnedThreadIds])
 
   // Old settled threads are history, not a working list: show a screenful and
   // let the reader ask for the rest. Selection order stays the server's.
@@ -426,6 +464,10 @@ export function Sidebar({
         onSettledChange={
           onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
         }
+        onPinnedChange={
+          onThreadPinnedChange ? (next) => onThreadPinnedChange(t.id, next) : undefined
+        }
+        pinned={pinnedThreadIds?.has(t.id) ?? false}
         showProject={showProjects}
       />
     ),
@@ -438,6 +480,8 @@ export function Sidebar({
       unreadThreadIds,
       toggleArchived,
       onThreadSettledChange,
+      onThreadPinnedChange,
+      pinnedThreadIds,
       showProjects,
     ],
   )
@@ -577,6 +621,47 @@ export function Sidebar({
       </div>
 
       <ScrollArea className="flex-1" viewportClassName="px-2 pb-3">
+        {/* Pinned sits above everything, including the worktree groups: it is
+            the reader's own ordering, and grouping it would bury it again. */}
+        {pinned.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 px-2.5 pt-0.5 pb-1.5">
+              <span className="font-medium text-[10.5px] text-muted-foreground/60 uppercase tracking-[0.08em]">
+                Pinned
+              </span>
+              <span className="h-px flex-1 bg-border/60" />
+              <span className="text-[10.5px] text-muted-foreground/40 tabular-nums">
+                {pinned.length}
+              </span>
+            </div>
+            <div className="mb-1 flex flex-col gap-0.5">
+              {pinned.map((t) => (
+                <ThreadRow
+                  key={t.id}
+                  thread={t}
+                  project={projectOf.get(t.projectId)}
+                  active={t.id === activeThreadId}
+                  onSelect={() => onSelectThread(t.id)}
+                  onRename={() => onRenameThread?.(t.id)}
+                  onUnreadChange={onThreadUnreadChange ? (unread) => onThreadUnreadChange(t.id, unread) : undefined}
+                  unreadMarked={unreadThreadIds?.has(t.id)}
+                  onToggleArchive={() => toggleArchived(t.id)}
+                  onSettledChange={
+                    onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
+                  }
+                  onPinnedChange={
+                    onThreadPinnedChange ? (next) => onThreadPinnedChange(t.id, next) : undefined
+                  }
+                  pinned
+                  // A pinned row keeps its shelf presentation, so a pinned piece
+                  // of history still reads as history.
+                  settled={isSettled(t)}
+                  showProject={showProjects}
+                />
+              ))}
+            </div>
+          </>
+        )}
         {activeGroups ? (
           activeGroups.map((group, index) => (
             <div key={group.key}>
@@ -584,7 +669,9 @@ export function Sidebar({
                 label={group.label}
                 linked={group.linked}
                 count={group.rows.length}
-                first={index === 0}
+                // Only the very first header sits directly under the search
+                // field; with a pinned block above it needs its full stride.
+                first={index === 0 && pinned.length === 0}
               />
               <div className="flex flex-col gap-0.5">{group.rows.map(renderThread)}</div>
             </div>
@@ -619,6 +706,9 @@ export function Sidebar({
                   onSettledChange={
                     onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
                   }
+                  onPinnedChange={
+                    onThreadPinnedChange ? (next) => onThreadPinnedChange(t.id, next) : undefined
+                  }
                   settled
                   showProject={showProjects}
                 />
@@ -636,7 +726,7 @@ export function Sidebar({
           </>
         )}
 
-        {active.length === 0 && settled.length === 0 && (
+        {pinned.length === 0 && active.length === 0 && settled.length === 0 && (
           <p className="px-3 py-8 text-center text-[12px] text-muted-foreground/60">
             {query.trim()
               ? `No threads match “${query}”.`
@@ -686,6 +776,10 @@ export function Sidebar({
                     onSettledChange={
                       onThreadSettledChange ? (next) => onThreadSettledChange(t.id, next) : undefined
                     }
+                    onPinnedChange={
+                      onThreadPinnedChange ? (next) => onThreadPinnedChange(t.id, next) : undefined
+                    }
+                    pinned={pinnedThreadIds?.has(t.id) ?? false}
                     settled={isSettled(t)}
                     archived
                   />

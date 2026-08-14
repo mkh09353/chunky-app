@@ -57,6 +57,10 @@ export interface DesktopState {
    *  decides for itself. There is no server-side settled lifecycle, so this
    *  per-device pin is the only record of the choice. */
   sessionShelves?: Record<string, DesktopShelfPin>
+  /** Session id -> when the user pinned it to the top of the sidebar (epoch
+   *  ms). The protocol has no pinned thread either, so this per-device map is
+   *  the only record; the timestamp is the order of the pinned block. */
+  pinnedSessions?: Record<string, number>
 }
 
 /** Bounds so a malformed or hostile renderer can't grow the file without end. */
@@ -112,6 +116,25 @@ function cleanShelfPins(value: unknown): Record<string, DesktopShelfPin> | undef
     // session's next observed activity rather than sticking forever.
     const at = typeof pin.at === "number" && Number.isFinite(pin.at) ? Math.max(0, Math.floor(pin.at)) : 0
     out[sessionId] = { shelf: pin.shelf, at }
+    count++
+  }
+  return out
+}
+
+/** Keep the well-formed pins, drop the rest. Bounded exactly like the shelf
+ *  pins: one small row per session the user has pinned by hand. */
+function cleanPinnedSessions(value: unknown): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const out: Record<string, number> = {}
+  let count = 0
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (count >= MAX_SESSION_ENTRIES) break
+    const sessionId = cleanId(key)
+    if (!sessionId) continue
+    if (typeof raw !== "number") continue
+    // A rubbish timestamp reads as 0: the pin survives (the user asked for it)
+    // and simply sorts to the front of the pinned block.
+    out[sessionId] = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0
     count++
   }
   return out
@@ -189,6 +212,9 @@ export function readDesktopState(env: NodeJS.ProcessEnv = process.env): DesktopS
     if (displayName) state.displayName = displayName
     const sessionShelves = cleanShelfPins(raw.sessionShelves)
     if (sessionShelves && Object.keys(sessionShelves).length > 0) state.sessionShelves = sessionShelves
+    const pinnedSessions = cleanPinnedSessions(raw.pinnedSessions)
+    if (pinnedSessions && Object.keys(pinnedSessions).length > 0)
+      state.pinnedSessions = pinnedSessions
     return state
   } catch {
     return {}
@@ -238,6 +264,13 @@ export function mergeDesktopState(
     const shelves = cleanShelfPins(patch.sessionShelves)
     if (shelves && Object.keys(shelves).length > 0) next.sessionShelves = shelves
     else delete next.sessionShelves
+  }
+  if (patch.pinnedSessions !== undefined) {
+    // Same wholesale-replacement rule as the shelves above: the renderer owns
+    // the map, and an empty one means "nothing is pinned", stored as absence.
+    const pinned = cleanPinnedSessions(patch.pinnedSessions)
+    if (pinned && Object.keys(pinned).length > 0) next.pinnedSessions = pinned
+    else delete next.pinnedSessions
   }
 
   const path = desktopStatePath(env)

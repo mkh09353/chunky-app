@@ -107,12 +107,15 @@ import {
   forgetRepoSessions,
   loadDesktopUiState,
   quickKeysSnapshot,
+  pinnedSessionsSnapshot,
   rememberActiveRepo,
   saveDisplayName,
+  savePinnedSessions,
   saveQuickKeys,
   saveSessionShelves,
   sessionShelvesSnapshot,
 } from "./lib/desktopState"
+import { pinsFromRecord, prunePins, setPin } from "./lib/sessionPins"
 import {
   classifyShelf,
   reconcileShelfPins,
@@ -354,6 +357,12 @@ export function App() {
   const [shelfPins, setShelfPins] = useState<ReadonlyMap<string, ShelfPin>>(() =>
     shelfPinsFromRecord(sessionShelvesSnapshot()),
   )
+  // Threads the user stuck to the top of the sidebar, mapped to when they were
+  // pinned. A third axis, independent of shelf and archive (see lib/sessionPins)
+  // and durable per device for the same reason: the protocol has no pin.
+  const [pinnedSessions, setPinnedSessions] = useState<ReadonlyMap<string, number>>(() =>
+    pinsFromRecord(pinnedSessionsSnapshot()),
+  )
   const selectedTracker = useRef(createCompletionTracker())
   // Sessions outside the selected repo are not in `sessions`, so their
   // transition bookkeeping is deliberately separate from the sidebar's list
@@ -486,6 +495,7 @@ export function App() {
       setQuickKeys(ui.quickKeys)
       setNameOverride(ui.displayName)
       setShelfPins(shelfPinsFromRecord(ui.sessionShelves))
+      setPinnedSessions(pinsFromRecord(ui.pinnedSessions))
     })
     return () => {
       cancelled = true
@@ -768,6 +778,27 @@ export function App() {
     setShelfPins(next)
     saveSessionShelves(next)
   }, [live, sessions, shelfPins])
+
+  // Forget pins whose session is gone (deleted, or on a repository that was
+  // removed). Absence is the ONLY signal `prunePins` has, so this refuses to
+  // run until the row cache can speak for every scope: one list per registered
+  // repository AND one for the repository-less scope. Anything less would
+  // delete the pins of every scope that simply has not been listed yet.
+  useEffect(() => {
+    if (!live || pinnedSessions.size === 0) return
+    const cache = repoSessionCache.current
+    if (!cache.has(null)) return
+    if (!repos.every((repo) => cache.has(repo.id))) return
+    const known = new Set<string>()
+    for (const rows of cache.values()) for (const row of rows) known.add(row.sessionId)
+    // The live list is fresher than the cache for the tab being viewed.
+    for (const row of sessions) known.add(row.sessionId)
+    if (known.size === 0) return
+    const next = prunePins(pinnedSessions, known)
+    if (!next) return
+    setPinnedSessions(next)
+    savePinnedSessions(next)
+  }, [live, sessions, repos, repoRows, pinnedSessions])
 
   const repoTabUnreadIds = useMemo(() => {
     const out = new Set(unreadRepoIds)
@@ -1895,6 +1926,22 @@ export function App() {
     [live, sessions, shelfPins],
   )
 
+  /** Stick a thread to the top of the sidebar, or release it.
+   *
+   *  Deliberately independent of the shelf: pinning does not unsettle a thread,
+   *  mark it read or keep it out of history — it only decides where the row is
+   *  drawn. The timestamp is the pinned block's order, so a new pin lands at
+   *  the bottom of the block and nothing above it moves. */
+  const handleThreadPinnedChange = useCallback(
+    (id: string, pinned: boolean) => {
+      if (!live) return
+      const next = setPin(pinnedSessions, id, pinned, Date.now())
+      setPinnedSessions(next)
+      savePinnedSessions(next)
+    },
+    [live, pinnedSessions],
+  )
+
   // ---- PR reviews ---------------------------------------------------------
 
   /** Read the server's cached board, or force it to poll GitHub again. */
@@ -2997,6 +3044,8 @@ export function App() {
           unreadThreadIds={live ? unreadDone : undefined}
           settledThreadIds={live ? settledThreadIds : undefined}
           onThreadSettledChange={live ? handleThreadSettledChange : undefined}
+          pinnedThreadIds={live ? pinnedSessions : undefined}
+          onThreadPinnedChange={live ? handleThreadPinnedChange : undefined}
           displayName={pickDisplayName(nameOverride, gitUserName)}
           prWidget={
             live && !prUnsupported ? (

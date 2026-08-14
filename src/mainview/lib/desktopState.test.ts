@@ -39,8 +39,10 @@ const {
   resetDesktopUiStateForTest,
   saveDisplayName,
   saveQuickKeys,
+  savePinnedSessions,
   saveSessionShelves,
   sessionShelvesSnapshot,
+  pinnedSessionsSnapshot,
 } = await import("./desktopState")
 
 function reset(initial: Record<string, string> = {}) {
@@ -63,6 +65,7 @@ describe("legacy localStorage values", () => {
       quickKeys: [],
       displayName: "",
       sessionShelves: {},
+      pinnedSessions: {},
     })
     expect(desktopUiSnapshot().activeRepoId).toBe("r1")
   })
@@ -75,6 +78,7 @@ describe("legacy localStorage values", () => {
       quickKeys: [],
       displayName: "",
       sessionShelves: {},
+      pinnedSessions: {},
     })
     reset({ [LAST_SESSION_KEY]: JSON.stringify({ r1: 7, r2: "s2" }) })
     expect(readLegacyUiState().lastSessionByRepo).toEqual({ r2: "s2" })
@@ -90,6 +94,7 @@ describe("without the native bridge", () => {
       quickKeys: [],
       displayName: "",
       sessionShelves: {},
+      pinnedSessions: {},
     })
   })
 
@@ -215,5 +220,38 @@ describe("session shelf pins", () => {
     rememberActiveRepo("r1")
     rememberLastSession("r1", "s1")
     expect(JSON.stringify(store.data)).not.toContain("session-abc")
+  })
+})
+
+describe("pinned sessions", () => {
+  test("start empty and read back what was saved", () => {
+    expect(pinnedSessionsSnapshot()).toEqual({})
+    savePinnedSessions(new Map([["s1", 42]]))
+    expect(pinnedSessionsSnapshot()).toEqual({ s1: 42 })
+    expect(desktopUiSnapshot().pinnedSessions).toEqual({ s1: 42 })
+  })
+
+  test("a later save replaces the map wholesale", () => {
+    savePinnedSessions(
+      new Map([
+        ["s1", 1],
+        ["s2", 2],
+      ]),
+    )
+    savePinnedSessions(new Map([["s2", 2]]))
+    expect(pinnedSessionsSnapshot()).toEqual({ s2: 2 })
+  })
+
+  test("clearing every pin saves an empty map", () => {
+    savePinnedSessions(new Map([["s1", 1]]))
+    savePinnedSessions(new Map())
+    expect(pinnedSessionsSnapshot()).toEqual({})
+  })
+
+  test("are never mirrored into localStorage — desktop.json owns them", () => {
+    savePinnedSessions(new Map([["pinned-abc", 1]]))
+    rememberActiveRepo("r1")
+    rememberLastSession("r1", "s1")
+    expect(JSON.stringify(store.data)).not.toContain("pinned-abc")
   })
 })
