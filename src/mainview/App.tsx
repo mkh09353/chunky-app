@@ -3088,7 +3088,8 @@ export function App() {
               <TerminalDrawer
                 open={terminalsOpen && activeRepoId !== null}
                 onOpenChange={setTerminalsOpen}
-                cwd={activeRepo?.path || undefined}
+                scopeKey={sessionId ?? (activeRepoId ? `repo:${activeRepoId}` : null)}
+                cwd={gitCwd}
                 resolvedTheme={resolved}
               />
               <div className="flex flex-col gap-2">

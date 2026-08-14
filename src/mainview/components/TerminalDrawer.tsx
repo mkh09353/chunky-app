@@ -22,7 +22,8 @@ import {
 import { Button } from "./ui/button"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
-const STORAGE_KEY = "chunky.terminals.v1"
+const STORAGE_KEY = "chunky.terminals.v2"
+const LEGACY_STORAGE_KEY = "chunky.terminals.v1"
 const MIN_HEIGHT = 120
 const DEFAULT_HEIGHT = 260
 const MAX_HEIGHT_RATIO = 0.7
@@ -30,29 +31,42 @@ const MAX_HEIGHT_RATIO = 0.7
 const MAX_TERMINALS_PER_GROUP = 4
 /** Custom tab names are trimmed and capped to keep the tab strip readable. */
 const MAX_NAME_LENGTH = 40
+/** Drop the oldest persisted chat scopes so localStorage stays bounded. */
+const MAX_SCOPES = 20
 
 const FONT_FAMILY = "JetBrains Mono, SF Mono, ui-monospace, Menlo, monospace"
 
 /** Group = one tab entry; >1 id renders side-by-side in an equal-column grid. */
 type TerminalGroup = { id: string; ids: string[] }
 
-type Persisted = {
-  open: boolean
-  height: number
+/** Per-chat tab strip. `lastUsed` is Date.now() at last write, for LRU prune. */
+type TerminalScope = {
   groups: TerminalGroup[]
   /** Custom tab names by terminal id; absent → the default "Terminal N" label. */
   names: Record<string, string>
   activeId: string | null
   seq: number
+  lastUsed: number
+}
+
+type Persisted = {
+  open: boolean
+  height: number
+  scopes: Record<string, TerminalScope>
+}
+
+const EMPTY_SCOPE: TerminalScope = {
+  groups: [],
+  names: {},
+  activeId: null,
+  seq: 1,
+  lastUsed: 0,
 }
 
 const EMPTY: Persisted = {
   open: false,
   height: DEFAULT_HEIGHT,
-  groups: [],
-  names: {},
-  activeId: null,
-  seq: 1,
+  scopes: {},
 }
 
 function maxHeight(): number {
@@ -65,47 +79,99 @@ function clampHeight(value: number): number {
   return Math.min(Math.max(Math.round(safe), MIN_HEIGHT), maxHeight())
 }
 
+function parseGroups(raw: unknown): { groups: TerminalGroup[]; seen: Set<string> } {
+  const groups: TerminalGroup[] = []
+  const seen = new Set<string>()
+  if (!Array.isArray(raw)) return { groups, seen }
+  for (const group of raw) {
+    if (!group || typeof group !== "object") continue
+    const gid = (group as { id?: unknown }).id
+    const ids = (group as { ids?: unknown }).ids
+    if (typeof gid !== "string" || !Array.isArray(ids)) continue
+    const clean = ids
+      .filter((id): id is string => typeof id === "string" && id.length > 0 && !seen.has(id))
+      .slice(0, MAX_TERMINALS_PER_GROUP)
+    for (const id of clean) seen.add(id)
+    if (clean.length > 0) groups.push({ id: gid, ids: clean })
+  }
+  return { groups, seen }
+}
+
+function parseNames(raw: unknown, seen: Set<string>): Record<string, string> {
+  const names: Record<string, string> = {}
+  if (!raw || typeof raw !== "object") return names
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!seen.has(id) || typeof value !== "string") continue
+    const clean = value.trim().slice(0, MAX_NAME_LENGTH)
+    if (clean) names[id] = clean
+  }
+  return names
+}
+
+function parseScope(raw: unknown): TerminalScope | null {
+  if (!raw || typeof raw !== "object") return null
+  const body = raw as Partial<TerminalScope>
+  const { groups, seen } = parseGroups(body.groups)
+  const names = parseNames(body.names, seen)
+  const activeId =
+    typeof body.activeId === "string" && seen.has(body.activeId) ? body.activeId : (groups[0]?.ids[0] ?? null)
+  const seq =
+    typeof body.seq === "number" && Number.isFinite(body.seq) ? Math.max(1, Math.floor(body.seq)) : seen.size + 1
+  const lastUsed =
+    typeof body.lastUsed === "number" && Number.isFinite(body.lastUsed) ? Math.max(0, Math.floor(body.lastUsed)) : 0
+  return { groups, names, activeId, seq, lastUsed }
+}
+
+function pruneScopes(scopes: Record<string, TerminalScope>, keep?: string): Record<string, TerminalScope> {
+  const keys = Object.keys(scopes)
+  if (keys.length <= MAX_SCOPES) return scopes
+  const ranked = keys.sort((a, b) => {
+    const diff = (scopes[b]?.lastUsed ?? 0) - (scopes[a]?.lastUsed ?? 0)
+    if (diff !== 0) return diff
+    return a < b ? -1 : a > b ? 1 : 0
+  })
+  const next: Record<string, TerminalScope> = {}
+  for (const key of ranked.slice(0, MAX_SCOPES)) {
+    const scope = scopes[key]
+    if (scope) next[key] = scope
+  }
+  // The live chat must survive even if it was the coldest of 21+.
+  if (keep && scopes[keep] && !next[keep]) {
+    const evict = ranked.slice(0, MAX_SCOPES).find((key) => key !== keep)
+    if (evict) delete next[evict]
+    next[keep] = scopes[keep]
+  }
+  return next
+}
+
+function dropLegacyStorage(): void {
+  try {
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
+  } catch {
+    /* storage disabled */
+  }
+}
+
 function readPersisted(): Persisted {
   try {
+    dropLegacyStorage()
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return EMPTY
     const parsed = JSON.parse(raw) as unknown
     if (!parsed || typeof parsed !== "object") return EMPTY
     const body = parsed as Partial<Persisted>
-    const groups: TerminalGroup[] = []
-    const seen = new Set<string>()
-    if (Array.isArray(body.groups)) {
-      for (const group of body.groups) {
-        if (!group || typeof group !== "object") continue
-        const gid = (group as { id?: unknown }).id
-        const ids = (group as { ids?: unknown }).ids
-        if (typeof gid !== "string" || !Array.isArray(ids)) continue
-        const clean = ids
-          .filter((id): id is string => typeof id === "string" && id.length > 0 && !seen.has(id))
-          .slice(0, MAX_TERMINALS_PER_GROUP)
-        for (const id of clean) seen.add(id)
-        if (clean.length > 0) groups.push({ id: gid, ids: clean })
+    const scopes: Record<string, TerminalScope> = {}
+    if (body.scopes && typeof body.scopes === "object") {
+      for (const [key, value] of Object.entries(body.scopes as Record<string, unknown>)) {
+        if (!key) continue
+        const scope = parseScope(value)
+        if (scope) scopes[key] = scope
       }
     }
-    // Names are kept only for terminals that survived group validation.
-    const names: Record<string, string> = {}
-    if (body.names && typeof body.names === "object") {
-      for (const [id, value] of Object.entries(body.names as Record<string, unknown>)) {
-        if (!seen.has(id) || typeof value !== "string") continue
-        const clean = value.trim().slice(0, MAX_NAME_LENGTH)
-        if (clean) names[id] = clean
-      }
-    }
-    const activeId =
-      typeof body.activeId === "string" && seen.has(body.activeId) ? body.activeId : (groups[0]?.ids[0] ?? null)
-    const seq = typeof body.seq === "number" && Number.isFinite(body.seq) ? Math.max(1, Math.floor(body.seq)) : seen.size + 1
     return {
       open: body.open === true,
       height: clampHeight(typeof body.height === "number" ? body.height : DEFAULT_HEIGHT),
-      groups,
-      names,
-      activeId,
-      seq,
+      scopes: pruneScopes(scopes),
     }
   } catch {
     return EMPTY
@@ -371,26 +437,31 @@ function TerminalPane({
 export function TerminalDrawer({
   open,
   onOpenChange,
+  scopeKey,
   cwd,
   resolvedTheme,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** Working directory for newly spawned shells (active repo path). */
+  /** Chat/session identity. Null hides the drawer; each key has its own tabs. */
+  scopeKey: string | null
+  /** Working directory for newly spawned shells (session workspace, else repo). */
   cwd?: string
   resolvedTheme: "light" | "dark"
 }) {
   const initial = useMemo(readPersisted, [])
   const [height, setHeight] = useState(() => clampHeight(initial.height))
-  const [groups, setGroups] = useState<TerminalGroup[]>(() => initial.groups)
-  const [activeId, setActiveId] = useState<string | null>(() => initial.activeId)
-  const [names, setNames] = useState<Record<string, string>>(() => initial.names)
+  const [scopes, setScopes] = useState<Record<string, TerminalScope>>(() => initial.scopes)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState("")
   const cancelRenameRef = useRef(false)
   const [exited, setExited] = useState<Record<string, boolean>>({})
   const [restarts, setRestarts] = useState<Record<string, number>>({})
-  const seqRef = useRef(initial.seq)
+
+  const layout = scopeKey ? (scopes[scopeKey] ?? EMPTY_SCOPE) : EMPTY_SCOPE
+  const groups = layout.groups
+  const names = layout.names
+  const activeId = layout.activeId
 
   const available = terminalsAvailable()
   const theme = resolvedTheme === "dark" ? DARK_THEME : LIGHT_THEME
@@ -399,10 +470,37 @@ export function TerminalDrawer({
   heightRef.current = height
   const dragRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null)
 
-  // Persist the whole drawer shape (open + height + tabs) on every change.
+  const patchScope = useCallback(
+    (recipe: (current: TerminalScope) => TerminalScope) => {
+      if (!scopeKey) return
+      setScopes((prev) => {
+        const current = prev[scopeKey] ?? EMPTY_SCOPE
+        const next = recipe(current)
+        return next === current ? prev : { ...prev, [scopeKey]: next }
+      })
+    },
+    [scopeKey],
+  )
+
+  // Persist global chrome + every known scope. lastUsed is stamped on the live
+  // chat; other scopes keep the timestamp already on disk so a later write
+  // cannot pretend they were never opened.
   useEffect(() => {
-    writePersisted({ open, height, groups, names, activeId, seq: seqRef.current })
-  }, [open, height, groups, names, activeId])
+    const disk = readPersisted()
+    const now = Date.now()
+    const next: Record<string, TerminalScope> = {}
+    for (const [key, value] of Object.entries(scopes)) {
+      next[key] = {
+        ...value,
+        lastUsed: key === scopeKey ? now : (disk.scopes[key]?.lastUsed ?? value.lastUsed),
+      }
+    }
+    const pruned = pruneScopes(next, scopeKey ?? undefined)
+    writePersisted({ open, height, scopes: pruned })
+    if (Object.keys(pruned).length !== Object.keys(scopes).length) {
+      setScopes(pruned)
+    }
+  }, [open, height, scopes, scopeKey])
 
   const labelOf = useCallback((id: string) => names[id] ?? defaultLabelFor(id), [names])
 
@@ -419,11 +517,11 @@ export function TerminalDrawer({
   const commitRename = useCallback(
     (id: string) => {
       const value = draft.trim().slice(0, MAX_NAME_LENGTH)
-      setNames((prev) => {
-        const next = { ...prev }
-        if (!value || value === defaultLabelFor(id)) delete next[id]
-        else next[id] = value
-        return next
+      patchScope((current) => {
+        const nextNames = { ...current.names }
+        if (!value || value === defaultLabelFor(id)) delete nextNames[id]
+        else nextNames[id] = value
+        return { ...current, names: nextNames }
       })
       // The edit session is over: swallow any blur the unmounting input emits so
       // it cannot re-commit an already-cleared draft.
@@ -431,7 +529,7 @@ export function TerminalDrawer({
       setEditingId(null)
       setDraft("")
     },
-    [draft],
+    [draft, patchScope],
   )
 
   const cancelRename = useCallback(() => {
@@ -443,19 +541,30 @@ export function TerminalDrawer({
 
   const createTerminal = useCallback(
     (mode: "tab" | "split") => {
-      const id = `term-${seqRef.current++}`
-      setGroups((prev) => {
+      if (!scopeKey) return
+      patchScope((current) => {
+        const id = `${scopeKey}:term-${current.seq}`
+        const seq = current.seq + 1
         if (mode === "split") {
-          const target = prev.find((g) => g.ids.some((t) => t === activeId))
+          const target = current.groups.find((g) => g.ids.some((t) => t === current.activeId))
           if (target && target.ids.length < MAX_TERMINALS_PER_GROUP) {
-            return prev.map((g) => (g.id === target.id ? { ...g, ids: [...g.ids, id] } : g))
+            return {
+              ...current,
+              seq,
+              activeId: id,
+              groups: current.groups.map((g) => (g.id === target.id ? { ...g, ids: [...g.ids, id] } : g)),
+            }
           }
         }
-        return [...prev, { id: `group-${id}`, ids: [id] }]
+        return {
+          ...current,
+          seq,
+          activeId: id,
+          groups: [...current.groups, { id: `group-${id}`, ids: [id] }],
+        }
       })
-      setActiveId(id)
     },
-    [activeId],
+    [scopeKey, patchScope],
   )
 
   const closeTerminal = useCallback(
@@ -474,24 +583,30 @@ export function TerminalDrawer({
         return next
       })
       setEditingId((current) => (current === id ? null : current))
-      setNames((prev) => {
-        if (!(id in prev)) return prev
-        const next = { ...prev }
-        delete next[id]
-        return next
+      patchScope((current) => {
+        const removedIndex = current.groups.flatMap((g) => g.ids).indexOf(id)
+        const nextGroups = current.groups
+          .map((g) => ({ ...g, ids: g.ids.filter((t) => t !== id) }))
+          .filter((g) => g.ids.length > 0)
+        const nextNames = { ...current.names }
+        delete nextNames[id]
+        let nextActive = current.activeId
+        if (current.activeId === id) {
+          const remaining = nextGroups.flatMap((g) => g.ids)
+          const fallbackIndex = Math.min(Math.max(removedIndex - 1, 0), Math.max(remaining.length - 1, 0))
+          nextActive = remaining.length === 0 ? null : (remaining[fallbackIndex] ?? null)
+        }
+        return { ...current, groups: nextGroups, names: nextNames, activeId: nextActive }
       })
-      const removedIndex = groups.flatMap((g) => g.ids).indexOf(id)
-      const nextGroups = groups
-        .map((g) => ({ ...g, ids: g.ids.filter((t) => t !== id) }))
-        .filter((g) => g.ids.length > 0)
-      setGroups(nextGroups)
-      if (activeId === id) {
-        const remaining = nextGroups.flatMap((g) => g.ids)
-        const fallbackIndex = Math.min(Math.max(removedIndex - 1, 0), Math.max(remaining.length - 1, 0))
-        setActiveId(remaining.length === 0 ? null : (remaining[fallbackIndex] ?? null))
-      }
     },
-    [groups, activeId],
+    [patchScope],
+  )
+
+  const setActiveId = useCallback(
+    (id: string) => {
+      patchScope((current) => (current.activeId === id ? current : { ...current, activeId: id }))
+    },
+    [patchScope],
   )
 
   const restartTerminal = useCallback((id: string) => {
@@ -508,21 +623,36 @@ export function TerminalDrawer({
     setExited((prev) => (prev[id] ? prev : { ...prev, [id]: true }))
   }, [])
 
-  // Opening an empty drawer spawns one shell. Guarded by a ref so React's
-  // StrictMode double-effect (and later group changes) can't spawn duplicates —
-  // closing the last tab leaves the empty state, it does not respawn.
-  const wasOpenRef = useRef(false)
+  // Opening an empty drawer (or landing on a chat with no tabs) spawns one
+  // shell. Delayed so a one-frame repo-switch fallback (`repo:${id}` while
+  // sessionId is still null) cannot create an abandoned PTY. The timer is
+  // cancelled if the scope changes or the drawer closes before it fires.
+  // Primed only after a successful spawn so StrictMode's double-effect cannot
+  // start two timers, and closing the last tab leaves the empty state.
+  const primedRef = useRef<{ scope: string | null; open: boolean }>({ scope: null, open: false })
   const groupCountRef = useRef(groups.length)
   groupCountRef.current = groups.length
   useEffect(() => {
-    if (!open) {
-      wasOpenRef.current = false
+    setEditingId(null)
+    setDraft("")
+  }, [scopeKey])
+  useEffect(() => {
+    if (!open || !scopeKey) {
+      primedRef.current = { scope: scopeKey, open: false }
       return
     }
-    if (wasOpenRef.current) return
-    wasOpenRef.current = true
-    if (available && groupCountRef.current === 0) createTerminal("tab")
-  }, [open, available, createTerminal])
+    const primed = primedRef.current
+    if (primed.open && primed.scope === scopeKey) return
+    if (!available || groupCountRef.current > 0) {
+      primedRef.current = { scope: scopeKey, open: true }
+      return
+    }
+    const timer = window.setTimeout(() => {
+      primedRef.current = { scope: scopeKey, open: true }
+      if (groupCountRef.current === 0) createTerminal("tab")
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [open, available, createTerminal, scopeKey])
 
   const activeGroup = useMemo(
     () => groups.find((g) => g.ids.some((t) => t === activeId)) ?? groups[0] ?? null,
@@ -565,7 +695,7 @@ export function TerminalDrawer({
     return () => window.removeEventListener("resize", onWindowResize)
   }, [open])
 
-  if (!open) return null
+  if (!open || !scopeKey) return null
 
   return (
     <div
