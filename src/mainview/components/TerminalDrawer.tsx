@@ -8,7 +8,8 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import { FitAddon } from "@xterm/addon-fit"
-import { Terminal, type ITheme } from "@xterm/xterm"
+import { WebglAddon } from "@xterm/addon-webgl"
+import { Terminal, type IDisposable, type ITheme } from "@xterm/xterm"
 import { cn } from "~/lib/cn"
 import {
   onTerminalData,
@@ -332,6 +333,32 @@ function TerminalPane({
     fitRef.current = fitAddon
     lastSizeRef.current = { cols: 0, rows: 0 }
 
+    /* GPU renderer. Every failure mode falls back to xterm's DOM renderer:
+       activation throws when the webview has no WebGL2 context, and disposing
+       the addon after a lost context restores the DOM renderer in place — so a
+       dead GL context can never leave a blank pane. */
+    let webgl: WebglAddon | null = null
+    let contextLoss: IDisposable | null = null
+    const dropWebgl = () => {
+      contextLoss?.dispose()
+      contextLoss = null
+      const addon = webgl
+      webgl = null
+      try {
+        addon?.dispose()
+      } catch {
+        /* already torn down with the context */
+      }
+    }
+    try {
+      const addon = new WebglAddon()
+      term.loadAddon(addon)
+      webgl = addon
+      contextLoss = addon.onContextLoss(() => dropWebgl())
+    } catch {
+      dropWebgl()
+    }
+
     let disposed = false
     let opened = false
     const pending: string[] = []
@@ -401,6 +428,7 @@ function TerminalPane({
       offData()
       offExit()
       dataSub.dispose()
+      dropWebgl()
       term.dispose()
       termRef.current = null
       fitRef.current = null
