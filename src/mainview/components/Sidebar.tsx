@@ -507,7 +507,7 @@ export function Sidebar({
       <div
         className={cn(
           DRAG_REGION,
-          "relative z-10 flex h-[52px] items-center gap-2.5 pr-3 pl-[78px]",
+          "relative z-10 flex h-[52px] items-center gap-2 pr-2 pl-[70px]",
         )}
       >
         <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-primary/20 bg-primary/10 shadow-xs shadow-primary/20">
@@ -532,7 +532,7 @@ export function Sidebar({
                     aria-label="Home"
                     className={cn(
                       NO_DRAG_REGION,
-                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                       homeActive
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -556,7 +556,7 @@ export function Sidebar({
                     aria-label="The Zoo"
                     className={cn(
                       NO_DRAG_REGION,
-                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                       zooActive
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -580,7 +580,7 @@ export function Sidebar({
                     aria-label="Usage"
                     className={cn(
                       NO_DRAG_REGION,
-                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                       usageActive
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -604,7 +604,7 @@ export function Sidebar({
                     aria-label="Evals"
                     className={cn(
                       NO_DRAG_REGION,
-                      "flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
+                      "flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/40",
                       evalsActive
                         ? "bg-primary/10 text-primary"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground",
