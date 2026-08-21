@@ -646,7 +646,7 @@ function QualityRow({ label, value, hint }: { label: string; value: string; hint
   )
 }
 
-/** Model | Cost | Share | Tokens | Score, cost desc (the parser sorts it). */
+/** Model | Cost | Share | Tokens | Score | Rework, cost desc (the parser sorts it). */
 function BreakdownTable({ rows, totalCost }: { rows: readonly UsageModelRow[]; totalCost: number }) {
   if (rows.length === 0) {
     return (
@@ -664,6 +664,7 @@ function BreakdownTable({ rows, totalCost }: { rows: readonly UsageModelRow[]; t
           <col className="w-[62px]" />
           <col className="w-[72px]" />
           <col className="w-[86px]" />
+          <col className="w-[66px]" />
         </colgroup>
         <thead>
           <tr className="border-border/70 border-b bg-muted/40 text-[10.5px] text-muted-foreground uppercase tracking-wide">
@@ -672,6 +673,7 @@ function BreakdownTable({ rows, totalCost }: { rows: readonly UsageModelRow[]; t
             <th className="px-2.5 py-1.5 text-right font-medium">Share</th>
             <th className="px-2.5 py-1.5 text-right font-medium">Tokens</th>
             <th className="px-2.5 py-1.5 text-right font-medium">Score</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">Rework</th>
           </tr>
         </thead>
         <tbody>
@@ -703,6 +705,9 @@ function BreakdownTable({ rows, totalCost }: { rows: readonly UsageModelRow[]; t
               </td>
               <td className="px-2.5 py-1.5 text-right tabular-nums">
                 <ScoreCell row={row} />
+              </td>
+              <td className="px-2.5 py-1.5 text-right text-muted-foreground tabular-nums">
+                {row.reworkRate == null ? "—" : percent(row.reworkRate)}
               </td>
             </tr>
           ))}
