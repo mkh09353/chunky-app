@@ -1,5 +1,6 @@
 import {
   Boxes,
+  Cookie,
   Cpu,
   Eye,
   GitPullRequest,
@@ -18,6 +19,7 @@ import { DRAG_REGION } from "~/lib/dragRegion"
 import { Dialog, DialogPopup } from "../ui/dialog"
 import { ScrollArea } from "../ui/scroll-area"
 import { AdvisorSection, ReviewerSection, SoloAdvisorSection } from "./AgentConfigSection"
+import { CookiesSection } from "./CookiesSection"
 import { GeneralSection } from "./GeneralSection"
 import { ModelsSection } from "./ModelsSection"
 import { ModesSection } from "./ModesSection"
@@ -40,6 +42,7 @@ type SectionId =
   | "prReviews"
   | "workflow"
   | "voice"
+  | "cookies"
   | "relay"
   | "general"
 
@@ -54,6 +57,7 @@ const NAV: { id: SectionId; label: string; icon: typeof Cpu }[] = [
   { id: "prReviews", label: "PR Reviews", icon: GitPullRequest },
   { id: "workflow", label: "Workflow", icon: Workflow },
   { id: "voice", label: "Voice", icon: Mic },
+  { id: "cookies", label: "Browser cookies", icon: Cookie },
   { id: "relay", label: "Relay", icon: Smartphone },
   { id: "general", label: "General", icon: Settings2 },
 ]
@@ -117,6 +121,8 @@ function renderSection(
       return <WorkflowSection />
     case "voice":
       return <VoiceSection />
+    case "cookies":
+      return <CookiesSection />
     case "relay":
       return <RelaySection connection={connection} />
     case "general":

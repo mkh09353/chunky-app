@@ -4,6 +4,7 @@ import { homedir } from "node:os"
 import { existsSync } from "node:fs"
 import { stat as fsStat } from "node:fs/promises"
 import { createAppBrowserResolver } from "./appBrowser"
+import { createCookieSyncService } from "./cookieSync"
 import {
   candidateRoots,
   destroyFinders,
@@ -217,6 +218,9 @@ function clampQuery(raw: unknown): string {
 const resolveAppBrowserTarget = createAppBrowserResolver({
   availableRenderers: async () => (await BuildConfig.get()).availableRenderers ?? ["native"],
 })
+const cookieSync = createCookieSyncService({
+  resolveTarget: () => resolveAppBrowserTarget(),
+})
 
 let rpc!: ReturnType<typeof createRPC>
 const terminals = createTerminalManager((name, payload) => {
@@ -409,8 +413,14 @@ rpc = createRPC({
     appBrowserTarget: async (params: unknown) => {
       const paneUrl =
         params && typeof params === "object" ? (params as { paneUrl?: unknown }).paneUrl : params
-      return resolveAppBrowserTarget(typeof paneUrl === "string" ? paneUrl : undefined)
+      const target = await resolveAppBrowserTarget(typeof paneUrl === "string" ? paneUrl : undefined)
+      if (target.debuggable) cookieSync.onPaneDebuggable()
+      return target
     },
+    cookieSyncGetSettings: async () => cookieSync.getState(),
+    cookieSyncSetSettings: async (params: unknown) => cookieSync.setSettings(params),
+    cookieSyncRunNow: async () => cookieSync.runNow(),
+    cookieSyncListProfiles: async () => cookieSync.listProfiles(),
     /** Target for the local product-factory service. The renderer immediately
      * announces this ephemeral credential to the authenticated Chunky server. */
     appZooTarget: async () => ({ ok: true, ...await zooService.target() }),
@@ -643,6 +653,7 @@ rpc = createRPC({
 // catch-up and all later re-arming; GitHub remains entirely in this Bun process.
 void watchScheduler.start().catch((error) => console.warn("[zoo] competitor watch scheduler:", error))
 void xWatchScheduler.start().catch((error) => console.warn("[zoo] X-watch scheduler:", error instanceof Error ? error.message : "unknown error"))
+cookieSync.start()
 
 // First-run setup can take minutes (release download → bun install → server
 // start). Push each stage to the webview over the existing fire-and-forget
