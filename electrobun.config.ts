@@ -35,16 +35,15 @@ const FFF_BIN_PACKAGES = [
 /**
  * Bundle Chromium (CEF) instead of using the system WebView.
  *
- * Off by default, and deliberately: CEF is the only way to get a Chrome DevTools
- * Protocol listener for the in-app browser pane (Electrobun starts CEF with
- * `remote_debugging_port` = the first free port in 9222-9232, loopback only,
- * which is what the app announces to the Chunky server), but the CEF payload is
- * a ~131MB download that lands as a ~400MB framework inside the bundle - versus
- * a ~16MB self-extracting app today - and every release would then have to sign
- * and notarize that framework plus its helper processes.
+ * Tagged releases set CHUNKY_BUNDLE_CEF=1 so the shipped .app includes CEF
+ * (needed for the in-app browser pane's Chrome DevTools Protocol listener;
+ * Electrobun starts CEF with `remote_debugging_port` = the first free port in
+ * 9222-9232, loopback only, which is what the app announces to the Chunky
+ * server). Local `bun run build` / `bun run dev` still default to the system
+ * WebView unless you export CHUNKY_BUNDLE_CEF=1 — CEF is a ~131MB download that
+ * lands as a ~400MB framework inside the bundle.
  *
- * Build a CEF variant with `CHUNKY_BUNDLE_CEF=1 bun run build` (or `... bun run
- * dev`). Nothing else has to change: the main window stays on the system WebView
+ * Nothing else has to change: the main window stays on the system WebView
  * (`renderer: "native"` in src/bun/index.ts) and only the browser pane asks for
  * `renderer="cef"`, which it does automatically once build.json advertises it.
  */

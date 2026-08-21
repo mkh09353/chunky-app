@@ -64,6 +64,8 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - run: bun run build
+        env:
+          CHUNKY_BUNDLE_CEF: "1"
 
       - name: Create or update GitHub Release and upload artifacts
         uses: softprops/action-gh-release@v2
