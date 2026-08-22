@@ -507,7 +507,7 @@ export function Sidebar({
       <div
         className={cn(
           DRAG_REGION,
-          "relative z-10 flex h-[52px] items-center gap-2 pr-2 pl-[70px]",
+          "relative z-10 flex h-[52px] items-center gap-2 pr-2 pl-[78px]",
         )}
       >
         <div className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-[10px] border border-primary/20 bg-primary/10 shadow-xs shadow-primary/20">
