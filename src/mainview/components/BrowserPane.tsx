@@ -687,7 +687,17 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
             host rather than a child of it: `paneCovered` treats anything it
             does not contain as an overlay and hides the native view while it
             is up, which is what makes this card both visible and clickable
-            over the composited page. */}
+            over the composited page.
+
+            The full-pane scrim is what guarantees that: the card alone is too
+            small for `probeCovered`'s coarse grid to reliably land on, so the
+            native view would otherwise stay composited on top and swallow the
+            clicks. The scrim spans the whole host rect (a sibling of `host`, so
+            `host.contains(...)` is false), so every probe point hits it and the
+            native view is hidden the moment the offer is up. */}
+        {cookiePrompt ? (
+          <div className={cn(NO_DRAG_REGION, "absolute inset-0 z-10 bg-foreground/5")} aria-hidden />
+        ) : null}
         {cookiePrompt ? (
           <div
             role="dialog"
