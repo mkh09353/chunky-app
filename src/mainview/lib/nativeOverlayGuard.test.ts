@@ -13,6 +13,7 @@ import {
   __resetOverlayLockForTests,
   acquireOverlayLock,
   isOverlayLocked,
+  computeSuppression,
   lockedOverlaysCoverRect,
   overlayLockCount,
   subscribeOverlayLock,
@@ -220,5 +221,36 @@ describe("lockedOverlaysCoverRect", () => {
   test("a collapsed pane is never considered covered", () => {
     acquireOverlayLock({ mode: "intersect", element: () => fakeElement(rect(0, 0, 2000, 2000)) })
     expect(lockedOverlaysCoverRect(rect(800, 52, 0, 0))).toBe(false)
+  })
+})
+
+describe("computeSuppression", () => {
+  // The whole truth table, because the three inputs arrive from three unrelated
+  // places (the overlay watcher, the divider drag, the pane's open state) and
+  // any one of them can be the only reason the native view must step aside.
+  const cases: Array<[{ covered: boolean; dragging: boolean; closed: boolean }, boolean, boolean]> = [
+    [{ covered: false, dragging: false, closed: false }, false, false],
+    [{ covered: true, dragging: false, closed: false }, true, true],
+    // A drag must keep the page PAINTING; only hit testing gives way.
+    [{ covered: false, dragging: true, closed: false }, false, true],
+    [{ covered: true, dragging: true, closed: false }, true, true],
+    // Closed is not unmounted, so the native view has to be switched off by hand.
+    [{ covered: false, dragging: false, closed: true }, true, true],
+    [{ covered: true, dragging: false, closed: true }, true, true],
+    [{ covered: false, dragging: true, closed: true }, true, true],
+    [{ covered: true, dragging: true, closed: true }, true, true],
+  ]
+
+  for (const [inputs, hidden, passthrough] of cases) {
+    test(`covered=${inputs.covered} dragging=${inputs.dragging} closed=${inputs.closed}`, () => {
+      expect(computeSuppression(inputs)).toEqual({ hidden, passthrough })
+    })
+  }
+
+  test("a hidden native view is always passthrough too", () => {
+    for (const [inputs] of cases) {
+      const state = computeSuppression(inputs)
+      if (state.hidden) expect(state.passthrough).toBe(true)
+    }
   })
 })

@@ -196,6 +196,40 @@ export function OverlayLock({ mode = "always" }: { mode?: OverlayLockMode }): Re
   })
 }
 
+/** What wants the native browser view out of the way right now. */
+export interface SuppressionInputs {
+  /** An overlay (dialog, popover, menu, in-tree card) is over the pane. */
+  covered: boolean
+  /** The pane divider is being dragged across the native view. */
+  dragging: boolean
+  /** The pane is closed: still mounted (the element may never leave the DOM),
+   *  but showing nothing. */
+  closed: boolean
+}
+
+/** The two switches the native view actually has. */
+export interface SuppressionState {
+  hidden: boolean
+  passthrough: boolean
+}
+
+/**
+ * Resolve the two switches from the three inputs.
+ *
+ * A covered or closed pane must neither paint nor take clicks. A drag is the
+ * odd one out: the page must KEEP painting while the cursor crosses it, so only
+ * hit testing gives way. Passthrough on top of hidden is deliberate
+ * belt-and-braces — hiding is a visibility change, and Electrobun's mask
+ * support has no `hitTest:` override, so passthrough is the one switch
+ * documented to stop the native view swallowing mouse events.
+ */
+export function computeSuppression({ covered, dragging, closed }: SuppressionInputs): SuppressionState {
+  return {
+    hidden: covered || closed,
+    passthrough: dragging || covered || closed,
+  }
+}
+
 /** Test-only: drop every lock and listener so cases cannot leak into each other. */
 export function __resetOverlayLockForTests(): void {
   locks.clear()

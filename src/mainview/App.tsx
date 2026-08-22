@@ -39,6 +39,7 @@ import { FileLinkProvider } from "./lib/fileLinkContext"
 import { announceAppBrowserTarget, resetAppBrowserAnnounce } from "./lib/appBrowser"
 import { announceAppZooTarget, resetAppZooAnnounce } from "./lib/appZoo"
 import { subscribeBrowserNavigation } from "./lib/browserNav"
+import { resolvePaneSlot } from "./lib/browserPaneSlot"
 import { getPrReviews, refreshPrReviews } from "./lib/prApi"
 import {
   hasNewActivity,
@@ -448,6 +449,9 @@ export function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(devOnboardingRequested)
   const [browserOpen, setBrowserOpen] = useState(false)
   const [filesRepoId, setFilesRepoId] = useState<string | null>(null)
+  // The browser pane's mount is one-way (see `resolvePaneSlot`): its native
+  // webview may never be disconnected, so "closed" is only ever hidden.
+  const [browserMounted, setBrowserMounted] = useState(false)
   const openRepoFiles = useCallback((repoId: string) => {
     setFilesRepoId(repoId)
     setBrowserOpen(false)
@@ -469,6 +473,17 @@ export function App() {
   useEffect(() => {
     if (filesRepoId && !repos.some((repo) => repo.id === filesRepoId)) setFilesRepoId(null)
   }, [filesRepoId, repos])
+  // One answer for the side slot: the files pane wins it, the browser pane is
+  // mounted from the first time it is opened and hidden whenever it is not
+  // showing.
+  const browserSlot = resolvePaneSlot({
+    mounted: browserMounted,
+    browserOpen,
+    filesShowing: filesRepoId != null,
+  })
+  useEffect(() => {
+    if (browserSlot.mounted && !browserMounted) setBrowserMounted(true)
+  }, [browserSlot.mounted, browserMounted])
   // Saved modes as slash aliases ("/fire") + a signal that opens the composer's
   // model picker for `/model`.
   const [slashModes, setSlashModes] = useState<SlashCommand[]>([])
@@ -3246,14 +3261,22 @@ export function App() {
                 }
               />
             )}
-            {filesRepoId && !repos.some((repo) => repo.id === filesRepoId) ? null : filesRepoId ? (
+            {filesRepoId && repos.some((repo) => repo.id === filesRepoId) ? (
               <RepoFilesPane
                 repo={repos.find((repo) => repo.id === filesRepoId)!}
                 baseUrl={config?.baseUrl ?? ""}
                 onClose={() => setFilesRepoId(null)}
               />
-            ) : browserOpen ? (
+            ) : null}
+            {/* Sticky: once opened, the browser pane stays mounted for good and
+                closing it only hides it. Unmounting it would disconnect its
+                `<electrobun-webview>`, and closing the process's only CEF
+                browser quits the app — see note 5 in BrowserPane. It is a
+                sibling of the files pane rather than an alternative to it, so
+                the files pane can take the slot without unmounting it. */}
+            {browserSlot.mounted ? (
               <BrowserPane
+                visible={browserSlot.visible}
                 onClose={() => setBrowserOpen(false)}
                 baseUrl={live && connectionState === "connected" ? config?.baseUrl ?? null : null}
               />
