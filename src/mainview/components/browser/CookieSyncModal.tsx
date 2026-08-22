@@ -1,5 +1,5 @@
-import { Ban, Check, RefreshCw, Repeat } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Ban, Check, RefreshCw, Repeat, Search } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { cn } from "~/lib/cn"
 import {
   cookieSyncCompleteFirstRun,
@@ -210,7 +210,13 @@ export function CookieSyncModal({
   const [syncedCounts, setSyncedCounts] = useState<Record<string, number>>({})
   const [allBusy, setAllBusy] = useState(false)
   const [allResult, setAllResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const [query, setQuery] = useState("")
   const alive = useRef(true)
+
+  const visibleRows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? rows.filter((row) => row.domain.includes(q)) : rows
+  }, [rows, query])
 
   useEffect(() => {
     alive.current = true
@@ -238,7 +244,10 @@ export function CookieSyncModal({
 
   // Reload each time the dialog opens: Chrome's store moves under us.
   useEffect(() => {
-    if (open) load()
+    if (open) {
+      setQuery("")
+      load()
+    }
   }, [open, load])
 
   /** Fold a fresh CookieSyncState back into the visible rows. */
@@ -332,16 +341,31 @@ export function CookieSyncModal({
         else onOpenChange(true)
       }}
     >
-      <DialogPopup className="max-h-[min(85vh,44rem)] max-w-xl gap-0 p-0">
-        <header className="flex shrink-0 flex-col gap-1 border-border/70 border-b px-5 py-4 pr-12">
-          <h2 className="font-semibold text-[15px] tracking-tight">Sync cookies from Chrome</h2>
-          <p className="text-[12.5px] text-muted-foreground">
-            Copies your logged-in sessions into Chunky's built-in browser. Cookies are read locally
-            on this Mac and never uploaded.
-          </p>
+      <DialogPopup className="h-[min(85vh,44rem)] max-w-xl gap-0 p-0">
+        <header className="flex shrink-0 flex-col gap-2 border-border/70 border-b px-5 py-4 pr-12">
+          <div className="flex flex-col gap-1">
+            <h2 className="font-semibold text-[15px] tracking-tight">Sync cookies from Chrome</h2>
+            <p className="text-[12.5px] text-muted-foreground">
+              Copies your logged-in sessions into Chunky's built-in browser. Cookies are read locally
+              on this Mac and never uploaded.
+            </p>
+          </div>
+          {!loading && !error && !chromeMissing && rows.length > 0 ? (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={`Search ${rows.length} sites`}
+                spellCheck={false}
+                aria-label="Search sites"
+                className="h-8 w-full rounded-lg border border-input bg-muted/30 py-1 pr-3 pl-8 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-[3px] focus:ring-ring/25"
+              />
+            </div>
+          ) : null}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {loading ? (
             <div className="p-5">
               <Loading rows={4} />
@@ -358,10 +382,14 @@ export function CookieSyncModal({
                   : "No sites with cookies were found in Chrome."}
               </EmptyNote>
             </div>
+          ) : visibleRows.length === 0 ? (
+            <div className="p-5">
+              <EmptyNote>No sites match “{query.trim()}”.</EmptyNote>
+            </div>
           ) : (
-            <ScrollArea className="max-h-[min(52vh,26rem)]" viewportClassName="px-3 py-2">
+            <ScrollArea className="min-h-0 flex-1" viewportClassName="px-3 py-2">
               <ul className="flex flex-col gap-0.5">
-                {rows.map((row) => (
+                {visibleRows.map((row) => (
                   <DomainRow
                     key={row.domain}
                     row={row}
