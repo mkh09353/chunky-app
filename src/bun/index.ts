@@ -13,6 +13,7 @@ import {
   searchDirectories,
 } from "./dirSearch"
 import { createDirectory } from "./fsOps"
+import { appResourceUsage, startAppResourceSampler, stopAppResourceSampler } from "./resourceSample"
 import { openInEditor as runOpenInEditor, type EditorDeps } from "./openInEditor"
 import { createTerminalManager } from "./terminal"
 import * as git from "./git"
@@ -565,6 +566,18 @@ rpc = createRPC({
     createDirectory: async (params: unknown) =>
       createDirectory((params ?? {}) as { parentDir?: unknown; name?: unknown }),
 
+    /**
+     * Percentile summary of the desktop shell's OWN RAM/CPU (this Bun process
+     * plus attributable helper processes), sampled every 20s in memory only.
+     * Input: { hours?: number } — trailing window, default 24.
+     * Output: AppResourceUsage (src/bun/resourceSample.ts)
+     */
+    appResourceUsage: async (params: unknown) => {
+      const body = params && typeof params === "object" ? (params as { hours?: unknown }) : {}
+      const hours = typeof body.hours === "number" && Number.isFinite(body.hours) ? body.hours : 24
+      return appResourceUsage(hours)
+    },
+
     zooStatus: async (params: unknown) => zoo.status(params),
     zooEnsureLedgerSkill: async (_params: unknown) => ensureZooLedgerSkill(),
     zooListSetupSessions: async (params: unknown) => zoo.listSetupSessions(params),
@@ -664,6 +677,9 @@ rpc = createRPC({
 void watchScheduler.start().catch((error) => console.warn("[zoo] competitor watch scheduler:", error))
 void xWatchScheduler.start().catch((error) => console.warn("[zoo] X-watch scheduler:", error instanceof Error ? error.message : "unknown error"))
 cookieSync.start()
+// Sample the app shell's own RAM/CPU on a 20s unref'd interval (in-memory
+// ring buffer; the appResourceUsage RPC above reads it).
+startAppResourceSampler()
 
 // First-run setup can take minutes (release download → bun install → server
 // start). Push each stage to the webview over the existing fire-and-forget
@@ -709,6 +725,7 @@ win.on("resize", () => {
 
 // Tear down native FFF handles when the process is leaving.
 const cleanup = () => {
+  stopAppResourceSampler()
   watchScheduler.stop()
   xWatchScheduler.stop()
   zoo.close()

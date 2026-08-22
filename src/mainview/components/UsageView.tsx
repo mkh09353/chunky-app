@@ -17,27 +17,40 @@ import { BarChart3, Clock3, Loader2, RefreshCw } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   getProviderQuotas,
+  getResourceUsage,
   getUsageBreakdown,
   getUsageSeries,
   type UsageFetch,
   type UsageQuery,
 } from "~/lib/api"
+import {
+  appResourcesAvailable,
+  fetchAppResourceUsage,
+  type AppResourceUsage,
+} from "~/lib/appResources"
 import { cn } from "~/lib/cn"
 import { relativeTime } from "~/lib/format"
 import {
   asProviderQuotas,
+  asResourceUsage,
   asUsageBreakdown,
   asUsageSeries,
   bigCostLabel,
   compactTokens,
   costLabel,
+  cpuLabel,
   kindLabel,
   modelRowLabel,
   modelTokens,
+  peakContextLabel,
   percent,
+  rssLabel,
   scoreLabel,
   shareLabel,
   type ProviderQuota,
+  type ResourcePeak,
+  type ResourcePercentiles,
+  type ResourceUsageResponse,
   type UsageBreakdownResponse,
   type UsageModelRow,
   type UsageSeriesResponse,
@@ -436,8 +449,267 @@ export function UsageView({
             </div>
           </>
         )}
+
+        {/* Independent of the spend endpoints above: a server can answer the
+            resource sampler and not the usage history, or the other way round.
+            It renders nothing at all when neither footprint is readable. */}
+        <ResourcesSection baseUrl={baseUrl} nonce={nonce} />
       </div>
     </div>
+  )
+}
+
+/** 24h / 7d / 30d, in the hours the endpoint takes. */
+const RESOURCE_WINDOWS: readonly { value: string; label: string; hours: number }[] = [
+  { value: "24", label: "24h", hours: 24 },
+  { value: "168", label: "7d", hours: 168 },
+  { value: "720", label: "30d", hours: 720 },
+]
+
+/**
+ * "Resources" — two parallel footprints under one window selector:
+ *
+ *  - Server: this Chunky server and the process trees it spawns, plus the top
+ *    memory ticks with the background tasks live at each one (the "why was P99
+ *    5 GiB" answer).
+ *  - App: the desktop shell's own Bun process and its helpers, sampled locally
+ *    over RPC (src/mainview/lib/appResources.ts).
+ *
+ * Both halves are optional by construction: an older server 404s and a web/dev
+ * build has no RPC, so each block disappears on its own and the whole section
+ * renders nothing when neither can be read — no banner, no gap.
+ */
+function ResourcesSection({ baseUrl, nonce }: { baseUrl: string | null; nonce: number }) {
+  // One selector drives both queries; the two windows always agree.
+  const [hours, setHours] = useState(24)
+  const [server, setServer] = useState<ResourceUsageResponse | null>(null)
+  const [serverUnsupported, setServerUnsupported] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [app, setApp] = useState<AppResourceUsage | null>(null)
+  // Starts "not yet known": the web build reports unavailable synchronously,
+  // but the desktop build must not flash an empty App block before it answers.
+  const [appUnavailable, setAppUnavailable] = useState(!appResourcesAvailable())
+  const serverRef = useRef(0)
+  const appRef = useRef(0)
+
+  useEffect(() => {
+    if (!baseUrl) {
+      setServer(null)
+      setServerUnsupported(true)
+      return
+    }
+    const id = ++serverRef.current
+    void getResourceUsage(baseUrl, hours).then((result) => {
+      if (serverRef.current !== id) return
+      setServerUnsupported(result.status === "unsupported")
+      setServerError(result.status === "error" ? result.message : null)
+      setServer(result.status === "ok" ? asResourceUsage(result.body) : null)
+    })
+  }, [baseUrl, hours, nonce])
+
+  // The app sampler is local: no base URL, same window and refresh nonce.
+  useEffect(() => {
+    const id = ++appRef.current
+    void fetchAppResourceUsage(hours).then((result) => {
+      if (appRef.current !== id) return
+      setAppUnavailable(result.status !== "ok")
+      setApp(result.status === "ok" ? result : null)
+    })
+  }, [hours, nonce])
+
+  const showServer = !serverUnsupported && (server != null || serverError != null)
+  const showApp = !appUnavailable && app != null
+  // Nothing to say yet (first load) or ever (old server + web build).
+  if (!showServer && !showApp) return null
+
+  return (
+    <section className="mt-8 min-w-0">
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="font-semibold text-[14px] leading-tight tracking-[-0.01em]">Resources</h2>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Memory and CPU of the Chunky server and this app
+          </p>
+        </div>
+        <SegmentedControl
+          options={RESOURCE_WINDOWS.map((w) => ({ value: w.value, label: w.label }))}
+          value={String(hours)}
+          onChange={(value) => setHours(Number(value))}
+          ariaLabel="Resource window"
+        />
+      </div>
+
+      {showServer && (
+        <ResourceBlock
+          title="Server resources"
+          subtitle={sampleSubtitle(server, "the Chunky server and its child processes")}
+        >
+          {serverError ? (
+            <p className="rounded-lg border border-destructive/35 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+              {serverError}
+            </p>
+          ) : !server || server.sampleCount === 0 ? (
+            <CollectingSamples />
+          ) : (
+            <>
+              <ResourceStats current={server.server.current} total={server.total} />
+              <div className="mt-3 min-w-0 rounded-xl border border-border">
+                <p className="border-border/70 border-b bg-muted/40 px-3 py-1.5 font-medium text-[10.5px] text-muted-foreground uppercase tracking-[0.09em]">
+                  Peaks
+                </p>
+                {server.peaks.length === 0 ? (
+                  <p className="px-3 py-6 text-center text-[11.5px] text-muted-foreground">
+                    No memory peaks recorded in this window.
+                  </p>
+                ) : (
+                  <ul className="min-w-0">
+                    {server.peaks.map((peak, i) => (
+                      <PeakRow key={`${peak.ts}-${i}`} peak={peak} />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
+        </ResourceBlock>
+      )}
+
+      {showApp && (
+        <ResourceBlock
+          title="App (this machine)"
+          subtitle={sampleSubtitle(app, "the desktop shell and its helper processes")}
+          className={showServer ? "mt-5" : undefined}
+        >
+          {app.sampleCount === 0 ? (
+            <CollectingSamples />
+          ) : (
+            <ResourceStats current={app.bun.current} total={app.total} />
+          )}
+          <p className="mt-2 text-[10.5px] text-muted-foreground/70">
+            excludes WebKit content processes
+          </p>
+        </ResourceBlock>
+      )}
+    </section>
+  )
+}
+
+/** "288 samples every 5s", or the block's own description before any land. */
+function sampleSubtitle(
+  data: { sampleCount: number; intervalMs: number } | null,
+  fallback: string,
+): string {
+  if (!data || data.sampleCount <= 0) return `Memory and CPU of ${fallback}`
+  const every = data.intervalMs > 0 ? ` every ${Math.round(data.intervalMs / 1000)}s` : ""
+  return `${data.sampleCount.toLocaleString()} sample${data.sampleCount === 1 ? "" : "s"}${every}`
+}
+
+/** A labelled half of the section — server or app, same chrome either way. */
+function ResourceBlock({
+  title,
+  subtitle,
+  className,
+  children,
+}: {
+  title: string
+  subtitle: string
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className={cn("min-w-0", className)}>
+      <div className="mb-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <h3 className="font-medium text-[12px] tracking-[-0.01em]">{title}</h3>
+        <p className="min-w-0 truncate text-[11px] text-muted-foreground/80">{subtitle}</p>
+      </div>
+      {children}
+    </div>
+  )
+}
+
+function CollectingSamples() {
+  return (
+    <p className="rounded-xl border border-border border-dashed px-3 py-8 text-center text-[12px] text-muted-foreground">
+      Collecting samples…
+    </p>
+  )
+}
+
+/** The three headline cards both footprints share. */
+function ResourceStats({
+  current,
+  total,
+}: {
+  current: { rssBytes: number; heapUsedBytes: number; cpuPercent: number }
+  total: { rssBytes: ResourcePercentiles; cpuPercent: ResourcePercentiles }
+}) {
+  return (
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      <Stat
+        label="Current RSS"
+        value={rssLabel(current.rssBytes)}
+        note={`${rssLabel(current.heapUsedBytes)} heap · ${cpuLabel(current.cpuPercent)} CPU`}
+      />
+      <Stat
+        label="Total RSS P95"
+        value={rssLabel(total.rssBytes.p95)}
+        note={`P50 ${rssLabel(total.rssBytes.p50)} · P99 ${rssLabel(total.rssBytes.p99)} · max ${rssLabel(total.rssBytes.max)}`}
+      />
+      <Stat
+        label="CPU P95"
+        value={cpuLabel(total.cpuPercent.p95)}
+        note={`P99 ${cpuLabel(total.cpuPercent.p99)} · max ${cpuLabel(total.cpuPercent.max)}`}
+      />
+    </div>
+  )
+}
+
+/** One memory tick: when, how big, how busy — then what was running. */
+function PeakRow({ peak }: { peak: ResourcePeak }) {
+  const context = peakContextLabel(peak)
+  const when = new Date(peak.ts)
+  return (
+    <li className="min-w-0 border-border/50 border-b px-3 py-2 last:border-0">
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+        <span className="min-w-0 truncate text-[11.5px] text-muted-foreground tabular-nums">
+          {Number.isNaN(when.getTime()) ? "—" : when.toLocaleString()}
+        </span>
+        <span className="shrink-0 text-[12px] tabular-nums">
+          <span className="font-medium">{rssLabel(peak.totalRssBytes)}</span>
+          <span className="mx-1.5 opacity-40">·</span>
+          <span className="text-muted-foreground">{cpuLabel(peak.cpuPercent)} CPU</span>
+        </span>
+      </div>
+      <p className="mt-0.5 truncate text-[10.5px] text-muted-foreground/80">
+        server {rssLabel(peak.serverRssBytes)}
+        {context && (
+          <>
+            <span className="mx-1.5 opacity-40">·</span>
+            {context}
+          </>
+        )}
+      </p>
+      {peak.topTasks.length > 0 && (
+        <ul className="mt-1 flex min-w-0 flex-col gap-0.5">
+          {peak.topTasks.map((task, i) => (
+            <li
+              key={`${task.taskId || task.command}-${i}`}
+              className="flex min-w-0 items-baseline gap-2 text-[10.5px]"
+            >
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-muted-foreground"
+                title={task.command}
+              >
+                {task.command || task.taskId}
+              </span>
+              <span className="shrink-0 text-muted-foreground/80 tabular-nums">
+                {rssLabel(task.rssBytes)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
   )
 }
 

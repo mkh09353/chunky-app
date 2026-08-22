@@ -602,6 +602,34 @@ export async function getProviderQuotas(baseUrl: string): Promise<UsageFetch> {
 }
 
 /**
+ * Server resource usage (/api/usage/resources?hours=N) — the RSS/CPU sampler
+ * behind the "Server resources" panel.
+ *
+ * Literal path for the same reason as the usage history above: the route is
+ * newer than the protocol this build pins, so a server without it must make the
+ * panel disappear (404/501 → `unsupported`) rather than fail the build or the
+ * page. A network failure is also treated as unsupported: the panel is a
+ * diagnostic, never worth an error banner over the spend numbers.
+ * The body stays `unknown` — lib/stats.ts owns the coercion.
+ */
+export async function getResourceUsage(baseUrl: string, hours = 24): Promise<UsageFetch> {
+  if (!baseUrl) return { status: "unsupported" }
+  const window = Number.isFinite(hours) && hours > 0 ? Math.round(hours) : 24
+  try {
+    const res = await fetch(`${baseUrl}/api/usage/resources?hours=${window}`)
+    if (res.status === 404 || res.status === 501) return { status: "unsupported" }
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    if (!res.ok) {
+      return { status: "error", message: body?.error || `request failed (${res.status})` }
+    }
+    return { status: "ok", body }
+  } catch {
+    // Network/CORS failure: the panel is optional, so degrade silently.
+    return { status: "unsupported" }
+  }
+}
+
+/**
  * Open a session's SSE stream. Resolves when the server closes it.
  * `onOpen` fires once the response is accepted (the only "connected" signal —
  * empty sessions send no events until the first turn).

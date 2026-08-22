@@ -529,6 +529,169 @@ export function asProviderQuotas(data: unknown): ProviderQuotasResponse {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Server resource usage (GET /api/usage/resources?hours=N).
+ *
+ * GAP (same story as the endpoints above): the sampler route is being built in
+ * the sibling server and has no protocol declaration yet, so these interfaces
+ * are the renderer's copy of the agreed contract. A server without the route
+ * 404s and the whole "Server resources" panel disappears.
+ * ------------------------------------------------------------------------- */
+
+export interface ResourcePercentiles {
+  p50: number
+  p95: number
+  p99: number
+  max: number
+}
+
+export interface ResourceTopTask {
+  taskId: string
+  sessionId: string
+  command: string
+  rssBytes: number
+}
+
+export interface ResourcePeak {
+  /** Epoch ms of the sampled tick. */
+  ts: number
+  totalRssBytes: number
+  serverRssBytes: number
+  cpuPercent: number
+  /** Null when the server could not attribute context to the tick. */
+  activeSessions: number | null
+  liveTasks: number | null
+  liveDelegates: number | null
+  topTasks: ResourceTopTask[]
+}
+
+export interface ResourceUsageResponse {
+  status: "ok"
+  sampleCount: number
+  intervalMs: number
+  windowMs: number
+  server: {
+    rssBytes: ResourcePercentiles
+    cpuPercent: ResourcePercentiles
+    current: { rssBytes: number; heapUsedBytes: number; cpuPercent: number }
+  }
+  children: { rssBytes: ResourcePercentiles; cpuPercent: ResourcePercentiles }
+  total: { rssBytes: ResourcePercentiles; cpuPercent: ResourcePercentiles }
+  peaks: ResourcePeak[]
+}
+
+/** Percentiles, never negative and never NaN — a missing block is all zeroes. */
+function asPercentiles(data: unknown): ResourcePercentiles {
+  const row = (data ?? {}) as Record<string, unknown>
+  const at = (v: unknown) => Math.max(0, num(v))
+  return { p50: at(row.p50), p95: at(row.p95), p99: at(row.p99), max: at(row.max) }
+}
+
+function asResourcePair(data: unknown): { rssBytes: ResourcePercentiles; cpuPercent: ResourcePercentiles } {
+  const row = (data ?? {}) as Record<string, unknown>
+  return { rssBytes: asPercentiles(row.rssBytes), cpuPercent: asPercentiles(row.cpuPercent) }
+}
+
+function asTopTask(data: unknown): ResourceTopTask | null {
+  const row = (data ?? {}) as Record<string, unknown>
+  const command = str(row.command)
+  const taskId = str(row.taskId)
+  // A task with neither an id nor a command has nothing to show in the list.
+  if (!command && !taskId) return null
+  return {
+    taskId,
+    sessionId: str(row.sessionId),
+    command,
+    rssBytes: Math.max(0, num(row.rssBytes)),
+  }
+}
+
+function asPeak(data: unknown): ResourcePeak | null {
+  const row = (data ?? {}) as Record<string, unknown>
+  const ts = num(row.ts)
+  // A peak without a usable timestamp cannot be placed or explained.
+  if (ts <= 0) return null
+  const count = (v: unknown) => {
+    const n = numOrNull(v)
+    return n == null ? null : Math.max(0, Math.round(n))
+  }
+  return {
+    ts,
+    totalRssBytes: Math.max(0, num(row.totalRssBytes)),
+    serverRssBytes: Math.max(0, num(row.serverRssBytes)),
+    cpuPercent: Math.max(0, num(row.cpuPercent)),
+    activeSessions: count(row.activeSessions),
+    liveTasks: count(row.liveTasks),
+    liveDelegates: count(row.liveDelegates),
+    topTasks: arr(row.topTasks)
+      .map(asTopTask)
+      .filter((task): task is ResourceTopTask => task !== null)
+      // Heaviest first: the point of the list is "what was holding the memory".
+      .sort((a, b) => b.rssBytes - a.rssBytes),
+  }
+}
+
+export function asResourceUsage(data: unknown): ResourceUsageResponse {
+  const body = (data ?? {}) as Record<string, unknown>
+  const server = (body.server ?? {}) as Record<string, unknown>
+  const current = (server.current ?? {}) as Record<string, unknown>
+  return {
+    status: "ok",
+    sampleCount: Math.max(0, Math.round(num(body.sampleCount))),
+    intervalMs: Math.max(0, num(body.intervalMs)),
+    windowMs: Math.max(0, num(body.windowMs)),
+    server: {
+      rssBytes: asPercentiles(server.rssBytes),
+      cpuPercent: asPercentiles(server.cpuPercent),
+      current: {
+        rssBytes: Math.max(0, num(current.rssBytes)),
+        heapUsedBytes: Math.max(0, num(current.heapUsedBytes)),
+        cpuPercent: Math.max(0, num(current.cpuPercent)),
+      },
+    },
+    children: asResourcePair(body.children),
+    total: asResourcePair(body.total),
+    peaks: arr(body.peaks)
+      .map(asPeak)
+      .filter((peak): peak is ResourcePeak => peak !== null)
+      // Biggest peak first, regardless of how the server ordered them.
+      .sort((a, b) => b.totalRssBytes - a.totalRssBytes),
+  }
+}
+
+/** Binary bytes: "1.4 GiB", "812 MiB", "0 B". RSS is reported in bytes. */
+export function rssLabel(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"]
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const rounded = value >= 100 || unit === 0 ? Math.round(value) : Math.round(value * 10) / 10
+  return `${rounded} ${units[unit]}`
+}
+
+/** "37%" — CPU arrives as 0..100+ (a busy tree can exceed one core). */
+export function cpuLabel(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0%"
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10}%`
+}
+
+/** "3 sessions · 2 tasks · 1 delegate" — unattributed counts are dropped. */
+export function peakContextLabel(peak: ResourcePeak): string {
+  const parts: string[] = []
+  const push = (n: number | null, one: string, many: string) => {
+    if (n == null) return
+    parts.push(`${n} ${n === 1 ? one : many}`)
+  }
+  push(peak.activeSessions, "session", "sessions")
+  push(peak.liveTasks, "task", "tasks")
+  push(peak.liveDelegates, "delegate", "delegates")
+  return parts.join(" · ")
+}
+
 /** "8.4 (12)" — average plus the sample count that earned it; "—" when unrated. */
 export function scoreLabel(row: { avgRating: number | null; ratedCount: number }): string {
   if (row.avgRating == null || row.ratedCount <= 0) return "—"
