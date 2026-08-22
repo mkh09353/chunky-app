@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { PrReviewsConfig, PrReviewsState, PrSummary } from "@chunky/protocol"
 import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { useOverlayLock } from "~/lib/nativeOverlayGuard"
 import {
   getPrReviewsConfig,
   resolvePrComments,
@@ -327,6 +328,12 @@ export function PrPanel({
   isSessionBusy: (sessionId: string) => boolean
   onOpenSession: (sessionId: string, repoId: string) => void
 }) {
+  // This panel drives Base UI's dialog primitives directly rather than through
+  // ui/dialog.tsx, so it claims the overlay lock itself while open. "always":
+  // it has a full-window backdrop, so the pane steps aside with or without
+  // overlap (see lib/nativeOverlayGuard.ts).
+  useOverlayLock(open, "always")
+
   const [now, setNow] = useState(() => Date.now())
   const [config, setConfig] = useState<PrReviewsConfig | null>(null)
   const [pending, setPending] = useState<Record<string, boolean>>({})

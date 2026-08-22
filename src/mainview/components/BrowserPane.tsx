@@ -11,9 +11,17 @@ import {
   readPreferredPaneWidth,
 } from "~/lib/browserPaneWidth"
 import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browserNav"
+import {
+  adoptWebview,
+  keepsAlive,
+  LIVE_WEBVIEW_CSS,
+  takeParkedWebview,
+  teardownWebview,
+} from "~/lib/browserKeepAlive"
 import { cn } from "~/lib/cn"
 import { rectsIntersect } from "~/lib/browserOverlay"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { lockedOverlaysCoverRect, subscribeOverlayLock, useOverlayLock } from "~/lib/nativeOverlayGuard"
 import { cookieSyncCompleteFirstRun, cookieSyncGetSettings } from "~/lib/cookieSync"
 import { CookieSyncModal } from "./browser/CookieSyncModal"
 import { Button } from "./ui/button"
@@ -87,8 +95,10 @@ function urlFromDetail(detail: unknown): string | null {
 }
 
 /**
- * Off-screen holder for a webview element whose native side is still being
- * created. See `destroyWebview`.
+ * Off-screen holder for a webview element that must stay connected: one whose
+ * native side is still being created (see `destroyWebview`), or a CEF webview
+ * kept alive across a pane close (see `parkWebview` and note 5 on the mount
+ * effect).
  */
 let parkingLot: HTMLDivElement | null = null
 function getParkingLot(): HTMLElement {
@@ -210,22 +220,76 @@ function paneCovered(host: HTMLElement): boolean {
 }
 
 /**
+ * The single owner of the native view's visibility and hit testing.
+ *
+ * Two independent things want the native view out of the way, and they must not
+ * fight over the same two switches:
+ *
+ * - an overlay covering the pane (a dialog, popover, menu, or the pane's own
+ *   first-run card) — the view must neither paint nor take clicks;
+ * - a divider drag — the page must KEEP painting while the cursor crosses it,
+ *   so only hit testing gives way.
+ *
+ * Hence `hidden = covered` but `passthrough = dragging || covered`. Passthrough
+ * on top of hidden is deliberate belt-and-braces: hiding is a visibility change
+ * and Electrobun's mask support has no `hitTest:` override, so passthrough is
+ * the one switch that is documented to stop the native view swallowing mouse
+ * events (it is what keeps the divider drag alive).
+ */
+interface NativeSuppressor {
+  setCovered: (covered: boolean) => void
+  setDragging: (dragging: boolean) => void
+}
+
+function createSuppressor(element: ElectrobunWebviewElement): NativeSuppressor {
+  let covered = false
+  let dragging = false
+  let appliedHidden: boolean | null = null
+  let appliedPassthrough: boolean | null = null
+
+  const apply = () => {
+    // Before the native view exists there is nothing to toggle; the applied
+    // state stays untouched so the next evaluation re-applies once it does.
+    if (element.webviewId == null) return
+    const passthrough = dragging || covered
+    if (appliedHidden !== covered) {
+      appliedHidden = covered
+      element.toggleHidden(covered)
+    }
+    if (appliedPassthrough !== passthrough) {
+      appliedPassthrough = passthrough
+      element.togglePassthrough(passthrough)
+    }
+  }
+
+  return {
+    setCovered: (next) => {
+      covered = next
+      apply()
+    },
+    setDragging: (next) => {
+      dragging = next
+      apply()
+    },
+  }
+}
+
+/**
  * Keep the native view hidden exactly while the pane is covered. Returns a
  * teardown for the observers it installs.
  */
-function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): () => void {
+function watchOverlays(host: HTMLElement, suppressor: NativeSuppressor): () => void {
   const appRoot = host.closest("body > *")
-  let applied: boolean | null = null
   let frame = 0
 
   const evaluate = () => {
-    // Before the native view exists there is nothing to hide; `applied` stays
-    // untouched so the poll re-applies as soon as it does.
-    if (element.webviewId == null) return
-    const covered = paneCovered(host)
-    if (applied === covered) return
-    applied = covered
-    element.toggleHidden(covered)
+    // The locks are the explicit answer: every shared popup primitive holds one
+    // while mounted, so a dialog ("always") or an overlapping popover
+    // ("intersect") steps the native view aside however small it is — while a
+    // menu on the far side of the window leaves the page alone. `paneCovered`
+    // stays as the geometric fallback for overlays that take no lock at all
+    // (in-tree toasts, drawers, anything hand-rolled).
+    suppressor.setCovered(lockedOverlaysCoverRect(host.getBoundingClientRect()) || paneCovered(host))
   }
   const schedule = () => {
     // MutationObserver callbacks run before the next paint. Apply the native
@@ -261,12 +325,16 @@ function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): ()
   // in-tree toasts) and for applying state once the native view appears.
   const poll = window.setInterval(evaluate, OVERLAY_POLL_MS)
   window.addEventListener("resize", schedule)
+  // A lock transition is applied in the same tick the popup mounts, so the
+  // first click on it can never be eaten while a poll tick is pending.
+  const stopLockWatch = subscribeOverlayLock(evaluate)
   schedule()
 
   return () => {
     observer.disconnect()
     window.clearInterval(poll)
     window.removeEventListener("resize", schedule)
+    stopLockWatch()
     if (frame) cancelAnimationFrame(frame)
   }
 }
@@ -279,11 +347,19 @@ function watchOverlays(host: HTMLElement, element: ElectrobunWebviewElement): ()
 export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl?: string | null }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const webviewRef = useRef<ElectrobunWebviewElement | null>(null)
+  // Owns the native view's hidden/passthrough state; created with the element.
+  const suppressorRef = useRef<NativeSuppressor | null>(null)
   const [available] = useState(desktopWebviewAvailable)
   const initialUrlRef = useRef<string>("")
   // A link right-clicked into "Open in Chunky browser" while the pane was
-  // closed is parked in the store; it wins over the last visited URL.
-  if (!initialUrlRef.current) initialUrlRef.current = takePendingBrowserUrl() || readLastUrl()
+  // closed is parked in the store; it wins over the last visited URL. Whether
+  // there WAS one matters for a kept-alive webview: only a real request may
+  // navigate the page it is still showing.
+  const pendingUrlRef = useRef<string | null>(null)
+  if (!initialUrlRef.current) {
+    pendingUrlRef.current = takePendingBrowserUrl()
+    initialUrlRef.current = pendingUrlRef.current || readLastUrl()
+  }
   const [url, setUrl] = useState(initialUrlRef.current)
   const [draft, setDraft] = useState(initialUrlRef.current)
   const [loading, setLoading] = useState(available)
@@ -300,6 +376,11 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
   const [cookiePrompt, setCookiePrompt] = useState(false)
   const [cookieModal, setCookieModal] = useState(false)
   const cookieAskedRef = useRef(false)
+  // The offer is painted over the pane itself, so it needs the native view out
+  // of the way just as much as a portaled dialog does — "always", since it is
+  // by definition over the pane. Holding the overlay lock replaces the full-pane
+  // scrim that existed only to trip the geometric probe.
+  useOverlayLock(cookiePrompt, "always")
 
   // ── Pane width ───────────────────────────────────────────────────────────
   const [paneWidth, setPaneWidth] = useState(() => readPaneWidth(window.innerWidth))
@@ -371,7 +452,9 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
    * painting, so nothing flickers.
    */
   const setDragCaptureMode = useCallback((dragging: boolean) => {
-    webviewRef.current?.togglePassthrough(dragging)
+    // Routed through the suppressor so a drag that starts or ends while an
+    // overlay is up cannot clobber the overlay's own passthrough state.
+    suppressorRef.current?.setDragging(dragging)
   }, [])
 
   const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -441,36 +524,51 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
   // 4. The renderer kind (CEF vs system WebView) is a bun-process answer, so
   //    creation waits on one cached round trip; `cancelled` keeps an unmount
   //    inside that window from creating any native view at all.
+  // 5. A CEF webview is never destroyed. Electrobun's CEF handler quits the
+  //    message loop (`CefQuitMessageLoop` in `OnBeforeClose`) once its browser
+  //    list empties, and in a CEF-bundled build that loop is the app's main
+  //    event loop (Electrobun ≤ 2.0.1). Our window is the system WebView, so
+  //    this pane holds the process's ONLY CEF browser and closing it would quit
+  //    the app. Closing the pane therefore PARKS the element off-screen and
+  //    reopening ADOPTS it — same native view, same page, same history. The
+  //    system-WebView renderer keeps the ordinary destroy path.
   useEffect(() => {
     if (!available) return
     const host = hostRef.current
     if (!host) return
 
     const mount = (rendererKind: "cef" | "native"): (() => void) | null => {
-      const element = document.createElement("electrobun-webview") as ElectrobunWebviewElement
+      // A CEF element kept alive by the previous close is reused as-is; only an
+      // empty slot means a new native view.
+      const adopted = keepsAlive(rendererKind) ? takeParkedWebview<ElectrobunWebviewElement>() : null
+      const element =
+        adopted ?? (document.createElement("electrobun-webview") as ElectrobunWebviewElement)
       if (typeof element.on !== "function") return null
 
       // Native-view creation is deferred to a rAF; knowing whether it actually
-      // started lets teardown skip the parking dance in the common case.
-      let initStarted = false
-      const startInit = element.initWebview.bind(element)
-      element.initWebview = async () => {
-        initStarted = true
-        await startInit()
-      }
+      // started lets teardown skip the parking dance in the common case. An
+      // adopted element is long past that point.
+      let initStarted = adopted != null
+      if (!adopted) {
+        const startInit = element.initWebview.bind(element)
+        element.initWebview = async () => {
+          initStarted = true
+          await startInit()
+        }
 
-      // CEF when this build bundled it (the only renderer with a Chrome
-      // DevTools Protocol listener, so the only one an agent can drive),
-      // otherwise the system WebView.
-      element.setAttribute("renderer", rendererKind)
-      // Sandboxed: the embedded page gets the event bridge but no host RPC.
-      element.setAttribute("sandbox", "")
-      element.setAttribute("src", initialUrlRef.current)
-      // Electrobun injects an unlayered `electrobun-webview { width:800px;
-      // height:300px }` default style, which outranks Tailwind's layered
-      // utilities. Inline styles are the only reliable way to size the element —
-      // and the element's rect is exactly where the native webview is composited.
-      element.style.cssText = "display:block;position:absolute;inset:0;width:100%;height:100%;background:transparent;"
+        // CEF when this build bundled it (the only renderer with a Chrome
+        // DevTools Protocol listener, so the only one an agent can drive),
+        // otherwise the system WebView.
+        element.setAttribute("renderer", rendererKind)
+        // Sandboxed: the embedded page gets the event bridge but no host RPC.
+        element.setAttribute("sandbox", "")
+        element.setAttribute("src", initialUrlRef.current)
+        // Electrobun injects an unlayered `electrobun-webview { width:800px;
+        // height:300px }` default style, which outranks Tailwind's layered
+        // utilities. Inline styles are the only reliable way to size the element —
+        // and the element's rect is exactly where the native webview is composited.
+        element.style.cssText = LIVE_WEBVIEW_CSS
+      }
 
       const onNavigate = (event: CustomEvent) => {
         const next = urlFromDetail(event.detail) ?? element.src
@@ -502,9 +600,34 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
       element.on("dom-ready", onDomReady)
       element.on("new-window-open", onNewWindow)
 
-      host.appendChild(element)
+      if (adopted) {
+        // Full-size styles back, hit testing and visibility restored, geometry
+        // pushed to the native side — and the page only navigated when the user
+        // actually asked for a link while the pane was closed.
+        const pending = pendingUrlRef.current
+        pendingUrlRef.current = null
+        adoptWebview(element, host, pending)
+        // The page never went away, so there is nothing to wait for: treat the
+        // pane as live straight away (which also re-announces the CDP target).
+        const current = pending || element.src
+        if (current) {
+          setUrl(current)
+          setDraft(current)
+          persistUrl(current)
+        }
+        setLoading(false)
+        setPaneLive(true)
+        syncHistory(element)
+      } else {
+        host.appendChild(element)
+      }
       webviewRef.current = element
-      const stopOverlayWatch = watchOverlays(host, element)
+      // A fresh suppressor per mount: an adopted (kept-alive) element may carry
+      // hidden/passthrough state from its previous life, and this one's first
+      // evaluation applies both switches explicitly.
+      const suppressor = createSuppressor(element)
+      suppressorRef.current = suppressor
+      const stopOverlayWatch = watchOverlays(host, suppressor)
 
       return () => {
         element.off("did-navigate", onNavigate)
@@ -513,8 +636,15 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
         element.off("dom-ready", onDomReady)
         element.off("new-window-open", onNewWindow)
         stopOverlayWatch()
+        if (suppressorRef.current === suppressor) suppressorRef.current = null
         if (webviewRef.current === element) webviewRef.current = null
-        destroyWebview(element, () => initStarted)
+        // CEF parks (never close the last CEF browser — see note 5 above; the
+        // element stays connected, so an init still in flight also completes
+        // normally and the next open adopts it); the system WebView is torn
+        // down as before.
+        teardownWebview(rendererKind, element, getParkingLot(), (live) =>
+          destroyWebview(live, () => initStarted),
+        )
       }
     }
 
@@ -684,20 +814,12 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
         {available && loading ? <LoaderCircle className="pointer-events-none absolute right-3 top-3 size-4 animate-spin text-primary" aria-label="Loading" /> : null}
 
         {/* First-launch cookie offer. Deliberately a sibling of the webview
-            host rather than a child of it: `paneCovered` treats anything it
-            does not contain as an overlay and hides the native view while it
-            is up, which is what makes this card both visible and clickable
-            over the composited page.
-
-            The full-pane scrim is what guarantees that: the card alone is too
-            small for `probeCovered`'s coarse grid to reliably land on, so the
-            native view would otherwise stay composited on top and swallow the
-            clicks. The scrim spans the whole host rect (a sibling of `host`, so
-            `host.contains(...)` is false), so every probe point hits it and the
-            native view is hidden the moment the offer is up. */}
-        {cookiePrompt ? (
-          <div className={cn(NO_DRAG_REGION, "absolute inset-0 z-10 bg-foreground/5")} aria-hidden />
-        ) : null}
+            host rather than a child of it, and it holds the overlay lock while
+            it is up (see `useOverlayLock(cookiePrompt)` above), which is what
+            makes this card both visible and clickable over the composited page.
+            The card is far too small for `probeCovered`'s coarse grid to land
+            on reliably, so the lock — not geometry — is what guarantees the
+            native view steps aside. */}
         {cookiePrompt ? (
           <div
             role="dialog"

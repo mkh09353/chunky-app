@@ -8,6 +8,7 @@
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover"
 import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { OverlayLock } from "~/lib/nativeOverlayGuard"
 
 export const Popover = PopoverPrimitive.Root
 export const PopoverTrigger = PopoverPrimitive.Trigger
@@ -52,6 +53,12 @@ export function PopoverPopup({
           data-slot="popover-popup"
           {...props}
         >
+          {/* A popover has no backdrop and can be small (or dragged, like the
+              Add repository panel), which is exactly what the pane's geometric
+              probe can miss. The lock mounts with the popup and measures it, so
+              the native webview steps aside while — and only while — the popup
+              actually overlaps the pane. */}
+          <OverlayLock mode="intersect" />
           {children}
         </PopoverPrimitive.Popup>
       </PopoverPrimitive.Positioner>

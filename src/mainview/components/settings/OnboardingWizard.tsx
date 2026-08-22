@@ -16,6 +16,7 @@ import type {
 import { cn } from "~/lib/cn"
 import { copyText } from "~/lib/clipboard"
 import { DRAG_REGION } from "~/lib/dragRegion"
+import { useOverlayLock } from "~/lib/nativeOverlayGuard"
 import { Button } from "../ui/button"
 import { InlineError, Loading, Spinner, useAsync } from "./common"
 import { ProviderMark } from "./ProviderMark"
@@ -119,6 +120,11 @@ export function OnboardingWizard({
   const [busy, setBusy] = useState(false)
   const [finishError, setFinishError] = useState<string | null>(null)
   const primaryRef = useRef<HTMLButtonElement>(null)
+
+  // Hand-rolled full-window surface (no Base UI portal), so it takes the
+  // overlay lock itself — "always", since it covers the entire window — and the
+  // browser pane's native webview steps aside.
+  useOverlayLock(open, "always")
 
   const providers = onboarding.data?.providers ?? []
   const anyReady = providers.some((p) => p.ready)

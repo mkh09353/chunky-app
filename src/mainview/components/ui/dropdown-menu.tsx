@@ -3,6 +3,7 @@ import { Check } from "lucide-react"
 import type * as React from "react"
 import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { OverlayLock } from "~/lib/nativeOverlayGuard"
 
 export const DropdownMenu = MenuPrimitive.Root
 export const DropdownMenuGroup = MenuPrimitive.Group
@@ -49,6 +50,11 @@ export function DropdownMenuContent({
           className={cn(POPUP_CLASSES, className)}
           {...props}
         >
+          {/* Mounted only while the menu is open. No backdrop, so it only asks
+              the browser pane's native webview to step aside while the popup
+              overlaps it — a menu on the far side of the window must not blank
+              the page. */}
+          <OverlayLock mode="intersect" />
           {children}
         </MenuPrimitive.Popup>
       </MenuPrimitive.Positioner>
@@ -111,6 +117,10 @@ export function DropdownMenuSubContent({
           className={cn(POPUP_CLASSES, className)}
           {...props}
         >
+          {/* A submenu is its own portaled popup and can be open while its
+              parent menu is too — the locks are independent, so each is
+              measured (and released) on its own. */}
+          <OverlayLock mode="intersect" />
           {children}
         </MenuPrimitive.Popup>
       </MenuPrimitive.Positioner>

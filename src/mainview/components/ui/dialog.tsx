@@ -3,6 +3,7 @@ import { X } from "lucide-react"
 import type * as React from "react"
 import { cn } from "~/lib/cn"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { OverlayLock } from "~/lib/nativeOverlayGuard"
 
 export const Dialog = DialogPrimitive.Root
 export const DialogTrigger = DialogPrimitive.Trigger
@@ -37,6 +38,12 @@ export function DialogPopup({
         )}
         {...props}
       >
+        {/* Portal children mount only while the dialog is open, so this holds
+            the overlay lock for exactly that long. "always": the backdrop dims
+            and blocks the WHOLE window, so the pane has to step aside even
+            without overlap — otherwise it stands out un-dimmed and swallows the
+            backdrop-dismiss clicks aimed at it. */}
+        <OverlayLock mode="always" />
         {children}
         {showClose && (
           <DialogPrimitive.Close
