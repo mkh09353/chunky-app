@@ -15,6 +15,28 @@ export type ChromeProfile = {
   name: string
 }
 
+/**
+ * The persisted intent for a site.
+ * - "continuous": kept in sync on every refresh (added to the allowlist).
+ * - "block":      never synced, and hidden from "Sync All".
+ * - "none":       no standing intent (may still be one-off synced on demand).
+ */
+export type CookieDomainPolicy = "continuous" | "block" | "none"
+
+/** A registrable site discovered in the user's Chrome cookie store. */
+export type DiscoveredDomain = {
+  /** Registrable domain (eTLD+1), e.g. "google.com". */
+  domain: string
+  /** How many cookies in Chrome belong to this site. */
+  cookieCount: number
+  /** Unix ms of the most recently accessed cookie for this site, or null. */
+  lastAccess: number | null
+  /** The user's standing intent for this site. */
+  policy: CookieDomainPolicy
+  /** True when the user has already chosen a policy (continuous or block). */
+  known: boolean
+}
+
 export type CookieSyncStatus = {
   /** Wall-clock ms of the last completed attempt (success or failure), or null. */
   at: number | null
@@ -28,16 +50,23 @@ export type CookieSyncSettings = {
   /** Master on/off. When false, no reads, no Keychain access, no timers. */
   enabled: boolean
   /**
-   * Domain allowlist (host suffixes, no leading dot), e.g. ["google.com"].
-   * A cookie is synced when its host_key, stripped of a leading dot, equals or
-   * ends with ".<domain>" for some entry.
+   * Continuous-sync allowlist (host suffixes, no leading dot), e.g.
+   * ["google.com"]. A cookie is synced when its host_key, stripped of a leading
+   * dot, equals or ends with ".<domain>" for some entry.
    */
   domains: string[]
+  /** Blocked sites (same suffix semantics); never synced, excluded from Sync All. */
+  blocked: string[]
   /** Source Chrome profile directory name; defaults to "Default". */
   sourceProfile: string
+  /**
+   * Whether the user has seen the first-launch "Sync from Chrome?" prompt. The
+   * browser pane shows that prompt exactly once, when this is false.
+   */
+  firstRunComplete: boolean
 }
 
-/** Reply shape for cookieSyncGetSettings / cookieSyncSetSettings. */
+/** Reply shape for cookieSyncGetSettings / cookieSyncSetSettings / cookieSyncSetPolicy. */
 export type CookieSyncState = CookieSyncSettings & {
   ok: true
   /** Whether a readable Chrome cookie store exists for sourceProfile right now. */
@@ -46,7 +75,7 @@ export type CookieSyncState = CookieSyncSettings & {
   lastSync: CookieSyncStatus | null
 }
 
-/** Reply shape for cookieSyncRunNow. */
+/** Reply shape for cookieSyncRunNow / cookieSyncSyncDomains. */
 export type CookieSyncRunResult = {
   ok: boolean
   /** Cookies injected (0 on failure). */
@@ -59,6 +88,13 @@ export type CookieSyncRunResult = {
 export type CookieSyncProfilesResult = {
   ok: true
   profiles: ChromeProfile[]
+}
+
+/** Reply shape for cookieSyncListDomains. */
+export type CookieSyncDomainsResult = {
+  ok: true
+  /** Ranked: known (continuous first, then blocked) at the top, then by recency. */
+  domains: DiscoveredDomain[]
 }
 
 /** Sensible default allowlist: Google account + common Google properties. */

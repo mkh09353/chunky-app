@@ -421,6 +421,16 @@ rpc = createRPC({
     cookieSyncSetSettings: async (params: unknown) => cookieSync.setSettings(params),
     cookieSyncRunNow: async () => cookieSync.runNow(),
     cookieSyncListProfiles: async () => cookieSync.listProfiles(),
+    cookieSyncListDomains: async () => cookieSync.listDomains(),
+    cookieSyncSetPolicy: async (params: unknown) => {
+      const body = params && typeof params === "object" ? (params as { domain?: unknown; policy?: unknown }) : {}
+      return cookieSync.setPolicy(body.domain, body.policy)
+    },
+    cookieSyncSyncDomains: async (params: unknown) => {
+      const domains = params && typeof params === "object" ? (params as { domains?: unknown }).domains : undefined
+      return cookieSync.syncDomains(Array.isArray(domains) && domains.length ? domains : null)
+    },
+    cookieSyncCompleteFirstRun: async () => cookieSync.completeFirstRun(),
     /** Target for the local product-factory service. The renderer immediately
      * announces this ephemeral credential to the authenticated Chunky server. */
     appZooTarget: async () => ({ ok: true, ...await zooService.target() }),

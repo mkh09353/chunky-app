@@ -25,12 +25,15 @@ import { join } from "node:path"
 import { Database } from "bun:sqlite"
 import {
   DEFAULT_COOKIE_DOMAINS,
+  type CookieDomainPolicy,
+  type CookieSyncDomainsResult,
   type CookieSyncProfilesResult,
   type CookieSyncRunResult,
   type CookieSyncSettings,
   type CookieSyncState,
   type CookieSyncStatus,
   type ChromeProfile,
+  type DiscoveredDomain,
 } from "../shared/cookieSync"
 import { stateDir } from "./desktopState"
 
@@ -41,7 +44,22 @@ const MAX_DOMAINS = 32
 const MAX_DOMAIN_LENGTH = 253
 const MAX_PROFILE_LENGTH = 64
 const MAX_ERROR_LENGTH = 160
+const MAX_DISCOVERED_DOMAINS = 200
 const CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600
+const CHROME_EPOCH_OFFSET_MS = 11_644_473_600_000
+const TWO_PART_PUBLIC_SUFFIXES = new Set([
+  "co.uk",
+  "org.uk",
+  "ac.uk",
+  "gov.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.in",
+  "com.br",
+])
 const PBKDF2_ITERATIONS = 1003
 const PBKDF2_KEYLEN = 16
 const V10_PREFIX = Buffer.from("v10")
@@ -90,6 +108,10 @@ export type CookieSyncService = {
   setSettings(patch: unknown): CookieSyncState
   runNow(): Promise<CookieSyncRunResult>
   listProfiles(): CookieSyncProfilesResult
+  listDomains(): CookieSyncDomainsResult
+  setPolicy(domain: unknown, policy: unknown): CookieSyncState
+  syncDomains(filter: string[] | null): Promise<CookieSyncRunResult>
+  completeFirstRun(): CookieSyncState
   start(): void
   stop(): void
   onPaneDebuggable(): void
@@ -108,6 +130,7 @@ type ChromeCookieRow = {
   is_persistent: number | null
   source_scheme: number | null
   source_port: number | null
+  last_access_utc?: number | bigint | null
 }
 
 export function chromeExpiresToUnixSeconds(expiresUtc: number): number {
@@ -128,6 +151,29 @@ export function cookieHostMatchesDomain(hostKey: string, domain: string): boolea
   const needle = domain.replace(/^\./, "").toLowerCase()
   if (!host || !needle) return false
   return host === needle || host.endsWith(`.${needle}`)
+}
+
+export function chromeAccessToUnixMs(lastAccessUtc: number): number | null {
+  if (!Number.isFinite(lastAccessUtc) || lastAccessUtc <= 0) return null
+  return lastAccessUtc / 1000 - CHROME_EPOCH_OFFSET_MS
+}
+
+/** Pragmatic eTLD+1: last two labels, or last three for a small public-suffix set. */
+export function registrableDomain(host: string): string {
+  const value = host.replace(/^\./, "").toLowerCase().replace(/\.$/, "")
+  if (!value) return ""
+  if (value === "localhost" || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return value
+  const labels = value.split(".").filter(Boolean)
+  if (labels.length <= 1) return value
+  const lastTwo = `${labels[labels.length - 2]}.${labels[labels.length - 1]}`
+  if (TWO_PART_PUBLIC_SUFFIXES.has(lastTwo) && labels.length >= 3) {
+    return `${labels[labels.length - 3]}.${lastTwo}`
+  }
+  return lastTwo
+}
+
+export function sanitizePersisted(raw: unknown): PersistedCookieSync {
+  return sanitizePersistedInternal(raw)
 }
 
 export function decryptChromeV10(encrypted: Uint8Array, secret: string, hostKey: string): string {
@@ -197,12 +243,23 @@ function defaults(): PersistedCookieSync {
   return {
     enabled: false,
     domains: [...DEFAULT_COOKIE_DOMAINS],
+    blocked: [],
     sourceProfile: DEFAULT_PROFILE,
+    firstRunComplete: false,
     lastSync: null,
   }
 }
 
-function sanitizePersisted(raw: unknown): PersistedCookieSync {
+function withoutOverlap(domains: string[], blocked: string[], prefer: "domains" | "blocked"): { domains: string[]; blocked: string[] } {
+  if (prefer === "blocked") {
+    const blockedSet = new Set(blocked)
+    return { domains: domains.filter((domain) => !blockedSet.has(domain)), blocked }
+  }
+  const allow = new Set(domains)
+  return { domains, blocked: blocked.filter((domain) => !allow.has(domain)) }
+}
+
+function sanitizePersistedInternal(raw: unknown): PersistedCookieSync {
   const base = defaults()
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base
   const value = raw as Record<string, unknown>
@@ -214,10 +271,15 @@ function sanitizePersisted(raw: unknown): PersistedCookieSync {
     const error = typeof (last as CookieSyncStatus).error === "string" ? clipError((last as CookieSyncStatus).error) : undefined
     lastSync = error ? { at, count, error } : { at, count }
   }
+  const domains = cleanDomains(value.domains, base.domains)
+  const blocked = "blocked" in value ? cleanDomains(value.blocked, []) : [...base.blocked]
+  const exclusive = withoutOverlap(domains, blocked, "domains")
   return {
     enabled: value.enabled === true,
-    domains: cleanDomains(value.domains, base.domains),
+    domains: exclusive.domains,
+    blocked: exclusive.blocked,
     sourceProfile: cleanProfile(value.sourceProfile, base.sourceProfile),
+    firstRunComplete: value.firstRunComplete === true,
     lastSync,
   }
 }
@@ -241,7 +303,9 @@ function writeFilePersisted(next: PersistedCookieSync, env: NodeJS.ProcessEnv): 
         {
           enabled: next.enabled,
           domains: next.domains,
+          blocked: next.blocked,
           sourceProfile: next.sourceProfile,
+          firstRunComplete: next.firstRunComplete,
           lastSync: next.lastSync,
         },
         null,
@@ -372,10 +436,14 @@ function readChromeRows(profileDir: string): ChromeCookieRow[] {
   let db: Database | undefined
   try {
     db = new Database(dbPath, { readonly: true })
+    const columns = new Set(
+      (db.query("PRAGMA table_info(cookies)").all() as Array<{ name?: string }>).map((column) => column.name),
+    )
+    const accessSelect = columns.has("last_access_utc") ? "last_access_utc" : "0 AS last_access_utc"
     return db
       .query(
         `SELECT host_key, name, encrypted_value, path, expires_utc, is_secure, is_httponly,
-                samesite, has_expires, is_persistent, source_scheme, source_port
+                samesite, has_expires, is_persistent, source_scheme, source_port, ${accessSelect}
          FROM cookies`,
       )
       .all() as ChromeCookieRow[]
@@ -456,10 +524,19 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
     ok: true,
     enabled: persisted.enabled,
     domains: persisted.domains,
+    blocked: persisted.blocked,
     sourceProfile: persisted.sourceProfile,
+    firstRunComplete: persisted.firstRunComplete,
     chromeAvailable: chromeAvailable(),
     lastSync: persisted.lastSync,
   })
+
+  const hostAllowed = (hostKey: string, allow: string[] | null, blocked: string[]): boolean => {
+    if (blocked.some((domain) => cookieHostMatchesDomain(hostKey, domain))) return false
+    if (allow == null) return true
+    if (allow.length === 0) return false
+    return allow.some((domain) => cookieHostMatchesDomain(hostKey, domain))
+  }
 
   const record = (result: CookieSyncRunResult): CookieSyncRunResult => {
     const lastSync: CookieSyncStatus = result.ok
@@ -469,7 +546,7 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
     return result
   }
 
-  const runOnce = async (): Promise<CookieSyncRunResult> => {
+  const extractAndInject = async (allow: string[] | null): Promise<CookieSyncRunResult> => {
     if (!chromeAvailable()) return record({ ok: false, count: 0, error: "Chrome not installed" })
 
     const target = await deps.resolveTarget()
@@ -491,12 +568,11 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
       return record({ ok: false, count: 0, error: "Could not read Chrome cookies" })
     }
 
-    const allow = persisted.domains
     const cookies: CdpCookie[] = []
     let encryptedSeen = 0
     for (const row of rows) {
       if (typeof row.host_key !== "string") continue
-      if (allow.length > 0 && !allow.some((domain) => cookieHostMatchesDomain(row.host_key, domain))) continue
+      if (!hostAllowed(row.host_key, allow, persisted.blocked)) continue
       const bytes = asBytes(row.encrypted_value)
       if (bytes && bytes.length > 0) encryptedSeen += 1
       const cookie = toCdpCookie(row, secret)
@@ -516,11 +592,11 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
     return record({ ok: true, count: cookies.length })
   }
 
-  const runNow = async (): Promise<CookieSyncRunResult> => {
+  const runGuarded = async (work: () => Promise<CookieSyncRunResult>): Promise<CookieSyncRunResult> => {
     if (flight) return flight
     flight = (async () => {
       try {
-        return await runOnce()
+        return await work()
       } catch {
         return record({ ok: false, count: 0, error: "Cookie sync failed" })
       } finally {
@@ -530,8 +606,33 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
     return flight
   }
 
+  const runNow = async (): Promise<CookieSyncRunResult> => runGuarded(() => extractAndInject(persisted.domains))
+
+  const syncDomains = async (filter: string[] | null): Promise<CookieSyncRunResult> => {
+    const allow =
+      Array.isArray(filter) && filter.length > 0 ? cleanDomains(filter, []) : null
+    if (Array.isArray(filter) && filter.length > 0 && allow && allow.length === 0) {
+      return record({ ok: false, count: 0, error: "No valid domains to sync" })
+    }
+    return runGuarded(() => extractAndInject(allow))
+  }
+
   const kickIfEnabled = () => {
     if (persisted.enabled) void runNow()
+  }
+
+  const applyPolicy = (domain: string, policy: CookieDomainPolicy): PersistedCookieSync => {
+    const next: PersistedCookieSync = {
+      ...persisted,
+      domains: persisted.domains.filter((item) => item !== domain),
+      blocked: persisted.blocked.filter((item) => item !== domain),
+    }
+    if (policy === "continuous") {
+      if (next.domains.length < MAX_DOMAINS) next.domains = [...next.domains, domain]
+    } else if (policy === "block") {
+      if (next.blocked.length < MAX_DOMAINS) next.blocked = [...next.blocked, domain]
+    }
+    return next
   }
 
   return {
@@ -541,13 +642,84 @@ export function createCookieSyncService(deps: CookieSyncDeps): CookieSyncService
       const next: PersistedCookieSync = { ...persisted }
       if ("enabled" in body) next.enabled = body.enabled === true
       if ("domains" in body) next.domains = cleanDomains(body.domains, next.domains)
+      if ("blocked" in body) next.blocked = cleanDomains(body.blocked, next.blocked)
       if ("sourceProfile" in body) next.sourceProfile = cleanProfile(body.sourceProfile, next.sourceProfile)
+      if ("firstRunComplete" in body) next.firstRunComplete = body.firstRunComplete === true
+      const exclusive = withoutOverlap(next.domains, next.blocked, "domains" in body ? "domains" : "blocked")
+      next.domains = exclusive.domains
+      next.blocked = exclusive.blocked
       const enabling = next.enabled && !persisted.enabled
       save(next)
       if (enabling) kickIfEnabled()
       return state()
     },
     runNow,
+    syncDomains,
+    setPolicy(domain: unknown, policy: unknown) {
+      const cleaned = cleanDomain(domain)
+      if (!cleaned || (policy !== "continuous" && policy !== "block" && policy !== "none")) return state()
+      const next = applyPolicy(cleaned, policy)
+      save(next)
+      if (policy === "continuous" && next.enabled) {
+        const target = deps.resolveTarget()
+        void target.then((resolved) => {
+          if (resolved.debuggable) void syncDomains([cleaned])
+        })
+      }
+      return state()
+    },
+    completeFirstRun() {
+      if (!persisted.firstRunComplete) save({ ...persisted, firstRunComplete: true })
+      return state()
+    },
+    listDomains() {
+      const byDomain = new Map<string, { cookieCount: number; lastAccess: number | null }>()
+      try {
+        for (const row of readChromeRows(join(chromeUserDataDir, persisted.sourceProfile))) {
+          if (typeof row.host_key !== "string" || !row.host_key) continue
+          const domain = registrableDomain(row.host_key)
+          if (!domain) continue
+          const access = chromeAccessToUnixMs(asNumber(row.last_access_utc) ?? 0)
+          const current = byDomain.get(domain) ?? { cookieCount: 0, lastAccess: null }
+          current.cookieCount += 1
+          if (access != null && (current.lastAccess == null || access > current.lastAccess)) current.lastAccess = access
+          byDomain.set(domain, current)
+        }
+      } catch {
+        /* Chrome missing or unreadable — still surface known policies */
+      }
+      for (const domain of persisted.domains) {
+        if (!byDomain.has(domain)) byDomain.set(domain, { cookieCount: 0, lastAccess: null })
+      }
+      for (const domain of persisted.blocked) {
+        if (!byDomain.has(domain)) byDomain.set(domain, { cookieCount: 0, lastAccess: null })
+      }
+      const continuous = new Set(persisted.domains)
+      const blocked = new Set(persisted.blocked)
+      const domains: DiscoveredDomain[] = [...byDomain.entries()].map(([domain, info]) => {
+        const policy: CookieDomainPolicy = continuous.has(domain) ? "continuous" : blocked.has(domain) ? "block" : "none"
+        return {
+          domain,
+          cookieCount: info.cookieCount,
+          lastAccess: info.lastAccess,
+          policy,
+          known: policy !== "none",
+        }
+      })
+      const rank = (policy: CookieDomainPolicy) => (policy === "continuous" ? 0 : policy === "block" ? 1 : 2)
+      domains.sort((a, b) => {
+        const knownDelta = Number(b.known) - Number(a.known)
+        if (knownDelta) return knownDelta
+        const policyDelta = rank(a.policy) - rank(b.policy)
+        if (policyDelta) return policyDelta
+        if (a.lastAccess != null && b.lastAccess != null && a.lastAccess !== b.lastAccess) return b.lastAccess - a.lastAccess
+        if (a.lastAccess != null && b.lastAccess == null) return -1
+        if (a.lastAccess == null && b.lastAccess != null) return 1
+        if (a.cookieCount !== b.cookieCount) return b.cookieCount - a.cookieCount
+        return a.domain.localeCompare(b.domain)
+      })
+      return { ok: true as const, domains: domains.slice(0, MAX_DISCOVERED_DOMAINS) }
+    },
     listProfiles() {
       const profiles: ChromeProfile[] = []
       try {

@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
+import { ArrowLeft, ArrowRight, Cookie, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
@@ -14,6 +14,8 @@ import { subscribeBrowserNavigation, takePendingBrowserUrl } from "~/lib/browser
 import { cn } from "~/lib/cn"
 import { rectsIntersect } from "~/lib/browserOverlay"
 import { NO_DRAG_REGION } from "~/lib/dragRegion"
+import { cookieSyncCompleteFirstRun, cookieSyncGetSettings } from "~/lib/cookieSync"
+import { CookieSyncModal } from "./browser/CookieSyncModal"
 import { Button } from "./ui/button"
 
 const LAST_URL_KEY = "chunky.browser.lastUrl"
@@ -291,6 +293,14 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
   // cannot be told anything useful before that.
   const [paneLive, setPaneLive] = useState(false)
 
+  // ── Cookie sync ──────────────────────────────────────────────────────────
+  // The first-launch offer, and the site picker it opens. `firstRunComplete`
+  // lives on the Bun side (never localStorage); the ref only stops this launch
+  // from asking twice if the pane remounts.
+  const [cookiePrompt, setCookiePrompt] = useState(false)
+  const [cookieModal, setCookieModal] = useState(false)
+  const cookieAskedRef = useRef(false)
+
   // ── Pane width ───────────────────────────────────────────────────────────
   const [paneWidth, setPaneWidth] = useState(() => readPaneWidth(window.innerWidth))
   const [maxWidth, setMaxWidth] = useState(() => maxPaneWidth(window.innerWidth))
@@ -542,6 +552,33 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
     void announceAppBrowserTarget(baseUrl, url)
   }, [baseUrl, paneLive, url])
 
+  /**
+   * Offer the Chrome import once the pane is actually live. Gated on the
+   * server-side `firstRunComplete` flag plus a readable Chrome store, so a
+   * machine without Chrome (or a user who already answered) is never nagged.
+   */
+  useEffect(() => {
+    if (!paneLive || cookieAskedRef.current) return
+    cookieAskedRef.current = true
+    let cancelled = false
+    void cookieSyncGetSettings()
+      .then((state) => {
+        if (cancelled) return
+        if (!state.firstRunComplete && state.chromeAvailable) setCookiePrompt(true)
+      })
+      .catch(() => {
+        // No cookie-sync support (web build, older runtime): stay quiet.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [paneLive])
+
+  const dismissCookiePrompt = useCallback(() => {
+    setCookiePrompt(false)
+    void cookieSyncCompleteFirstRun()
+  }, [])
+
   // Navigation requests that arrive while the pane is already open.
   useEffect(
     () =>
@@ -645,7 +682,52 @@ export function BrowserPane({ onClose, baseUrl }: { onClose: () => void; baseUrl
           </div>
         )}
         {available && loading ? <LoaderCircle className="pointer-events-none absolute right-3 top-3 size-4 animate-spin text-primary" aria-label="Loading" /> : null}
+
+        {/* First-launch cookie offer. Deliberately a sibling of the webview
+            host rather than a child of it: `paneCovered` treats anything it
+            does not contain as an overlay and hides the native view while it
+            is up, which is what makes this card both visible and clickable
+            over the composited page. */}
+        {cookiePrompt ? (
+          <div
+            role="dialog"
+            aria-label="Sync your Chrome logins"
+            className={cn(
+              NO_DRAG_REGION,
+              "absolute inset-x-3 bottom-3 z-20 flex flex-col gap-2 rounded-xl border border-border bg-popover/95 p-3 shadow-panel backdrop-blur",
+            )}
+          >
+            <div className="flex items-start gap-2.5">
+              <div className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">
+                <Cookie className="size-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="font-medium text-[13px] text-foreground">Sync your Chrome logins?</p>
+                <p className="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                  Copy cookies for the sites you choose into this browser, locally. Nothing is uploaded.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={dismissCookiePrompt}>Not now</Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setCookiePrompt(false)
+                  setCookieModal(true)
+                }}
+              >
+                Choose sites
+              </Button>
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      {/* Rendered through the Base UI dialog portal (a body-level sibling
+          layer), which `paneCovered`'s layer scan already accounts for, so the
+          native view steps aside while the picker is open. */}
+      <CookieSyncModal open={cookieModal} onOpenChange={setCookieModal} />
     </aside>
   )
 }

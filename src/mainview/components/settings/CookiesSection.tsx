@@ -1,4 +1,4 @@
-import { Cookie, RefreshCw, X } from "lucide-react"
+import { Cookie, ListChecks, RefreshCw, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   cookieSyncGetSettings,
@@ -12,6 +12,7 @@ import {
 } from "~/lib/cookieSync"
 import { DEFAULT_COOKIE_DOMAINS } from "~/lib/cookieSync"
 import { relativeTime } from "~/lib/format"
+import { CookieSyncModal } from "../browser/CookieSyncModal"
 import { Button } from "../ui/button"
 import { Switch } from "../ui/switch"
 import {
@@ -43,6 +44,7 @@ export function CookiesSection() {
   const [profiles, setProfiles] = useState<ChromeProfile[]>([])
   const [draft, setDraft] = useState("")
   const [running, setRunning] = useState(false)
+  const [manageOpen, setManageOpen] = useState(false)
   const [runResult, setRunResult] = useState<string | null>(null)
   const [runFailed, setRunFailed] = useState(false)
   const alive = useRef(true)
@@ -156,7 +158,24 @@ export function CookiesSection() {
     profiles.find((p) => p.id === state.sourceProfile)?.name || state.sourceProfile || "Default"
 
   return (
-    <SectionShell title="Browser cookies" description={description}>
+    <SectionShell
+      title="Browser cookies"
+      description={description}
+      actions={
+        <Button size="sm" variant="outline" onClick={() => setManageOpen(true)}>
+          <ListChecks className="size-3.5" />
+          Manage sites…
+        </Button>
+      }
+    >
+      {/* The per-site picker; closing it may have changed policies, so re-read. */}
+      <CookieSyncModal
+        open={manageOpen}
+        onOpenChange={(next) => {
+          setManageOpen(next)
+          if (!next) load()
+        }}
+      />
       <Card>
         <SubLabel>Sync</SubLabel>
         <FieldRow

@@ -11,6 +11,8 @@ import {
   createCookieSyncService,
   decryptChromeV10,
   mapChromeSameSite,
+  registrableDomain,
+  sanitizePersisted,
   type CdpCookie,
   type CookieSyncDeps,
   type CookieSyncTarget,
@@ -54,6 +56,7 @@ function writeCookieDb(
     is_persistent?: number
     source_scheme?: number
     source_port?: number
+    last_access_utc?: number
   }>,
 ) {
   mkdirSync(profileDir, { recursive: true })
@@ -61,10 +64,10 @@ function writeCookieDb(
   db.run(`CREATE TABLE cookies (
     host_key TEXT, name TEXT, encrypted_value BLOB, path TEXT, expires_utc INTEGER,
     is_secure INTEGER, is_httponly INTEGER, samesite INTEGER, has_expires INTEGER,
-    is_persistent INTEGER, source_scheme INTEGER, source_port INTEGER
+    is_persistent INTEGER, source_scheme INTEGER, source_port INTEGER, last_access_utc INTEGER
   )`)
   const insert = db.prepare(
-    `INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO cookies VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const yearFromNow = Math.round((Date.now() / 1000 + 365 * 24 * 3600 + 11_644_473_600) * 1e6)
   for (const row of rows) {
@@ -81,6 +84,7 @@ function writeCookieDb(
       row.is_persistent ?? 1,
       row.source_scheme ?? 2,
       row.source_port ?? 443,
+      row.last_access_utc ?? 0,
     )
   }
   db.close()
@@ -264,5 +268,87 @@ test("file persistence writes cookieSync.json without cookie values", () => {
   const raw = readFileSync(join(home, "cookieSync.json"), "utf8")
   expect(raw).not.toContain("must-not-persist")
   expect(raw).not.toContain(SECRET)
-  expect(JSON.parse(raw)).toMatchObject({ enabled: false, domains: ["google.com"], sourceProfile: "Default" })
+  expect(JSON.parse(raw)).toMatchObject({
+    enabled: false,
+    domains: ["google.com"],
+    blocked: [],
+    sourceProfile: "Default",
+    firstRunComplete: false,
+  })
+})
+
+test("registrableDomain collapses hosts to eTLD+1 with a small public-suffix set", () => {
+  expect(registrableDomain("mail.google.com")).toBe("google.com")
+  expect(registrableDomain("x.co.uk")).toBe("x.co.uk")
+  expect(registrableDomain("a.b.co.uk")).toBe("b.co.uk")
+  expect(registrableDomain("localhost")).toBe("localhost")
+  expect(registrableDomain("127.0.0.1")).toBe("127.0.0.1")
+})
+
+test("sanitizePersisted backfills missing blocked and firstRunComplete", () => {
+  const next = sanitizePersisted({
+    enabled: true,
+    domains: ["google.com"],
+    sourceProfile: "Default",
+  })
+  expect(next.blocked).toEqual([])
+  expect(next.firstRunComplete).toBe(false)
+  expect(next.domains).toEqual(["google.com"])
+  expect(next.enabled).toBe(true)
+})
+
+test("setPolicy keeps continuous and block mutually exclusive", () => {
+  const { service } = harness()
+  let state = service.setPolicy("google.com", "continuous")
+  expect(state.domains).toContain("google.com")
+  expect(state.blocked).not.toContain("google.com")
+  state = service.setPolicy("google.com", "block")
+  expect(state.blocked).toContain("google.com")
+  expect(state.domains).not.toContain("google.com")
+  state = service.setPolicy("google.com", "none")
+  expect(state.domains).not.toContain("google.com")
+  expect(state.blocked).not.toContain("google.com")
+})
+
+test("listDomains ranks known first then by recency", () => {
+  const { service, chrome } = harness()
+  const recent = (13_344_473_600 + 2_000) * 1e6
+  const older = (13_344_473_600 + 1_000) * 1e6
+  writeCookieDb(join(chrome, "Default"), [
+    { host_key: ".accounts.google.com", name: "SID", value: "g", last_access_utc: older },
+    { host_key: ".mail.google.com", name: "GMAIL", value: "m", last_access_utc: older },
+    { host_key: ".github.com", name: "dotcom", value: "gh", last_access_utc: recent },
+    { host_key: ".example.com", name: "old", value: "ex", last_access_utc: older / 2 },
+  ])
+  service.setSettings({ domains: ["google.com"], blocked: [] })
+  service.setPolicy("google.com", "continuous")
+  service.setPolicy("ghost.example", "block")
+  const listed = service.listDomains().domains.map((row) => ({ domain: row.domain, policy: row.policy, known: row.known, cookieCount: row.cookieCount }))
+  expect(listed[0]).toMatchObject({ domain: "google.com", policy: "continuous", known: true, cookieCount: 2 })
+  expect(listed[1]).toMatchObject({ domain: "ghost.example", policy: "block", known: true, cookieCount: 0 })
+  expect(listed[2]).toMatchObject({ domain: "github.com", policy: "none", known: false })
+  expect(listed.map((row) => row.domain)).toContain("example.com")
+})
+
+test("syncDomains injects only the requested hosts and excludes blocked on sync-all", async () => {
+  const { service, injected, chrome } = harness()
+  writeCookieDb(join(chrome, "Default"), [
+    { host_key: ".accounts.google.com", name: "SID", value: "g" },
+    { host_key: ".youtube.com", name: "VISITOR", value: "yt" },
+    { host_key: ".github.com", name: "dotcom_user", value: "gh" },
+  ])
+  service.setPolicy("github.com", "block")
+  const one = await service.syncDomains(["google.com"])
+  expect(one.ok).toBe(true)
+  expect(injected.at(-1)?.map((cookie) => cookie.name)).toEqual(["SID"])
+  const all = await service.syncDomains(null)
+  expect(all.ok).toBe(true)
+  expect(injected.at(-1)?.map((cookie) => cookie.name).sort()).toEqual(["SID", "VISITOR"])
+})
+
+test("completeFirstRun is idempotent", () => {
+  const { service } = harness()
+  expect(service.getState().firstRunComplete).toBe(false)
+  expect(service.completeFirstRun().firstRunComplete).toBe(true)
+  expect(service.completeFirstRun().firstRunComplete).toBe(true)
 })

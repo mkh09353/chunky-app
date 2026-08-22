@@ -3,14 +3,24 @@
 // Cookie VALUES never cross this boundary — only domains, counts and status.
 import type {
   ChromeProfile,
+  CookieDomainPolicy,
+  CookieSyncDomainsResult,
   CookieSyncProfilesResult,
   CookieSyncRunResult,
   CookieSyncSettings,
   CookieSyncState,
+  DiscoveredDomain,
 } from "../../shared/cookieSync"
 import { getRpc } from "./rpc"
 
-export type { ChromeProfile, CookieSyncRunResult, CookieSyncSettings, CookieSyncState }
+export type {
+  ChromeProfile,
+  CookieDomainPolicy,
+  CookieSyncRunResult,
+  CookieSyncSettings,
+  CookieSyncState,
+  DiscoveredDomain,
+}
 export { DEFAULT_COOKIE_DOMAINS } from "../../shared/cookieSync"
 
 function isState(value: unknown): value is CookieSyncState {
@@ -24,6 +34,38 @@ function isState(value: unknown): value is CookieSyncState {
     typeof v.sourceProfile === "string" &&
     typeof v.chromeAvailable === "boolean"
   )
+}
+
+function isPolicy(value: unknown): value is CookieDomainPolicy {
+  return value === "continuous" || value === "block" || value === "none"
+}
+
+function isDiscovered(value: unknown): value is DiscoveredDomain {
+  if (!value || typeof value !== "object") return false
+  const v = value as Partial<DiscoveredDomain>
+  return (
+    typeof v.domain === "string" &&
+    typeof v.cookieCount === "number" &&
+    (v.lastAccess === null || typeof v.lastAccess === "number") &&
+    isPolicy(v.policy) &&
+    typeof v.known === "boolean"
+  )
+}
+
+function isDomainsResult(value: unknown): value is CookieSyncDomainsResult {
+  if (!value || typeof value !== "object") return false
+  const v = value as Partial<CookieSyncDomainsResult>
+  return v.ok === true && Array.isArray(v.domains) && v.domains.every(isDiscovered)
+}
+
+function runResult(raw: unknown, fallback: string): CookieSyncRunResult {
+  if (!raw || typeof raw !== "object") return { ok: false, count: 0, error: fallback }
+  const body = raw as { ok?: unknown; count?: unknown; error?: unknown }
+  return {
+    ok: body.ok === true,
+    count: typeof body.count === "number" ? body.count : 0,
+    ...(typeof body.error === "string" ? { error: body.error } : {}),
+  }
 }
 
 function isProfiles(value: unknown): value is CookieSyncProfilesResult {
@@ -77,17 +119,73 @@ export async function cookieSyncRunNow(): Promise<CookieSyncRunResult> {
   try {
     const fn = (await getRpc())?.request?.cookieSyncRunNow
     if (!fn) return { ok: false, count: 0, error: UNAVAILABLE }
-    const raw = await fn()
-    if (!raw || typeof raw !== "object") return { ok: false, count: 0, error: "Sync failed." }
-    const body = raw as { ok?: unknown; count?: unknown; error?: unknown }
-    return {
-      ok: body.ok === true,
-      count: typeof body.count === "number" ? body.count : 0,
-      ...(typeof body.error === "string" ? { error: body.error } : {}),
-    }
+    return runResult(await fn(), "Sync failed.")
   } catch (error) {
     return { ok: false, count: 0, error: error instanceof Error ? error.message : "Sync failed." }
   }
+}
+
+/**
+ * Sites discovered in the source Chrome profile, ranked by the Bun side
+ * (known first, then recency). Domains and counts only — never cookie values.
+ */
+export async function cookieSyncListDomains(): Promise<DiscoveredDomain[]> {
+  try {
+    const fn = (await getRpc())?.request?.cookieSyncListDomains
+    if (!fn) throw new Error(UNAVAILABLE)
+    const raw = await fn()
+    if (!isDomainsResult(raw)) throw new Error("Could not read Chrome cookies.")
+    return raw.domains
+  } catch (error) {
+    fail(error, "Could not read Chrome cookies.")
+  }
+}
+
+/** Set a site's standing intent. The returned state is the source of truth. */
+export async function cookieSyncSetPolicy(
+  domain: string,
+  policy: CookieDomainPolicy,
+): Promise<CookieSyncState> {
+  try {
+    const fn = (await getRpc())?.request?.cookieSyncSetPolicy
+    if (!fn) throw new Error(UNAVAILABLE)
+    const raw = await fn({ domain, policy })
+    if (!isState(raw)) throw new Error("Could not save this site's setting.")
+    return raw
+  } catch (error) {
+    fail(error, "Could not save this site's setting.")
+  }
+}
+
+/** One-off sync. Omitting `domains` (or passing an empty list) syncs everything. */
+export async function cookieSyncSyncDomains(domains?: string[]): Promise<CookieSyncRunResult> {
+  try {
+    const fn = (await getRpc())?.request?.cookieSyncSyncDomains
+    if (!fn) return { ok: false, count: 0, error: UNAVAILABLE }
+    return runResult(await fn(domains?.length ? { domains } : {}), "Sync failed.")
+  } catch (error) {
+    return { ok: false, count: 0, error: error instanceof Error ? error.message : "Sync failed." }
+  }
+}
+
+/**
+ * Mark the first-launch prompt as seen. Persistence is server-side only — the
+ * renderer never records this in localStorage.
+ */
+export async function cookieSyncCompleteFirstRun(): Promise<CookieSyncState | null> {
+  try {
+    const fn = (await getRpc())?.request?.cookieSyncCompleteFirstRun
+    if (!fn) return null
+    const raw = await fn()
+    return isState(raw) ? raw : null
+  } catch {
+    return null
+  }
+}
+
+/** Favicon URL for a bare domain. Only the domain is ever sent. */
+export function faviconUrl(domain: string): string {
+  return `https://icons.duckduckgo.com/ip3/${encodeURIComponent(domain)}.ico`
 }
 
 /** Chrome profiles available as a source. Empty list when none can be read. */
