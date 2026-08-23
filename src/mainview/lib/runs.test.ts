@@ -3,8 +3,11 @@ import type { AgentEvent } from "@chunky/protocol"
 import { initialState, reduce, MAIN } from "./transcript"
 import type { TranscriptState } from "./transcript"
 import {
+  activeWorkerRows,
   anchoredItemIndices,
+  isRunCardLive,
   isSeat,
+  runAccent,
   liveRunViews,
   LIVE_TAIL_MAX,
   parkedRunsByItem,
@@ -310,5 +313,102 @@ describe("run anchors on the pill", () => {
       { kind: "assistant", text: "hello", streaming: false },
     ])
     expect(applyRunAnchors(messages, new Map())).toBe(messages)
+  })
+})
+
+describe("active workers strip", () => {
+  /** The strip's whole reason to exist: the root turn ended, the delegate did
+   *  not. Same stream the pill renders, minus the lead's own liveness. */
+  const ROOT_IDLE_WITH_WORKER: AgentEvent[] = [
+    { type: "session.status", sessionId: "s", status: "running" },
+    ...DELEGATING_TURN,
+    { type: "message.end", reason: "complete" },
+    { type: "session.status", sessionId: "s", status: "idle" },
+  ]
+
+  test("live runs + idle root → one row per run, with the pill's own tail", () => {
+    const state = play(ROOT_IDLE_WITH_WORKER)
+    const rows = activeWorkerRows(state, false)
+    expect(rows).toHaveLength(1)
+    const row = rows[0]!
+    expect(row.runId).toBe("sk:frontend#0")
+    expect(row.title).toBe("Sidekick (frontend)")
+    expect(row.model).toBe("grok-4.5")
+    expect(row.seat).toBe(true)
+    expect(row.toolCount).toBe(1)
+    expect(row.accent).toBe(runAccent(row.runId))
+    // No second tail state: the row's line is the last line of the view the
+    // pill's LiveRunSection renders.
+    const view = liveRunViews(state).get(row.runId)!
+    expect(row.lastLine).toEqual(view.lines[view.lines.length - 1]!)
+  })
+
+  test("hidden while the root turn is still running", () => {
+    const state = play(ROOT_IDLE_WITH_WORKER)
+    // Either signal is enough: App's `streaming`, or the reduced root status.
+    expect(activeWorkerRows(state, true)).toHaveLength(0)
+    const rootRunning = reduce(state, { type: "session.status", sessionId: "s", status: "running" })
+    expect(activeWorkerRows(rootRunning, false)).toHaveLength(0)
+  })
+
+  test("hidden with no live runs — including one that settles after the lead is idle", () => {
+    expect(activeWorkerRows(undefined, false)).toHaveLength(0)
+    expect(activeWorkerRows(initialState, false)).toHaveLength(0)
+    const settled = play([
+      ...ROOT_IDLE_WITH_WORKER,
+      { type: "thread.status", threadId: "sk:frontend", status: "idle" },
+    ])
+    expect(settled.runs[0]!.status).toBe("done")
+    expect(activeWorkerRows(settled, false)).toHaveLength(0)
+  })
+
+  test("a one-shot spawn is not a seat", () => {
+    const state = play([
+      { type: "tool.start", id: "t1", name: "spawn_thread", input: { title: "Audit" } },
+      { type: "thread.spawn", threadId: "spawn:1", parentThreadId: MAIN, title: "Audit deps" },
+      { type: "session.status", sessionId: "s", status: "idle" },
+    ])
+    const rows = activeWorkerRows(state, false)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.seat).toBe(false)
+    expect(rows[0]!.lastLine).toBeUndefined()
+  })
+})
+
+describe("collapse exemption for still-running cards", () => {
+  test("a card for a run still in flight is exempt; a settled one is not", () => {
+    const live = play(DELEGATING_TURN)
+    const run = live.runs[0]!
+    expect(isRunCardLive(live, run.threadId, run)).toBe(true)
+
+    const settled = reduce(live, {
+      type: "thread.status",
+      threadId: "sk:frontend",
+      status: "idle",
+    })
+    expect(isRunCardLive(settled, "sk:frontend", settled.runs[0]!)).toBe(false)
+  })
+
+  test("the run wins over the thread: a re-briefed seat cannot re-open an old pass", () => {
+    const rebriefed = play([
+      ...DELEGATING_TURN,
+      { type: "thread.status", threadId: "sk:frontend", status: "idle" },
+      { type: "thread.status", threadId: "sk:frontend", status: "running" },
+    ])
+    const [first, second] = rebriefed.runs
+    expect(first!.status).toBe("done")
+    expect(second!.status).toBe("running")
+    // The card showing the FIRST pass folds normally…
+    expect(isRunCardLive(rebriefed, "sk:frontend", first)).toBe(false)
+    // …while the seat itself, and the pass in flight, stay expanded.
+    expect(isRunCardLive(rebriefed, "sk:frontend", second)).toBe(true)
+    expect(isRunCardLive(rebriefed, "sk:frontend")).toBe(true)
+  })
+
+  test("a thread-only card follows its thread, and unknown state never exempts", () => {
+    const live = play(DELEGATING_TURN)
+    expect(isRunCardLive(live, "sk:frontend")).toBe(true)
+    expect(isRunCardLive(live, "nobody")).toBe(false)
+    expect(isRunCardLive(undefined, "sk:frontend")).toBe(false)
   })
 })

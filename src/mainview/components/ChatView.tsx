@@ -468,7 +468,9 @@ export function ChatView({
     () => applyRunAnchors(thread.messages, anchors),
     [thread.messages, anchors],
   )
-  const elapsedOf = useRunClock(transcript?.runs)
+  // Keyed by session: the clock lives in a module-level store, so a delegate
+  // left running survives switching away and back (lib/useRunClock).
+  const elapsedOf = useRunClock(transcript?.runs, thread.id)
   // Live delegate streams, keyed by run id, handed to the tool cards that
   // spawned them (Message → ToolCard → LiveRunSection). Settled runs are not in
   // here, which is what makes a finished card go back to its plain self.

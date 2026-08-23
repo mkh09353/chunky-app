@@ -108,6 +108,31 @@ export function anchoredItemIndices(state: TranscriptState | undefined): Readonl
   return anchored
 }
 
+/**
+ * Is this card's work STILL IN FLIGHT?
+ *
+ * The fold-at-turn-end rule (ChatView's `collapseSignal`) exists so a finished
+ * turn tidies itself away. But a detached sidekick or spawn legitimately
+ * outlives the lead's turn, and folding it up at the exact moment the reader
+ * decided to keep watching it is the opposite of helpful. So an expanded card
+ * whose own run — or, for a seat card standing in for a whole thread, any run on
+ * that thread — is still running is exempt from the collapse; it folds normally
+ * on the next signal once it has settled.
+ *
+ * `run` wins when it is given: a card renders ONE pass of a persistent seat, and
+ * a seat re-briefed after this pass settled must not keep this card open.
+ */
+export function isRunCardLive(
+  state: TranscriptState | undefined,
+  threadId: string,
+  run?: RunRecord,
+): boolean {
+  if (run) return run.status === "running"
+  if (!state) return false
+  if (state.threads[threadId]?.status === "running") return true
+  return state.runs.some((r) => r.threadId === threadId && r.status === "running")
+}
+
 /** Runs by id, for turning anchor ids back into records. */
 export function runsById(state: TranscriptState): Map<string, RunRecord> {
   return new Map(state.runs.map((run) => [run.id, run]))
@@ -155,6 +180,73 @@ export function liveRunViews(state: TranscriptState | undefined): Map<string, Li
     })
   }
   return views
+}
+
+/** Is this live run a persistent sidekick SEAT rather than a one-shot delegate?
+ *
+ *  Same rule as `isSeat`, expressed against the view a card/strip actually
+ *  holds (a `LiveRunView`, not the thread node) so the pill and the ambient
+ *  strip cannot drift apart on which glyph a run gets. */
+export function isSeatRun(view: LiveRunView): boolean {
+  return view.threadId.includes(":sidekick") || /^sidekick\b/i.test(view.title)
+}
+
+/** One row of the ambient "active workers" strip: everything it paints, and
+ *  nothing it has to go looking for.
+ *
+ *  Derived from `liveRunViews`, so the strip and the tool pill's own live
+ *  section read the SAME tail state — there is no second stream to keep in
+ *  sync. */
+export interface ActiveWorkerRow {
+  runId: string
+  threadId: string
+  title: string
+  model?: string
+  toolCount: number
+  /** Sidekick seat (bot) vs one-shot delegate (sparkles). */
+  seat: boolean
+  /** The run's hue, shared with its pill and its card. */
+  accent: string
+  /** Newest tail line, or undefined while the run has printed nothing. */
+  lastLine?: TailLine
+}
+
+/**
+ * The strip's whole rule: show a row per live run, but ONLY while the root is
+ * idle.
+ *
+ * While the lead's own turn is running the transcript is already visibly
+ * working and every live run streams inside the pill that spawned it — a second
+ * ambient list would just be noise. The moment the root goes idle with delegates
+ * still in flight (a detached spawn or sidekick outliving the turn) the chat
+ * column has nothing left saying so, and that is exactly what this fills.
+ *
+ * Reactive by construction: rows come straight from `state.runs`, so a run that
+ * settles after the lead is idle (`thread.status: idle` → `closeRun`) drops out
+ * on the next projection, and an empty result hides the strip.
+ */
+export function activeWorkerRows(
+  state: TranscriptState | undefined,
+  /** Is the ROOT turn still running? (App's `streaming`.) */
+  streaming: boolean,
+): ActiveWorkerRow[] {
+  if (!state || streaming || state.status === "running") return []
+  const rows: ActiveWorkerRow[] = []
+  // Spawn order: the map is built from `state.runs`, which is append-only.
+  for (const view of liveRunViews(state).values()) {
+    const last = view.lines[view.lines.length - 1]
+    rows.push({
+      runId: view.runId,
+      threadId: view.threadId,
+      title: view.title,
+      ...(view.model ? { model: view.model } : {}),
+      toolCount: view.toolCount,
+      seat: isSeatRun(view),
+      accent: runAccent(view.runId),
+      ...(last ? { lastLine: last } : {}),
+    })
+  }
+  return rows
 }
 
 export type TailTone = "cmd" | "ok" | "fail" | "text" | "dim"

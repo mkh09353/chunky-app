@@ -14,7 +14,7 @@
 import { Bot, Sparkles } from "lucide-react"
 import { createContext, useContext } from "react"
 import { cn } from "~/lib/cn"
-import { formatElapsed, type LiveRunView, type TailLine, type TailTone } from "~/lib/runs"
+import { formatElapsed, isSeatRun, type LiveRunView, type TailLine, type TailTone } from "~/lib/runs"
 import type { RunRecord } from "~/lib/transcript"
 
 export const TAIL_TONE: Record<TailTone, string> = {
@@ -100,11 +100,6 @@ export function LiveRunsProvider({
   return <LiveRunsContext.Provider value={value}>{children}</LiveRunsContext.Provider>
 }
 
-/** Is this a persistent sidekick SEAT (stable thread id) or a one-shot delegate? */
-function seatLike(view: LiveRunView): boolean {
-  return view.threadId.includes(":sidekick") || /^sidekick\b/i.test(view.title)
-}
-
 /** The live section of a tool card: who is running, for how long, and the tail
  *  of what it is doing right now. Compact by default; the card's own expand
  *  toggle shows more of the same stream. */
@@ -117,7 +112,8 @@ export function LiveRunSection({
   elapsedMs?: number
   expanded?: boolean
 }) {
-  const Icon = seatLike(view) ? Bot : Sparkles
+  // Same seat rule the ambient strip uses, so a run wears one glyph everywhere.
+  const Icon = isSeatRun(view) ? Bot : Sparkles
   return (
     <div
       data-run-live={view.runId}

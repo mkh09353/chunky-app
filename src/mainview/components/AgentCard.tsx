@@ -10,11 +10,11 @@
 // expanded body. Both dresses expand to the same full detail the old inline
 // thread panels showed: the delegate's messages and any nested sub-threads.
 import { Bot, ChevronRight, Sparkles } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
-import { formatElapsed, isSeat, runAccent, runSummary, runTail } from "~/lib/runs"
+import { formatElapsed, isRunCardLive, isSeat, runAccent, runSummary, runTail } from "~/lib/runs"
 import { TailLines } from "./LiveRun"
 import { MessageView } from "./Message"
 
@@ -80,7 +80,18 @@ export function AgentCard({
   collapseSignal = 0,
 }: AgentCardProps) {
   const [open, setOpen] = useState(false)
+  // Read at signal time, not a dependency: liveness changing must not fold a
+  // card on its own, and the effect must see the CURRENT status when the signal
+  // does fire.
+  const stillWorking = useRef(false)
+  stillWorking.current = isRunCardLive(transcript, threadId, run)
   useEffect(() => {
+    // A detached delegate outlives the lead's turn (lib/transcript keeps its run
+    // open past `session.status: idle`), so the end-of-turn fold — and fold-all
+    // — leave a still-running card expanded: that is exactly the card the reader
+    // is watching. It folds with everything else on the next signal after it
+    // settles.
+    if (stillWorking.current) return
     setOpen(false)
   }, [collapseSignal])
 

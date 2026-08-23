@@ -19,6 +19,7 @@ import {
 } from "./components/settings/OnboardingWizard"
 import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
+import { ActiveWorkersStrip } from "./components/ActiveWorkersStrip"
 import { TodosPanel } from "./components/TodosPanel"
 import { loadTerminalsOpen, TerminalDrawer } from "./components/TerminalDrawer"
 import { GitToolbar } from "./components/GitPanel"
@@ -3179,6 +3180,14 @@ export function App() {
                   onChange={handleQuickKeysChange}
                   onEditorOpenChange={setQuickKeyEditorOpen}
                   onRun={(key) => submitComposerMessage(key.prompt)}
+                />
+                {/* Detached delegates outlive the lead's turn: while the root
+                    is idle and workers are still running, this is the only
+                    thing in the chat column that says so. */}
+                <ActiveWorkersStrip
+                  transcript={live ? transcript : undefined}
+                  streaming={streaming}
+                  sessionId={sessionId}
                 />
                 <Composer
                 model={uiModel}
