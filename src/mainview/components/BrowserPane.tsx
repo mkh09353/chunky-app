@@ -876,7 +876,16 @@ export function BrowserPane({
       {/* Rendered through the Base UI dialog portal (a body-level sibling
           layer), which `paneCovered`'s layer scan already accounts for, so the
           native view steps aside while the picker is open. */}
-      <CookieSyncModal open={cookieModal} onOpenChange={setCookieModal} />
+      <CookieSyncModal
+        open={cookieModal}
+        onOpenChange={setCookieModal}
+        onSynced={() => {
+          // Synced cookies only apply to the next request, so reload the pane's
+          // current page to pick up the freshly imported session.
+          setLoading(true)
+          webviewRef.current?.reload()
+        }}
+      />
     </aside>
   )
 }

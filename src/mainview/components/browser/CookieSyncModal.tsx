@@ -197,9 +197,13 @@ function DomainRow({
 export function CookieSyncModal({
   open,
   onOpenChange,
+  onSynced,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** Called after cookies are successfully injected, so the host can reload the
+   *  pane — synced cookies only take effect on the next page load. */
+  onSynced?: () => void
 }) {
   const [rows, setRows] = useState<DiscoveredDomain[]>([])
   const [state, setState] = useState<CookieSyncState | null>(null)
@@ -292,6 +296,7 @@ export function CookieSyncModal({
     if (!alive.current) return
     setBusyDomain(null)
     if (result.ok) {
+      onSynced?.()
       setSyncedCounts((current) => ({ ...current, [domain]: result.count }))
       window.setTimeout(() => {
         if (!alive.current) return
@@ -311,10 +316,11 @@ export function CookieSyncModal({
     const result = await cookieSyncSyncDomains()
     if (!alive.current) return
     setAllBusy(false)
+    if (result.ok) onSynced?.()
     setAllResult({
       ok: result.ok,
       text: result.ok
-        ? `Synced ${result.count} cookie${result.count === 1 ? "" : "s"}`
+        ? `Synced ${result.count} cookie${result.count === 1 ? "" : "s"} — reload or revisit a site to see your session`
         : result.error || "Sync failed.",
     })
     try {
