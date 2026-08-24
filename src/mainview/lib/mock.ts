@@ -53,6 +53,9 @@ export interface ToolBlockData {
   progress?: string
   done: boolean
   ok?: boolean
+  /** The call was stopped with its thread (stop_delegate), not finished and not
+   *  failed — rendered neutrally, never with the failure treatment. */
+  cancelled?: boolean
   /** Structured diff when this is an edit/write tool, else null/undefined. */
   diff?: FileDiff | null
 }

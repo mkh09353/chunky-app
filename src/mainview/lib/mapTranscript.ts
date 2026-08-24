@@ -193,6 +193,7 @@ export function itemsToMessages(
           done: it.done,
           diff,
           ...(it.ok !== undefined ? { ok: it.ok } : {}),
+          ...(it.cancelled ? { cancelled: true } : {}),
           ...(it.output ? { output: truncateText(it.output) } : {}),
           ...(it.progress ? { progress: truncateText(it.progress) } : {}),
         }

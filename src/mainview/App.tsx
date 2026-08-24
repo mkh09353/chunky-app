@@ -59,6 +59,8 @@ import {
   fetchServerInfo,
   fetchServerRetiring,
   interruptSession,
+  stopDelegate,
+  stopDelegateAvailable,
   forkSession, getGoal, getRewindPoints, getScoreboard, getUsage, renameSession, rewindSession, setGoal, shipSession,
   listAllModels,
   listRepos,
@@ -143,7 +145,7 @@ import {
   savedModeForCommand,
   type SlashCommand,
 } from "./lib/slashCommands"
-import type { GoalSnapshot, ModeInfo, ModeSpec, QueueEntry, RewindPoint } from "@chunky/protocol"
+import type { GoalSnapshot, ModeInfo, ModeSpec, QueueEntry, RewindPoint, StopDelegateRequest } from "@chunky/protocol"
 import { followUpNotice, steerQueuedMessage } from "./lib/queueActions"
 import type { PaletteAction } from "./components/CommandPalette"
 import { cn } from "./lib/cn"
@@ -430,6 +432,11 @@ export function App() {
   // TUI parity: bare /scoreboard is server-wide, `/scoreboard session` scopes it.
   const [scoreboardScope, setScoreboardScope] = useState<"session" | "all">("all")
   const [notice, setNotice] = useState<string | null>(null)
+  /** The ONE server base URL that answered "no such endpoint" to
+   *  POST .../stop-delegate. Held as a URL rather than a boolean so moving onto
+   *  another server — a reconnect, or an in-place upgrade that swaps baseUrl
+   *  without remounting — brings the control back by itself. Never persisted. */
+  const [stopDelegateUnsupportedOn, setStopDelegateUnsupportedOn] = useState<string | null>(null)
   // Superseded servers still running after an upgrade. Dismissal is in-memory
   // on purpose: it should come back next launch if they are still there.
   const [oldServers, setOldServers] = useState<ServerInspection | null>(null)
@@ -2302,6 +2309,33 @@ export function App() {
     saveDisplayName(trimmed)
   }, [])
 
+  /**
+   * Cancel ONE delegate from its anchor card (server stop_delegate), leaving
+   * the lead turn alone.
+   *
+   * Immediate, like every other card action here: the outcome (cancelled,
+   * already finished, not found, ambiguous) comes back as the same bottom-right
+   * notice the rest of the app uses. A server without the endpoint says so once
+   * and then loses the button for the rest of this app's lifetime — nothing is
+   * persisted, and a semantic 404 ("no such run") is a normal answer that must
+   * NOT be mistaken for the endpoint being absent (see lib/api).
+   */
+  const handleStopRun = useCallback(
+    async (_runId: string, target: StopDelegateRequest) => {
+      if (!config || !sessionId) return
+      const result = await stopDelegate(config.baseUrl, sessionId, target)
+      if (result.status === "unsupported") {
+        setStopDelegateUnsupportedOn(config.baseUrl)
+        setNotice("This Chunky server can't stop delegates yet — update the server to use this.")
+        return
+      }
+      setNotice(
+        result.status === "ok" ? result.response.message : `Couldn't stop it: ${result.message}`,
+      )
+    },
+    [config, sessionId],
+  )
+
   const handleStop = useCallback(() => {
     if (!live) {
       stopDemoStream()
@@ -3155,6 +3189,11 @@ export function App() {
                   modelName={uiModel.name}
                   foldAll={foldThreads}
                   compacted={liveCompacted}
+                  {...(live &&
+                  sessionId &&
+                  stopDelegateAvailable(config?.baseUrl, stopDelegateUnsupportedOn)
+                    ? { onStopRun: handleStopRun }
+                    : {})}
                 />
               </FileLinkProvider>
               {(transcript.background.tasks > 0 || transcript.background.monitors > 0) && <div className="px-5 pb-1 text-center text-[11px] text-muted-foreground">Background: {transcript.background.tasks} task{transcript.background.tasks === 1 ? "" : "s"} · {transcript.background.monitors} monitor{transcript.background.monitors === 1 ? "" : "s"}</div>}

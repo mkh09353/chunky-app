@@ -217,3 +217,126 @@ describe("ports.changed snapshots", () => {
     expect(state.ports).toEqual([])
   })
 })
+
+describe("a cancelled delegate is terminal, and stays in the transcript", () => {
+  /** A delegate stopped mid-tool: the server emits `thread.status: cancelled`
+   *  and NOTHING else (no `error` item — see the server's emitDelegateFailure),
+   *  so this event is the only signal the App gets. */
+  const STOPPED: AgentEvent[] = [
+    RUNNING(),
+    { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+    { type: "thread.spawn", threadId: "s:sidekick:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+    { type: "tool.start", id: "t2", name: "bash", input: { command: "bun test" }, threadId: "s:sidekick:frontend" },
+    { type: "message.start", role: "assistant", threadId: "s:sidekick:frontend" },
+    { type: "message.delta", text: "Running the suite…", threadId: "s:sidekick:frontend" },
+    { type: "thread.status", threadId: "s:sidekick:frontend", status: "cancelled" },
+  ]
+
+  test("settles the run as cancelled rather than done", () => {
+    const state = play(STOPPED)
+    const run = state.runs[0]!
+    expect(run.status).toBe("cancelled")
+    expect(run.itemEnd).toBe(state.threads["s:sidekick:frontend"]!.items.length)
+  })
+
+  test("the run stays anchored to the pill that spawned it", () => {
+    const state = play(STOPPED)
+    const run = state.runs[0]!
+    // The sidekick tool item is index 0 of MAIN, and the anchor is untouched.
+    expect(run.anchorIndex).toBe(0)
+    expect(mainItems(state)[0]).toMatchObject({ kind: "tool", name: "sidekick" })
+    // The delegate's own output survives the stop.
+    const items = state.threads["s:sidekick:frontend"]!.items
+    expect(items.some((it) => it.kind === "assistant" && it.text === "Running the suite…")).toBe(true)
+  })
+
+  test("closes whatever the stopped delegate left open", () => {
+    const thread = play(STOPPED).threads["s:sidekick:frontend"]!
+    expect(thread.status).toBe("cancelled")
+    const tool = thread.items.find((it): it is Item & { kind: "tool" } => it.kind === "tool")!
+    expect(tool.done).toBe(true)
+    // Closed, but NOT marked failed: it was stopped (see the mid-tool suite).
+    expect(tool.cancelled).toBe(true)
+    expect(tool.ok).toBeUndefined()
+    const message = thread.items.find(
+      (it): it is Item & { kind: "assistant" } => it.kind === "assistant",
+    )!
+    expect(message.streaming).toBe(false)
+  })
+
+  test("does not keep the session tree busy, and never fabricates an error item", () => {
+    const state = play([...STOPPED, IDLE()])
+    expect(isTreeIdle(state)).toBe(true)
+    expect(isStreaming(state)).toBe(false)
+    const errors = state.threads["s:sidekick:frontend"]!.items.filter((it) => it.kind === "error")
+    expect(errors).toHaveLength(0)
+  })
+
+  test("a re-brief after a cancel opens a fresh run beside the settled one", () => {
+    const state = play([
+      ...STOPPED,
+      { type: "tool.start", id: "t3", name: "sidekick", input: { seat: "frontend" } },
+      { type: "thread.status", threadId: "s:sidekick:frontend", status: "running" },
+    ])
+    expect(state.runs.map((run) => run.status)).toEqual(["cancelled", "running"])
+  })
+})
+
+describe("a delegate cancelled MID-TOOL is not a failure", () => {
+  const MID_TOOL: AgentEvent[] = [
+    RUNNING(),
+    { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+    { type: "thread.spawn", threadId: "s:sidekick:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+    { type: "tool.start", id: "t2", name: "bash", input: { command: "bun test" }, threadId: "s:sidekick:frontend" },
+    { type: "tool.progress", id: "t2", chunk: "running 300 tests…\n", threadId: "s:sidekick:frontend" },
+  ]
+
+  test("the in-flight call is marked cancelled, and ok is left unset", () => {
+    const state = play([...MID_TOOL, {
+      type: "thread.status", threadId: "s:sidekick:frontend", status: "cancelled",
+    }])
+    const tool = state.threads["s:sidekick:frontend"]!.items.find(
+      (it): it is Item & { kind: "tool" } => it.kind === "tool",
+    )!
+    expect(tool.done).toBe(true)
+    expect(tool.cancelled).toBe(true)
+    expect(tool.ok).toBeUndefined()
+    // What it managed to print is still promoted to output.
+    expect(tool.output).toContain("running 300 tests")
+  })
+
+  test("an INTERRUPTED (not cancelled) thread still reports the call as failed", () => {
+    const interrupted = play([...MID_TOOL, {
+      type: "thread.status", threadId: "s:sidekick:frontend", status: "idle",
+    }])
+    const tool = interrupted.threads["s:sidekick:frontend"]!.items.find(
+      (it): it is Item & { kind: "tool" } => it.kind === "tool",
+    )!
+    expect(tool.ok).toBe(false)
+    expect(tool.cancelled).toBeUndefined()
+  })
+
+  test("a call that really failed before the stop keeps its failure", () => {
+    const state = play([
+      ...MID_TOOL,
+      { type: "tool.end", id: "t2", ok: false, output: "error: 3 tests failed", threadId: "s:sidekick:frontend" },
+      { type: "thread.status", threadId: "s:sidekick:frontend", status: "cancelled" },
+    ])
+    const tool = state.threads["s:sidekick:frontend"]!.items.find(
+      (it): it is Item & { kind: "tool" } => it.kind === "tool",
+    )!
+    expect(tool.ok).toBe(false)
+    expect(tool.cancelled).toBeUndefined()
+  })
+
+  test("the root turn's own interrupt is unaffected by the cancelled path", () => {
+    const state = play([
+      RUNNING(),
+      { type: "tool.start", id: "m1", name: "bash", input: { command: "sleep 60" } },
+      IDLE(),
+    ])
+    const tool = mainItems(state).find((it): it is Item & { kind: "tool" } => it.kind === "tool")!
+    expect(tool.ok).toBe(false)
+    expect(tool.cancelled).toBeUndefined()
+  })
+})

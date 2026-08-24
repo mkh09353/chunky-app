@@ -4,6 +4,7 @@ import {
   Brain,
   Check,
   ChevronRight,
+  CircleSlash,
   Copy,
   FileDiff,
   FileText,
@@ -34,6 +35,7 @@ import { cn } from "~/lib/cn"
 import { Markdown } from "~/lib/markdown"
 import { CodeBlock } from "./CodeBlock"
 import { LiveRunSection, useLiveRuns } from "./LiveRun"
+import { stopTargetOf } from "~/lib/runs"
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip"
 
 /** Collapsible "Worked for 3m 11s ›" divider between the prompt and the reply. */
@@ -248,6 +250,11 @@ function DiffView({ diff }: { diff: FileDiffData }) {
 
 function ToolStatus({ tool }: { tool: ToolBlockData }) {
   if (!tool.done) return <Loader2 className="size-3.5 animate-spin text-primary" />
+  // Stopped with its delegate: neutral, never the destructive cross a real
+  // failure wears. A call that genuinely failed before the stop keeps that.
+  if (tool.cancelled && tool.ok !== false) {
+    return <CircleSlash data-tool-cancelled="" className="size-3.5 text-muted-foreground" />
+  }
   if (tool.ok === false) return <X className="size-3.5 text-destructive" />
   return <Check className="size-3.5 text-success" />
 }
@@ -257,6 +264,11 @@ function GroupStatus({ tools }: { tools: ToolBlockData[] }) {
   const status = groupStatus(tools)
   if (status === "running") return <Loader2 className="size-3.5 animate-spin text-primary" />
   if (status === "failed") return <X className="size-3.5 text-destructive" />
+  // Nothing failed, but something was stopped: say so quietly rather than
+  // ticking a group that never finished.
+  if (tools.some((tool) => tool.cancelled)) {
+    return <CircleSlash data-tool-cancelled="" className="size-3.5 text-muted-foreground" />
+  }
   return <Check className="size-3.5 text-success" />
 }
 
@@ -413,13 +425,27 @@ function ToolCard({
   const [open, setOpen] = useState(false)
   // Everything this pill's delegates need: the live tails while they run, the
   // run records that name them, and the renderer for their full transcript.
-  const { views, elapsedOf, runs, renderRunDetail } = useLiveRuns()
+  const { views, elapsedOf, runs, renderRunDetail, onStopRun } = useLiveRuns()
   const live = (runIds ?? (runId ? [runId] : []))
     .map((id) => views.get(id))
     .filter((view): view is NonNullable<typeof view> => !!view)
   const settled = (settledRunIds ?? [])
     .map((id) => runs.get(id))
     .filter((run): run is NonNullable<typeof run> => !!run)
+  // A stopped delegate keeps its card and its transcript — only the label
+  // changes, and it is deliberately NOT the red failure treatment: nothing went
+  // wrong, the work was called off.
+  const cancelled = settled.some((run) => run.status === "cancelled")
+  /** Stop handler for a live run, or undefined when it cannot be targeted. */
+  const stopHandlerFor = (id: string): (() => void | Promise<void>) | undefined => {
+    const record = runs.get(id)
+    if (!onStopRun || !record) return undefined
+    const target = stopTargetOf(record, {
+      ...(tool.output ? { toolOutput: tool.output } : {}),
+      liveRunCount: live.length,
+    })
+    return target ? () => onStopRun(id, target) : undefined
+  }
   const delegate = live.length > 0 || settled.length > 0
   const detailIds = renderRunDetail ? settled.map((run) => run.id) : []
   const hasBody = toolHasBody(tool) || detailIds.length > 0
@@ -455,6 +481,14 @@ function ToolCard({
         {delegate && title ? (
           <>
             <span className="min-w-0 truncate font-medium text-[12.5px]">{title}</span>
+            {cancelled && live.length === 0 && (
+              <span
+                data-run-cancelled=""
+                className="shrink-0 rounded-full border border-border bg-muted/60 px-1.5 py-px text-[10px] text-muted-foreground"
+              >
+                Cancelled
+              </span>
+            )}
             {toolCount > 0 && (
               <span className="shrink-0 text-[11px] text-muted-foreground">
                 {toolCount} tool{toolCount === 1 ? "" : "s"}
@@ -487,14 +521,18 @@ function ToolCard({
       {/* Watch it work: the tail streams here while the run is in flight and
           disappears of its own accord the moment the run settles — at which
           point the same delegate is readable in full below. */}
-      {live.map((view) => (
-        <LiveRunSection
-          key={view.runId}
-          view={view}
-          {...(elapsedOf(view.runId) != null ? { elapsedMs: elapsedOf(view.runId)! } : {})}
-          expanded={open}
-        />
-      ))}
+      {live.map((view) => {
+        const onStop = stopHandlerFor(view.runId)
+        return (
+          <LiveRunSection
+            key={view.runId}
+            view={view}
+            {...(elapsedOf(view.runId) != null ? { elapsedMs: elapsedOf(view.runId)! } : {})}
+            expanded={open}
+            {...(onStop ? { onStop } : {})}
+          />
+        )
+      })}
       {open && toolHasBody(tool) && <ToolDetail tool={tool} />}
       {open &&
         detailIds.map((id) => (

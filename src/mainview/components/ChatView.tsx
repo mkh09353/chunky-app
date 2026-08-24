@@ -15,6 +15,7 @@ import {
   Target,
 } from "lucide-react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import type { StopDelegateRequest } from "@chunky/protocol"
 import type { Repo } from "~/lib/api"
 import type { Message, Project, Thread } from "~/lib/mock"
 import { Button } from "./ui/button"
@@ -288,6 +289,7 @@ export function ChatView({
   modelName,
   foldAll = false,
   compacted = 0,
+  onStopRun,
 }: {
   thread: Thread
   project?: Project
@@ -301,6 +303,10 @@ export function ChatView({
   modelName?: string
   foldAll?: boolean
   compacted?: number
+  /** Cancel one live delegate (server stop_delegate). Omitted in demo/offline
+   *  mode, and dropped for the rest of the session once a server has said it
+   *  has no such endpoint — which hides the Stop control entirely. */
+  onStopRun?: (runId: string, target: StopDelegateRequest) => void | Promise<void>
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -709,6 +715,7 @@ export function ChatView({
       views: liveViews,
       elapsedOf: (runId) => elapsedOf(runIndex.get(runId)),
       runs: runIndex,
+      ...(onStopRun ? { onStopRun } : {}),
       ...(transcript
         ? {
             renderRunDetail: (runId: string) => {
@@ -730,7 +737,7 @@ export function ChatView({
           }
         : {}),
     }),
-    [liveViews, elapsedOf, runIndex, transcript, modelName, collapseSignal],
+    [liveViews, elapsedOf, runIndex, transcript, modelName, collapseSignal, onStopRun],
   )
   // The answer that just landed keeps its actions on show; every other message
   // reveals them on hover/focus. Nothing is mounted or unmounted either way, so

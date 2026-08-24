@@ -12,7 +12,10 @@ import {
   LIVE_TAIL_MAX,
   parkedRunsByItem,
   runAnchors,
+  runStatusLabel,
   runTail,
+  seatOfThreadId,
+  stopTargetOf,
   runSummary,
 } from "./runs"
 import { applyRunAnchors, itemsToMessages } from "./mapTranscript"
@@ -410,5 +413,144 @@ describe("collapse exemption for still-running cards", () => {
     expect(isRunCardLive(live, "sk:frontend")).toBe(true)
     expect(isRunCardLive(live, "nobody")).toBe(false)
     expect(isRunCardLive(undefined, "sk:frontend")).toBe(false)
+  })
+})
+
+describe("cancelled runs keep their place", () => {
+  const CANCELLED = play([
+    ...DELEGATING_TURN,
+    { type: "thread.status", threadId: "sk:frontend", status: "cancelled" },
+  ])
+
+  test("a cancelled run parks on its pill exactly like a finished one", () => {
+    const run = CANCELLED.runs[0]!
+    expect(run.status).toBe("cancelled")
+    expect(parkedRunsByItem(CANCELLED).get(2)).toEqual([run])
+    const anchor = runAnchors(CANCELLED).get(2)!
+    expect(anchor.parkedRunIds).toEqual([run.id])
+    expect(anchor.liveRunIds).toEqual([])
+    // Still an anchored pill: the mapper must keep it a standalone block.
+    expect([...anchoredItemIndices(CANCELLED)]).toEqual([2])
+  })
+
+  test("it stops streaming and stops counting as an active worker", () => {
+    expect(liveRunViews(CANCELLED).size).toBe(0)
+    expect(activeWorkerRows(CANCELLED, false)).toEqual([])
+    expect(isRunCardLive(CANCELLED, "sk:frontend", CANCELLED.runs[0]!)).toBe(false)
+  })
+
+  test("its label is distinct from both done and running", () => {
+    expect(runStatusLabel({ status: "cancelled" })).toBe("Cancelled")
+    expect(runStatusLabel({ status: "done" })).toBe("Done")
+    expect(runStatusLabel({ status: "running" })).toBe("Running")
+  })
+})
+
+describe("stop targets", () => {
+  const RUNNING_ON = (threadId: string) => ({ status: "running" as const, threadId })
+
+  test("a sync sidekick is targeted by its stable seat", () => {
+    expect(stopTargetOf(RUNNING_ON("sess-1:sidekick:frontend"))).toEqual({ seat: "frontend" })
+    // The default seat is addressed by omitting `seat` entirely.
+    expect(stopTargetOf(RUNNING_ON("sess-1:sidekick"))).toEqual({})
+    expect(seatOfThreadId("sess-1:sidekick")).toBe("default")
+    expect(seatOfThreadId("sess-1:sidekick:backend")).toBe("backend")
+  })
+
+  test("a detached spawn is targeted by the run id it printed into its pill", () => {
+    const output = 'Detached child "Recon" launched: 3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a. It runs concurrently.'
+    expect(stopTargetOf(RUNNING_ON("child-3f1c2a44"), { toolOutput: output, liveRunCount: 1 })).toEqual({
+      runId: "3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a",
+    })
+  })
+
+  test("nothing is offered when the target cannot be derived", () => {
+    // A plain spawned child: no seat, no launched id.
+    expect(stopTargetOf(RUNNING_ON("child-abc"))).toBeNull()
+    // A DETACHED sidekick wears `:sidekick:<uuid>`; that uuid is not a seat.
+    expect(stopTargetOf(RUNNING_ON("sess-1:sidekick:3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a"))).toBeNull()
+    expect(seatOfThreadId("sess-1:sidekick:3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a")).toBeNull()
+    // Two live runs on one pill: the single launched id cannot name one of them.
+    const output = "Detached child launched: 3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a."
+    expect(stopTargetOf(RUNNING_ON("child-abc"), { toolOutput: output, liveRunCount: 2 })).toBeNull()
+  })
+
+  test("a settled run is never stoppable, however it settled", () => {
+    expect(stopTargetOf({ status: "done", threadId: "sess-1:sidekick:frontend" })).toBeNull()
+    expect(stopTargetOf({ status: "cancelled", threadId: "sess-1:sidekick:frontend" })).toBeNull()
+  })
+})
+
+describe("a cancelled delegate reads as cancelled, not failed", () => {
+  const MID_TOOL = play([
+    { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+    { type: "thread.spawn", threadId: "sk:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+    { type: "tool.start", id: "t2", name: "bash", input: { command: "bun test" }, threadId: "sk:frontend" },
+    { type: "thread.status", threadId: "sk:frontend", status: "cancelled" },
+  ])
+  const items = () => MID_TOOL.threads["sk:frontend"]!.items
+
+  test("its tail says cancelled in the dim tone — never ✗ / fail", () => {
+    const tail = runTail(items(), 0)
+    const last = tail[tail.length - 1]!
+    expect(last.tone).toBe("dim")
+    expect(last.text).toContain("cancelled")
+    expect(tail.some((line) => line.tone === "fail")).toBe(false)
+    expect(tail.some((line) => line.text.includes("✗"))).toBe(false)
+  })
+
+  test("the one-line gist a parked card shows says cancelled too", () => {
+    const gist = runSummary(items(), 0)
+    expect(gist).toContain("cancelled")
+    expect(gist).not.toContain("failed")
+  })
+
+  test("a genuine failure inside the delegate still reads as a failure", () => {
+    const failed = play([
+      { type: "tool.start", id: "t1", name: "sidekick", input: { seat: "frontend" } },
+      { type: "thread.spawn", threadId: "sk:frontend", parentThreadId: MAIN, title: "Sidekick (frontend)" },
+      { type: "tool.start", id: "t2", name: "bash", input: { command: "bun test" }, threadId: "sk:frontend" },
+      { type: "tool.end", id: "t2", ok: false, output: "error: 3 tests failed", threadId: "sk:frontend" },
+      { type: "thread.status", threadId: "sk:frontend", status: "cancelled" },
+    ])
+    const tail = runTail(failed.threads["sk:frontend"]!.items, 0)
+    expect(tail.some((line) => line.tone === "fail" && line.text.includes("✗"))).toBe(true)
+  })
+})
+
+describe("detached run ids, in both of the server's wordings", () => {
+  const RUNNING_ON = (threadId: string) => ({ status: "running" as const, threadId })
+  const ID = "3f1c2a44-9b1e-4c77-8a55-1f2e3d4c5b6a"
+
+  test("spawn_thread's `launched:` form", () => {
+    expect(
+      stopTargetOf(RUNNING_ON("child-x"), {
+        toolOutput: `Detached child "Recon" launched: ${ID}. It runs concurrently.`,
+      }),
+    ).toEqual({ runId: ID })
+  })
+
+  test("explicit / steer detach's `Run id:` form", () => {
+    expect(
+      stopTargetOf(RUNNING_ON("wf-x"), {
+        toolOutput: `Workflow detached by steer; the worker continues and its report will arrive as a wake/reminder. Run id: ${ID}.`,
+      }),
+    ).toEqual({ runId: ID })
+  })
+
+  test("a DETACHED sidekick is still targeted by its stable seat", () => {
+    // Detaching does not move the worker off its seat thread, so the seat
+    // route (which the server reconciles with the detached record) applies —
+    // and it wins nothing from the bookkeeping id in the pill's text.
+    expect(
+      stopTargetOf(RUNNING_ON("sess-1:sidekick:frontend"), {
+        toolOutput: `Sidekick (frontend) detached; the worker continues. Run id: ${ID}.`,
+      }),
+    ).toEqual({ runId: ID })
+    expect(stopTargetOf(RUNNING_ON("sess-1:sidekick:frontend"))).toEqual({ seat: "frontend" })
+  })
+
+  test("prose that merely mentions a run id does not become a target", () => {
+    expect(stopTargetOf(RUNNING_ON("child-x"), { toolOutput: `see run ${ID}` })).toBeNull()
   })
 })

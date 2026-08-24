@@ -11,8 +11,9 @@
 // ChatView → row → Message → block → ToolCard, several levels below anything
 // that holds transcript state. Sessions without a transcript (demo/offline)
 // simply get the empty default, so nothing renders.
-import { Bot, Sparkles } from "lucide-react"
-import { createContext, useContext } from "react"
+import { Bot, Loader2, Sparkles, Square } from "lucide-react"
+import { createContext, useContext, useState } from "react"
+import type { StopDelegateRequest } from "@chunky/protocol"
 import { cn } from "~/lib/cn"
 import { formatElapsed, isSeatRun, type LiveRunView, type TailLine, type TailTone } from "~/lib/runs"
 import type { RunRecord } from "~/lib/transcript"
@@ -80,6 +81,10 @@ export interface LiveRunsValue {
    *  (AgentCard) already renders MessageView, so importing it from a message
    *  would close an import cycle. ChatView owns transcript state anyway. */
   renderRunDetail?: (runId: string) => React.ReactNode
+  /** Cancel one delegated run (server stop_delegate). Absent when there is no
+   *  live session, or once this server has told us it has no such endpoint —
+   *  which is what makes the Stop control disappear instead of failing. */
+  onStopRun?: (runId: string, target: StopDelegateRequest) => void | Promise<void>
 }
 
 const EMPTY: LiveRunsValue = { views: new Map(), elapsedOf: () => undefined, runs: new Map() }
@@ -100,6 +105,59 @@ export function LiveRunsProvider({
   return <LiveRunsContext.Provider value={value}>{children}</LiveRunsContext.Provider>
 }
 
+/**
+ * Stop this delegate — shown only on a RUNNING run the server can actually be
+ * asked to cancel (see `stopTargetOf`).
+ *
+ * It lives in the live section rather than the pill header because the header
+ * IS the card's expand/collapse button, and a button inside a button is neither
+ * valid nor clickable. The click is still stopped from bubbling so a future
+ * clickable ancestor cannot toggle or navigate underneath it. Pending state is
+ * component-local: one in-flight request per control, no store.
+ */
+export function StopRunButton({
+  onStop,
+  label = "Stop this delegate",
+}: {
+  onStop: () => void | Promise<void>
+  label?: string
+}) {
+  const [pending, setPending] = useState(false)
+  return (
+    <button
+      type="button"
+      data-run-stop=""
+      aria-label={label}
+      title={label}
+      disabled={pending}
+      onClick={(event) => {
+        event.stopPropagation()
+        event.preventDefault()
+        if (pending) return
+        setPending(true)
+        void (async () => {
+          try {
+            await onStop()
+          } finally {
+            setPending(false)
+          }
+        })()
+      }}
+      className={cn(
+        "inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground outline-none transition-colors",
+        "hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-ring/40",
+        pending && "cursor-default opacity-60",
+      )}
+    >
+      {pending ? (
+        <Loader2 className="size-3 animate-spin" />
+      ) : (
+        <Square className="size-3 fill-current" />
+      )}
+    </button>
+  )
+}
+
 /** The live section of a tool card: who is running, for how long, and the tail
  *  of what it is doing right now. Compact by default; the card's own expand
  *  toggle shows more of the same stream. */
@@ -107,10 +165,13 @@ export function LiveRunSection({
   view,
   elapsedMs,
   expanded = false,
+  onStop,
 }: {
   view: LiveRunView
   elapsedMs?: number
   expanded?: boolean
+  /** Present only when this run is stoppable (running + targetable). */
+  onStop?: () => void | Promise<void>
 }) {
   // Same seat rule the ambient strip uses, so a run wears one glyph everywhere.
   const Icon = isSeatRun(view) ? Bot : Sparkles
@@ -136,6 +197,7 @@ export function LiveRunSection({
             </span>
           )}
           <span className="size-1.5 animate-pulse rounded-full bg-primary" />
+          {onStop && <StopRunButton onStop={onStop} label={`Stop ${view.title}`} />}
         </span>
       </div>
       <TailLines lines={view.lines} rows={expanded ? 10 : 3} className="mt-1" />

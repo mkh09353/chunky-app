@@ -4,6 +4,7 @@
 // Everything here is derived from the SSE-fed TranscriptState (lib/transcript)
 // — no renderer fetches, and it degrades to empty arrays in demo/offline mode
 // where there is no transcript at all.
+import type { StopDelegateRequest } from "@chunky/protocol"
 import type { Item, RunRecord, ThreadNode, TranscriptState } from "./transcript"
 import { MAIN } from "./transcript"
 
@@ -35,12 +36,12 @@ export function isSeat(thread: ThreadNode): boolean {
 
 function runsByItem(
   state: TranscriptState,
-  status: RunRecord["status"],
+  want: (run: RunRecord) => boolean,
 ): Map<number, RunRecord[]> {
   const byItem = new Map<number, RunRecord[]>()
   for (const run of state.runs) {
     // anchorIndex was frozen against the parent's items when the run opened.
-    if (run.status !== status || run.parentId !== MAIN || run.anchorIndex < 0) continue
+    if (!want(run) || run.parentId !== MAIN || run.anchorIndex < 0) continue
     const list = byItem.get(run.anchorIndex)
     if (list) list.push(run)
     else byItem.set(run.anchorIndex, [run])
@@ -48,14 +49,25 @@ function runsByItem(
   return byItem
 }
 
-/** Settled runs grouped by the tool pill that spawned them. */
+/** Settled runs grouped by the tool pill that spawned them.
+ *
+ *  A CANCELLED run parks exactly like a finished one: it keeps its anchor, its
+ *  slice of the delegate transcript and its place in the reader's history —
+ *  stopping a delegate must never make the work it did disappear. */
 export function parkedRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
-  return runsByItem(state, "done")
+  return runsByItem(state, (run) => run.status !== "running")
 }
 
 /** Running runs keyed by the tool pill that spawned them. */
 export function liveRunsByItem(state: TranscriptState): Map<number, RunRecord[]> {
-  return runsByItem(state, "running")
+  return runsByItem(state, (run) => run.status === "running")
+}
+
+/** Terminal label for a run: cancelled reads differently from done and from a
+ *  failure — the work was stopped on purpose, nothing went wrong. */
+export function runStatusLabel(run: Pick<RunRecord, "status">): "Running" | "Done" | "Cancelled" {
+  if (run.status === "running") return "Running"
+  return run.status === "cancelled" ? "Cancelled" : "Done"
 }
 
 /** What a single tool pill in the main transcript owns. */
@@ -131,6 +143,89 @@ export function isRunCardLive(
   if (!state) return false
   if (state.threads[threadId]?.status === "running") return true
   return state.runs.some((r) => r.threadId === threadId && r.status === "running")
+}
+
+// ---- Stopping a delegate --------------------------------------------------
+//
+// The server cancels a delegate by RUN ID (a detached-spawn record id) or by
+// SIDEKICK SEAT (POST ROUTES.stopDelegate, StopDelegateRequest). Neither is
+// carried by any AgentEvent, so the App can only offer Stop where the target is
+// derivable from what the transcript already holds:
+//
+//   · a SYNC sidekick runs on the server's STABLE seat thread id
+//     (`${sessionId}:sidekick` or `${sessionId}:sidekick:${seat}`), so the seat
+//     is read straight off the thread id;
+//   · a DETACHED delegate prints its run id in the spawning tool's own output,
+//     in one of the server's two wordings — `... launched: <uuid>.` from
+//     spawn_thread, `... Run id: <uuid>.` from an explicit or steer detach — so
+//     that pill, and only that pill, can name it.
+//
+// A DETACHED SIDEKICK needs neither trick: detaching does not move the worker
+// off its stable seat thread (the server's detached-spawn record carries a
+// bookkeeping `${sessionId}:sidekick:${uuid}` id that is never emitted as a
+// thread), so it is targeted by seat exactly like a synchronous brief, and the
+// server reconciles the live dog with its detached record.
+//
+// Anything else — nested children, sync spawn_thread children, workflow legs —
+// is NOT targetable, and the button is hidden rather than guessed at.
+//
+// A sync brief's pill has no output until its call returns (by which time the
+// run is settled and unstoppable), so the run-id route can only ever fire on a
+// pill whose delegate really is detached.
+
+const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+const UUID = new RegExp(`^${UUID_SOURCE}$`, "i")
+
+/** The run id a detached delegate prints into its own tool output, in either of
+ *  the server's two wordings (`launched: <uuid>` from spawn_thread,
+ *  `Run id: <uuid>` from explicit/steer detach). */
+const DETACHED_RUN_ID = new RegExp(`\\b(?:launched|run id):\\s*(${UUID_SOURCE})\\b`, "i")
+
+/** Seat named by a STABLE sidekick thread id, or null when this thread id is
+ *  not one. A `:sidekick:<uuid>` segment is refused defensively: that shape is
+ *  the server's detached-record bookkeeping id, and while it is never emitted
+ *  as a thread today, a uuid is not a seat the server would match. */
+export function seatOfThreadId(threadId: string): string | null {
+  const at = threadId.lastIndexOf(":sidekick")
+  if (at < 0) return null
+  const rest = threadId.slice(at + ":sidekick".length)
+  if (rest === "") return "default"
+  if (!rest.startsWith(":")) return null
+  const seat = rest.slice(1)
+  if (!seat || seat.includes(":") || UUID.test(seat)) return null
+  return seat
+}
+
+/** What the pill knows about the tool call that spawned a run. */
+export interface StopAnchorContext {
+  /** The spawning tool call's output, once it has one (detached ids live here). */
+  toolOutput?: string
+  /** How many runs from this pill are still in flight. A pill with two live
+   *  runs cannot say WHICH of them the single launched id in its output names,
+   *  so that route is refused. */
+  liveRunCount?: number
+}
+
+/**
+ * The stop request for a run, or null when it cannot be targeted.
+ *
+ * Only a RUNNING run is stoppable: a settled one (done or already cancelled)
+ * has nothing to cancel, and offering the button would only produce an
+ * "already finished" round-trip.
+ */
+export function stopTargetOf(
+  run: Pick<RunRecord, "status" | "threadId">,
+  anchor: StopAnchorContext = {},
+): StopDelegateRequest | null {
+  if (run.status !== "running") return null
+  const launched =
+    (anchor.liveRunCount ?? 1) === 1 ? DETACHED_RUN_ID.exec(anchor.toolOutput ?? "")?.[1] : undefined
+  if (launched) return { runId: launched }
+  const seat = seatOfThreadId(run.threadId)
+  // The default seat is addressed by omitting `seat` (see StopDelegateRequest).
+  if (seat === "default") return {}
+  if (seat) return { seat }
+  return null
 }
 
 /** Runs by id, for turning anchor ids back into records. */
@@ -288,7 +383,10 @@ export function runLines(items: Item[], from = 0, to?: number): TailLine[] {
         lines.push({ text: `› ${it.name}${arg ? ` ${arg}` : ""}`, tone: "cmd" })
         if (it.done) {
           const head = (it.output ?? "").split("\n").find((l) => l.trim())
-          if (it.ok === false) lines.push({ text: `  ✗ ${clip(head ?? "failed")}`, tone: "fail" })
+          // A call stopped with its thread reads neutrally: no red cross, no
+          // "failed", because nothing went wrong — it was called off.
+          if (it.cancelled) lines.push({ text: `  ⊘ ${clip(head ?? "cancelled")}`, tone: "dim" })
+          else if (it.ok === false) lines.push({ text: `  ✗ ${clip(head ?? "failed")}`, tone: "fail" })
           else if (head) lines.push({ text: `  ✓ ${clip(head)}`, tone: "ok" })
         } else if (it.progress) {
           const tail = it.progress.split("\n").filter((l) => l.trim()).at(-1)

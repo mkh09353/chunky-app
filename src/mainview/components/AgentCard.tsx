@@ -14,7 +14,15 @@ import { useEffect, useRef, useState } from "react"
 import { cn } from "~/lib/cn"
 import { childThreads, itemsToMessages } from "~/lib/mapTranscript"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
-import { formatElapsed, isRunCardLive, isSeat, runAccent, runSummary, runTail } from "~/lib/runs"
+import {
+  formatElapsed,
+  isRunCardLive,
+  isSeat,
+  runAccent,
+  runStatusLabel,
+  runSummary,
+  runTail,
+} from "~/lib/runs"
 import { TailLines } from "./LiveRun"
 import { MessageView } from "./Message"
 
@@ -107,6 +115,12 @@ export function AgentCard({
   const model = node.model ?? modelName
   const toolCount = run?.toolCount ?? 0
   const isRunning = variant === "running"
+  // Cancelled is terminal but NOT a failure: quiet muted treatment, never the
+  // destructive red an errored call wears.
+  const status = runStatusLabel(
+    run ?? { status: node.status === "cancelled" ? "cancelled" : isRunning ? "running" : "done" },
+  )
+  const cancelled = status === "Cancelled"
 
   const cardAttrs =
     runId != null
@@ -143,13 +157,16 @@ export function AgentCard({
           </span>
         )}
         <span
+          {...(cancelled ? { "data-run-cancelled": "" } : {})}
           className={cn(
             "flex shrink-0 items-center gap-1.5 text-[10.5px]",
-            isRunning ? "text-primary" : "text-success",
+            cancelled ? "text-muted-foreground" : isRunning ? "text-primary" : "text-success",
           )}
         >
-          {isRunning && <span className="size-1.5 animate-pulse rounded-full bg-current" />}
-          {isRunning ? "Running" : "Done"}
+          {isRunning && !cancelled && (
+            <span className="size-1.5 animate-pulse rounded-full bg-current" />
+          )}
+          {status}
         </span>
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}

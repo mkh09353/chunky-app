@@ -27,6 +27,10 @@ export type Item =
       input: unknown
       done: boolean
       ok?: boolean
+      /** This call never reported a result because its THREAD was cancelled
+       *  (stop_delegate). It is not a failure: `ok` is left unset so nothing
+       *  reads it as one, and the UI shows a neutral "cancelled" mark. */
+      cancelled?: boolean
       output?: string
       progress?: string
     }
@@ -46,11 +50,25 @@ export type Item =
   | { kind: "usage"; summary: string }
   | { kind: "unknown"; type: string }
 
+/** A thread's lifecycle, as the server reports it on `thread.status`.
+ *
+ *  `cancelled` is terminal like `idle` — the delegate was stopped (by the user
+ *  through stop_delegate, or by the lead) rather than finishing — but it is
+ *  kept DISTINCT so the UI can say "cancelled" instead of "done" or "failed".
+ *  A cancelled delegate emits no `error` item (the server suppresses it), so
+ *  this status is the only signal there is. */
+export type ThreadStatus = "idle" | "running" | "cancelled"
+
+/** Terminal (nothing in flight) — `idle` and `cancelled` both settle a thread. */
+export function isThreadSettled(status: ThreadStatus): boolean {
+  return status !== "running"
+}
+
 export interface ThreadNode {
   id: string
   parentId: string | null
   title: string
-  status: "idle" | "running"
+  status: ThreadStatus
   model?: string
   anchorIndex?: number
   items: Item[]
@@ -70,7 +88,9 @@ export interface RunRecord {
   parentId: string
   title: string
   model?: string
-  status: "running" | "done"
+  /** `done` = finished on its own; `cancelled` = stopped. Both are settled: the
+   *  run stays anchored to its pill either way, and only the label differs. */
+  status: "running" | "done" | "cancelled"
   /** Index of the PARENT thread's tool item that spawned this run: the pill the
    *  gutter card aligns to. Frozen when the run opens — resolving it later would
    *  let a newer pill steal an older run's slot. -1 when no pill was open. */
@@ -161,14 +181,22 @@ function openRun(
   ]
 }
 
-/** Settle the open run for `threadId`, recording where its output ended. */
-function closeRun(state: TranscriptState, threadId: string): RunRecord[] {
+/** Settle the open run for `threadId`, recording where its output ended.
+ *
+ *  A cancelled thread settles its run as `cancelled`, not `done`: the record
+ *  stays exactly where it was anchored (the pill keeps its card and its
+ *  transcript), only its terminal label changes. */
+function closeRun(
+  state: TranscriptState,
+  threadId: string,
+  status: "done" | "cancelled" = "done",
+): RunRecord[] {
   const at = openRunIndex(state.runs, threadId)
   if (at < 0) return state.runs
   const runs = [...state.runs]
   runs[at] = {
     ...runs[at]!,
-    status: "done",
+    status,
     itemEnd: state.threads[threadId]?.items.length ?? runs[at]!.itemStart,
   }
   return runs
@@ -184,8 +212,17 @@ function closeRun(state: TranscriptState, threadId: string): RunRecord[] {
  *  in its running shape long after the session went idle.
  *
  *  Partial `progress` is promoted to `output` so the interrupted call still
- *  shows what it managed to print. */
-function settleItems(items: Item[]): Item[] {
+ *  shows what it managed to print.
+ *
+ *  `reason` separates the two ways a turn can stop short. An `interrupted`
+ *  settle is the historical one: nothing reported a result, so an open call is
+ *  marked `ok: false`. A `cancelled` settle (the thread was stopped through
+ *  stop_delegate) marks the call `cancelled` and leaves `ok` UNSET — calling
+ *  deliberately stopped work "failed" is a lie, and it is the reason a stopped
+ *  delegate used to read as a red failure everywhere its tail was summarized.
+ *  A call that already reported `ok: false` keeps it: a real failure inside a
+ *  delegate stays a failure even if the delegate was later cancelled. */
+function settleItems(items: Item[], reason: "interrupted" | "cancelled" = "interrupted"): Item[] {
   let touched = false
   const next = items.map((it): Item => {
     if (it.kind === "assistant" && it.streaming) {
@@ -199,12 +236,13 @@ function settleItems(items: Item[]): Item[] {
     if (it.kind === "tool" && !it.done) {
       touched = true
       const output = it.output ?? it.progress
-      // `ok: false` rather than a green check: the call never reported a
-      // result, so claiming success would be a lie.
+      // Neither a green check nor (when cancelled) a red cross: the call never
+      // reported a result, so claiming success would be a lie — and so would
+      // claiming failure for work somebody chose to stop.
       return {
         ...it,
         done: true,
-        ok: false,
+        ...(reason === "cancelled" ? { cancelled: true } : { ok: false }),
         ...(output ? { output } : {}),
         progress: undefined,
       }
@@ -225,8 +263,8 @@ function settleSettledThreads(state: TranscriptState): TranscriptState {
   for (const id of state.order) {
     const thread = threads[id]
     if (!thread) continue
-    if (id !== MAIN && thread.status === "running") continue
-    const items = settleItems(thread.items)
+    if (id !== MAIN && !isThreadSettled(thread.status)) continue
+    const items = settleItems(thread.items, thread.status === "cancelled" ? "cancelled" : "interrupted")
     if (items !== thread.items) {
       threads[id] = { ...thread, items }
       changed = true
@@ -492,9 +530,12 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
             status: ev.status,
             items: [],
           }
-      // Same authority rule one level down: a thread that reports idle cannot
-      // still have a streaming message or an unfinished tool.
-      const settled = ev.status === "idle" ? { ...node, items: settleItems(node.items) } : node
+      // Same authority rule one level down: a thread that reports idle — or
+      // cancelled, which is just as terminal — cannot still have a streaming
+      // message or an unfinished tool.
+      const settled = isThreadSettled(node.status)
+        ? { ...node, items: settleItems(node.items, node.status === "cancelled" ? "cancelled" : "interrupted") }
+        : node
       return {
         ...state,
         order: existing ? state.order : [...state.order, ev.threadId],
@@ -502,7 +543,7 @@ export function reduce(state: TranscriptState, ev: AgentEvent): TranscriptState 
         runs:
           ev.status === "running"
             ? openRun(state, ev.threadId, node.parentId ?? MAIN, node.title, node.model)
-            : closeRun(state, ev.threadId),
+            : closeRun(state, ev.threadId, ev.status === "cancelled" ? "cancelled" : "done"),
       }
     }
 
@@ -582,7 +623,7 @@ export function hasTranscript(state: TranscriptState): boolean {
 /** Background tasks/monitors intentionally do not keep a session tree busy. */
 export function isTreeIdle(state: TranscriptState): boolean {
   return state.status === "idle" && Object.values(state.threads).every(
-    (thread) => thread.id === MAIN || thread.status === "idle",
+    (thread) => thread.id === MAIN || isThreadSettled(thread.status),
   )
 }
 

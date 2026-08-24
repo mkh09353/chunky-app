@@ -23,6 +23,8 @@ import {
   type SessionDelta,
   type SessionSummary,
   type ShellSessionsResponse,
+  type StopDelegateRequest,
+  type StopDelegateResponse,
   type ForkResponse, type GoalRequest, type GoalSnapshot, type RewindPoint,
 } from "@chunky/protocol"
 import { readNamedSSE } from "./sse"
@@ -504,6 +506,94 @@ export async function announceAppZoo(
 
 export async function interruptSession(baseUrl: string, sessionId: string): Promise<void> {
   await fetch(baseUrl + ROUTES.interrupt(sessionId), { method: "POST" }).catch(() => {})
+}
+
+/**
+ * Cancel ONE delegate (a live sidekick brief or a detached spawn) without
+ * touching the lead turn — POST ROUTES.stopDelegate.
+ *
+ * Three-way result, like the usage history routes: the endpoint is newer than
+ * some servers this app talks to, so "this server doesn't have it" is a
+ * first-class outcome the caller turns into one clean notice and a hidden
+ * button, never an error banner.
+ *
+ * The subtlety this function exists for: 404 is THREE different answers.
+ *
+ *   · `{ outcome: "not-found" }` — that run is gone. A real answer; show it.
+ *   · `{ error: "unknown session" }` — a capable server refusing this request
+ *     (the sessions router 404s an unknown/archived id BEFORE reaching the
+ *     stop-delegate branch). An error for this call only; the endpoint exists,
+ *     so the button must NOT disappear.
+ *   · a non-JSON body (older servers answer unmatched routes with a plain
+ *     `not found` string) — the endpoint itself is absent: unsupported.
+ *
+ * 501 is likewise unsupported, and a 409 (`ambiguous`) is a normal answer whose
+ * `message` is worth showing.
+ */
+export type StopDelegateResult =
+  | { status: "ok"; response: StopDelegateResponse }
+  | { status: "unsupported" }
+  | { status: "error"; message: string }
+
+function isStopDelegateResponse(body: unknown): body is StopDelegateResponse {
+  const outcome = (body as { outcome?: unknown } | null)?.outcome
+  return (
+    outcome === "cancelled" ||
+    outcome === "already-finished" ||
+    outcome === "not-found" ||
+    outcome === "ambiguous"
+  )
+}
+
+/** Classify one stop-delegate HTTP result. Exported for tests: the status/body
+ *  matrix is the whole compatibility contract. */
+export function classifyStopDelegate(status: number, body: unknown): StopDelegateResult {
+  if (status === 501) return { status: "unsupported" }
+  if (isStopDelegateResponse(body)) return { status: "ok", response: body }
+  // Only a 404/405 the server could not put a JSON body on is the route
+  // missing. A JSON error body means a server that knows this route and is
+  // refusing this particular call.
+  const json = typeof body === "object" && body !== null ? (body as { error?: unknown }) : null
+  if ((status === 404 || status === 405) && !json) return { status: "unsupported" }
+  const message = json?.error
+  return {
+    status: "error",
+    message: typeof message === "string" && message ? message : `stop delegate failed (${status})`,
+  }
+}
+
+/**
+ * Is Stop worth offering against `baseUrl`?
+ *
+ * Support is remembered as the ONE base URL that answered "no such endpoint",
+ * not as a boolean: moving onto another server (a reconnect, or an in-place
+ * upgrade that swaps the base URL without remounting the app) is therefore a
+ * fresh start with no reset to remember to perform. Nothing is persisted.
+ */
+export function stopDelegateAvailable(
+  baseUrl: string | null | undefined,
+  unsupportedOn: string | null,
+): boolean {
+  if (!baseUrl) return false
+  return unsupportedOn !== baseUrl
+}
+
+export async function stopDelegate(
+  baseUrl: string,
+  sessionId: string,
+  target: StopDelegateRequest = {},
+): Promise<StopDelegateResult> {
+  if (!baseUrl) return { status: "error", message: "Chunky server is unavailable" }
+  try {
+    const res = await fetch(baseUrl + ROUTES.stopDelegate(sessionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(target),
+    })
+    return classifyStopDelegate(res.status, await res.json().catch(() => null))
+  } catch (err) {
+    return { status: "error", message: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
