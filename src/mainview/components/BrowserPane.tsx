@@ -2,6 +2,9 @@ import { ArrowLeft, ArrowRight, Cookie, Globe2, LoaderCircle, RotateCw, X } from
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
+import { GUEST_GUARD_SCRIPT, isPageCloseRequest } from "~/lib/browserGuest"
+import { resolveWebviewTeardown, shouldRetainForReuse } from "~/lib/browserPaneTeardown"
+import { isPaneOwnedNode, resolveStageRect, type PaneRect } from "~/lib/browserStage"
 import {
   clampPaneWidth,
   MIN_PANE_WIDTH,
@@ -93,59 +96,126 @@ function urlFromDetail(detail: unknown): string | null {
 }
 
 /**
- * Off-screen holder for a webview element that must stay connected: one whose
- * native side is still being created (see `destroyWebview`), or a CEF webview
- * kept alive across a pane close (see `parkWebview` and note 5 on the mount
- * effect).
+ * The stage: a body-level, React-independent home for the webview element.
+ *
+ * React must never own an ancestor of `<electrobun-webview>`. Unmounting the
+ * pane's subtree — which React does not only on a normal unmount but also while
+ * unwinding from an uncaught render error anywhere in the app — disconnects the
+ * element, and a disconnect with a live `webviewId` exits the process (note 5
+ * on the mount effect). Hosting the element here makes its survival independent
+ * of the React tree: the root can be torn down and rebuilt and the page in the
+ * pane keeps running, untouched.
+ *
+ * `pointer-events: none` because the stage is a positioning box only — the
+ * native view is composited above the whole window and does its own hit
+ * testing; the DOM box must not intercept anything (and `elementFromPoint` must
+ * skip it, so the overlay probe keeps seeing the real UI).
  */
-let parkingLot: HTMLDivElement | null = null
-function getParkingLot(): HTMLElement {
-  if (parkingLot?.isConnected) return parkingLot
-  parkingLot = document.createElement("div")
-  parkingLot.setAttribute("aria-hidden", "true")
-  parkingLot.style.cssText =
-    "position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;overflow:hidden;pointer-events:none;"
-  document.body.appendChild(parkingLot)
-  return parkingLot
+let stage: HTMLDivElement | null = null
+function getBrowserStage(): HTMLDivElement {
+  if (stage?.isConnected) return stage
+  stage = document.createElement("div")
+  stage.setAttribute("aria-hidden", "true")
+  stage.dataset.browserStage = ""
+  // Starts off-screen: nothing is composited until the first rect sync.
+  stage.style.cssText =
+    "position:fixed;left:-10000px;top:-10000px;width:1px;height:1px;overflow:hidden;pointer-events:none;z-index:0;"
+  document.body.appendChild(stage)
+  return stage
+}
+
+/** Put the stage exactly over the pane slot. Returns the rect now applied. */
+function syncStageRect(host: HTMLElement | null, visible: boolean, previous: PaneRect | null): PaneRect | null {
+  const slot = host ? host.getBoundingClientRect() : null
+  const next = resolveStageRect({
+    slot: slot ? { x: slot.x, y: slot.y, width: slot.width, height: slot.height } : null,
+    visible,
+    previous,
+  })
+  if (!next) return previous
+  const box = getBrowserStage()
+  box.style.left = `${next.x}px`
+  box.style.top = `${next.y}px`
+  box.style.width = `${next.width}px`
+  box.style.height = `${next.height}px`
+  return next
 }
 
 /**
- * Tear down a native child webview.
+ * The one webview element this process ever creates.
+ *
+ * Kept at module scope so a remount (StrictMode's double invoke, or the root
+ * error boundary resetting the tree) reuses the live element and its page
+ * instead of creating a second native view next to the first one — which,
+ * since the first can never be removed, would be permanent.
+ */
+let liveWebview: ElectrobunWebviewElement | null = null
+
+/** How long to keep watching a parked element for a late-arriving native view. */
+const PARK_WATCH_MS = 30_000
+
+/** How often to re-measure the pane slot and move the stage onto it. */
+const STAGE_POLL_MS = 100
+
+/** Take the native view out of sight and out of the hit-test path. */
+function suppressNativeView(element: ElectrobunWebviewElement) {
+  if (element.webviewId == null) return
+  try {
+    element.toggleHidden(true)
+    element.togglePassthrough(true)
+  } catch {
+    // A native side that is already gone is exactly the state we wanted.
+  }
+}
+
+/**
+ * Park a webview element: leave it exactly where it is (in the stage, which
+ * nothing but this module can remove) with the native view hidden and
+ * passthrough. Watches for an init that resolves after teardown so a late
+ * native view is suppressed too.
+ */
+function parkWebview(element: ElectrobunWebviewElement) {
+  suppressNativeView(element)
+  if (element.webviewId != null) return
+  const startedAt = Date.now()
+  const timer = window.setInterval(() => {
+    if (element.webviewId != null) {
+      window.clearInterval(timer)
+      suppressNativeView(element)
+      return
+    }
+    if (Date.now() - startedAt > PARK_WATCH_MS) window.clearInterval(timer)
+  }, 50)
+}
+
+/**
+ * Tear down a webview element — by parking it, almost always.
  *
  * `<electrobun-webview>` creates its native view asynchronously
- * (requestAnimationFrame + an RPC round trip) and only sends `webviewTagRemove`
- * from `disconnectedCallback` once `webviewId` exists. Removing the element
- * during that window (StrictMode's mount/unmount/mount, or a fast toggle) would
- * otherwise leak a native webview composited over the whole window forever.
+ * (requestAnimationFrame + an RPC round trip) and sends `webviewTagRemove` from
+ * `disconnectedCallback` once `webviewId` exists. That message ends in
+ * `CloseBrowser(false)` on a `SetAsChild` CEF browser, which closes the app's
+ * main window and exits the process (see `~/lib/browserGuest`). So removal is
+ * allowed ONLY when no native view was ever started; everything else is parked
+ * for the rest of the process's life. `resolveWebviewTeardown` owns that rule.
+ *
+ * Returns whether the element survived and may be reused by a later mount.
  */
-function destroyWebview(element: ElectrobunWebviewElement, initStarted: () => boolean) {
+function destroyWebview(element: ElectrobunWebviewElement, initStarted: () => boolean): boolean {
   // Neutralize an init that has not started yet, so no native view is created.
   // (The pending requestAnimationFrame callback calls `this.initWebview()`.)
   const started = initStarted()
   element.initWebview = async () => {}
 
-  if (element.webviewId != null || !started) {
-    // Either fully created (disconnectedCallback tears the native view down) or
-    // never started (nothing native exists).
+  const decision = resolveWebviewTeardown({ webviewId: element.webviewId ?? null, initStarted: started })
+  if (decision === "remove") {
+    // Nothing native exists and nothing is on its way: `disconnectedCallback`
+    // is a no-op, so this is the one safe removal.
     element.remove()
-    return
+    return shouldRetainForReuse(decision)
   }
-
-  // An init already in flight will still resolve; park the element (1x1,
-  // off-screen — a 0x0 rect is ignored by the overlay sync) so it stays
-  // connected and its `disconnectedCallback` can do the real teardown.
-  element.style.position = "static"
-  element.style.width = "1px"
-  element.style.height = "1px"
-  getParkingLot().appendChild(element)
-
-  const startedAt = Date.now()
-  const timer = window.setInterval(() => {
-    if (element.webviewId != null || Date.now() - startedAt > 5_000) {
-      window.clearInterval(timer)
-      element.remove()
-    }
-  }, 50)
+  parkWebview(element)
+  return shouldRetainForReuse(decision)
 }
 
 /**
@@ -193,12 +263,16 @@ function layerCovers(node: Element, target: DOMRect, depth = 0): boolean {
  * point is not the pane itself, something is painted on top of it.
  */
 function probeCovered(host: HTMLElement, rect: DOMRect): boolean {
+  const box = stage
   for (let column = 0; column < OVERLAY_PROBE_COLUMNS; column += 1) {
     for (let row = 0; row < OVERLAY_PROBE_ROWS; row += 1) {
       const x = rect.left + ((column + 0.5) * rect.width) / OVERLAY_PROBE_COLUMNS
       const y = rect.top + ((row + 0.5) * rect.height) / OVERLAY_PROBE_ROWS
       const top = document.elementFromPoint(x, y)
-      if (top && top !== host && !host.contains(top)) return true
+      // The pane's own slot and its stage are not overlays. (The stage is
+      // `pointer-events: none`, so `elementFromPoint` should skip it anyway —
+      // this is the belt to that braces.)
+      if (top && !isPaneOwnedNode(top, host, box)) return true
     }
   }
   return false
@@ -208,10 +282,14 @@ function probeCovered(host: HTMLElement, rect: DOMRect): boolean {
 function paneCovered(host: HTMLElement): boolean {
   const rect = host.getBoundingClientRect()
   if (rect.width < 1 || rect.height < 1) return false
+  const box = stage
   for (const layer of Array.from(document.body.children)) {
     // Skip the app tree itself (the pane lives in it) — only sibling portal
-    // layers and stray hosts can be stacked above it.
+    // layers and stray hosts can be stacked above it. The stage is a body-level
+    // sibling that sits exactly ON the pane by construction, so it would
+    // otherwise read as a permanent overlay and hide the page forever.
     if (layer.contains(host)) continue
+    if (box && (layer === box || layer.contains(box))) continue
     if (layerCovers(layer, rect)) return true
   }
   return probeCovered(host, rect)
@@ -413,6 +491,22 @@ export function BrowserPane({
   const preferredRef = useRef(readPreferredPaneWidth(window.innerWidth))
   const dragRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
   const syncFrameRef = useRef(0)
+  // The rect currently written to the stage; `resolveStageRect` compares against
+  // it so layout jitter costs no native resize.
+  const stageRectRef = useRef<PaneRect | null>(null)
+
+  /**
+   * Keep the stage exactly over the pane slot.
+   *
+   * This is what replaces "the element is a child of the slot": the element
+   * fills the stage, so the rect Electrobun's OverlaySyncController reads off
+   * the element is the slot's rect. It runs before every forced sync, on every
+   * width change, and on a cheap observer + poll pair for layout changes this
+   * component never hears about (sidebar toggles, window chrome, fullscreen).
+   */
+  const syncStage = useCallback(() => {
+    stageRectRef.current = syncStageRect(hostRef.current, visibleRef.current, stageRectRef.current)
+  }, [])
 
   /**
    * Push the pane's current geometry to the native side.
@@ -428,9 +522,32 @@ export function BrowserPane({
     if (syncFrameRef.current) return
     syncFrameRef.current = requestAnimationFrame(() => {
       syncFrameRef.current = 0
+      // Stage first: the element's rect IS the stage's rect, so a forced sync
+      // before the box moved would push the previous geometry.
+      syncStage()
       webviewRef.current?.syncDimensions(true)
     })
-  }, [])
+  }, [syncStage])
+
+  // Layout changes that never reach this component still have to move the
+  // stage. A ResizeObserver on the slot catches size changes; the poll catches
+  // pure moves (the slot's x can change without its box resizing).
+  useEffect(() => {
+    if (!available) return
+    const host = hostRef.current
+    if (!host) return
+    syncStage()
+    const observer = new ResizeObserver(() => syncStage())
+    observer.observe(host)
+    // 100ms matches Electrobun's own OverlaySyncController cadence, so a pure
+    // move (the files pane taking the slot next door, say) settles in about the
+    // same time a resize did before the element left the React tree.
+    const poll = window.setInterval(syncStage, STAGE_POLL_MS)
+    return () => {
+      observer.disconnect()
+      window.clearInterval(poll)
+    }
+  }, [available, syncStage])
 
   /**
    * Closing the pane is a visibility change, not a teardown (note 5 on the
@@ -443,6 +560,10 @@ export function BrowserPane({
     suppressorRef.current?.setClosed(!visible)
     if (visible) scheduleOverlaySync()
   }, [visible, scheduleOverlaySync])
+
+  // The stage is body-level, so it does not disappear with the pane's DOM box:
+  // hiding is the suppressor's job, and the geometry is simply frozen while the
+  // pane is closed (see `resolveStageRect`).
 
   const applyWidth = useCallback((next: number) => {
     setPaneWidth((current) => {
@@ -552,59 +673,101 @@ export function BrowserPane({
   //    `initWebview` reads them once.
   // 3. Owning create + destroy in one effect keeps StrictMode's double-invoke
   //    symmetric (create → destroy → create) instead of leaving React-owned
-  //    DOM wired to a torn-down native view.
+  //    DOM wired to a torn-down native view. "Destroy" parks rather than
+  //    removes, and the second mount REUSES the parked element (module-level
+  //    `liveWebview`), so a remount never produces a second native view.
+  // 3b. The element is appended to the body-level STAGE, never to React-owned
+  //    DOM: see `getBrowserStage`. React unmounting this component — or the
+  //    whole root, while unwinding from an uncaught render error — therefore
+  //    cannot disconnect it, which is the difference between "the app shows a
+  //    fallback" and "the app exits" (note 5).
   // 4. The renderer kind (CEF vs system WebView) is a bun-process answer, so
   //    creation waits on one cached round trip; `cancelled` keeps an unmount
   //    inside that window from creating any native view at all.
   // 5. Once the native view exists, this element must never leave the DOM — not
-  //    removed, and not REPARENTED either. `disconnectedCallback` sends
-  //    `webviewTagRemove` whenever `webviewId` is set, and moving a connected
-  //    node with `appendChild` is a remove+insert whose custom-element
-  //    reactions run synchronously, so "parking" a live element closes its
-  //    native view just as surely as removing it (and `connectedCallback` then
-  //    re-runs `initWebview`, creating a second one). That is fatal for CEF:
-  //    Electrobun's handler calls `CefQuitMessageLoop` from `OnBeforeClose`
-  //    once its browser list empties, and in a CEF-bundled build that loop is
-  //    the app's main event loop (Electrobun ≤ 2.0.1). Our window runs on the
-  //    system WebView, so this pane holds the process's ONLY CEF browser and
-  //    closing it quits the app. Hence: closing the pane HIDES it (`visible`),
-  //    and App keeps BrowserPane mounted for the rest of the app's life once it
-  //    has been opened. This teardown therefore only ever runs at app teardown.
-  //    (The parking dance in `destroyWebview` is the one safe case: it only
-  //    parks elements whose `webviewId` is still null, where
-  //    `disconnectedCallback` is a no-op.)
+  //    removed, and not REPARENTED with `appendChild` either. Verified against
+  //    the installed Electrobun (1.18.1, CEF 147), the chain is:
+  //
+  //      disconnectedCallback → `webviewTagRemove` → `BrowserView.remove()`
+  //        → `-[CEFWebViewImpl remove]` → `CloseBrowser(false)`
+  //        → CEF's default close for a `SetAsChild` browser, i.e.
+  //          `CloseHostWindow()` = `performClose:` on the browser view's window
+  //          — which is OUR MAIN WINDOW, since the pane's CEF browser is a
+  //          child NSView of it
+  //        → `-[WindowDelegate windowWillClose:]` → Electrobun's `close` event
+  //        → BrowserWindow.ts empties `BrowserWindowMap` and, with
+  //          `exitOnLastWindowClosed` defaulting to true, calls `quit()`
+  //        → `stopEventLoop()` + `forceExit(0)`: a silent exit, no crash report.
+  //
+  //    (`CefQuitMessageLoop` is NOT what does it in this version — it is only
+  //    reachable from `stopEventLoop`, i.e. from `quit()` itself.) Moving a
+  //    connected node with `appendChild` is a remove+insert whose
+  //    custom-element reactions run synchronously, so "parking" a live element
+  //    triggers the same chain (and `connectedCallback` then re-runs
+  //    `initWebview`, creating a second view). Hence: closing the pane HIDES it
+  //    (`visible`), App keeps BrowserPane mounted for the rest of the app's
+  //    life once it has been opened, and `destroyWebview` PARKS rather than
+  //    removes anything that has (or may still get) a native view.
   useEffect(() => {
     if (!available) return
     const host = hostRef.current
     if (!host) return
 
     const mount = (rendererKind: "cef" | "native"): (() => void) | null => {
-      const element = document.createElement("electrobun-webview") as ElectrobunWebviewElement
+      // Reuse the element this process already owns, if there is one: it can
+      // never be destroyed, so a second one would be a second permanent native
+      // view stacked on the same slot.
+      const reused = liveWebview
+      const element = reused ?? (document.createElement("electrobun-webview") as ElectrobunWebviewElement)
       if (typeof element.on !== "function") return null
 
       // Native-view creation is deferred to a rAF; knowing whether it actually
-      // started lets teardown skip the parking dance in the common case.
-      let initStarted = false
-      const startInit = element.initWebview.bind(element)
-      element.initWebview = async () => {
-        initStarted = true
-        await startInit()
+      // started tells teardown whether removal is still safe. A reused element
+      // has been through that already.
+      let initStarted = reused != null
+      if (!reused) {
+        const startInit = element.initWebview.bind(element)
+        element.initWebview = async () => {
+          initStarted = true
+          await startInit()
+        }
+
+        // CEF when this build bundled it (the only renderer with a Chrome
+        // DevTools Protocol listener, so the only one an agent can drive),
+        // otherwise the system WebView.
+        element.setAttribute("renderer", rendererKind)
+        // Sandboxed: the embedded page gets the event bridge but no host RPC.
+        element.setAttribute("sandbox", "")
+        // Take `window.close()` away from the guest page: a page that closes
+        // itself would otherwise close this app's main window and exit the
+        // process (see note 5 and `~/lib/browserGuest`). The attribute is the
+        // early path (it runs before page scripts where Electrobun honours a
+        // custom preload); `injectGuard` below re-applies it on every navigation
+        // so the guard does not depend on that.
+        element.setAttribute("preload", GUEST_GUARD_SCRIPT)
+        element.setAttribute("src", initialUrlRef.current)
+        // Electrobun injects an unlayered `electrobun-webview { width:800px;
+        // height:300px }` default style, which outranks Tailwind's layered
+        // utilities. Inline styles are the only reliable way to size the element —
+        // and the element's rect is exactly where the native webview is composited
+        // (here: the stage's rect, which tracks the pane slot).
+        element.style.cssText =
+          "display:block;position:absolute;inset:0;width:100%;height:100%;background:transparent;"
       }
 
-      // CEF when this build bundled it (the only renderer with a Chrome
-      // DevTools Protocol listener, so the only one an agent can drive),
-      // otherwise the system WebView.
-      element.setAttribute("renderer", rendererKind)
-      // Sandboxed: the embedded page gets the event bridge but no host RPC.
-      element.setAttribute("sandbox", "")
-      element.setAttribute("src", initialUrlRef.current)
-      // Electrobun injects an unlayered `electrobun-webview { width:800px;
-      // height:300px }` default style, which outranks Tailwind's layered
-      // utilities. Inline styles are the only reliable way to size the element —
-      // and the element's rect is exactly where the native webview is composited.
-      element.style.cssText = "display:block;position:absolute;inset:0;width:100%;height:100%;background:transparent;"
-
+      // Re-arm the guest guard. The script is static and idempotent, so running
+      // it on every navigation event costs nothing after the first hit of a
+      // given document and covers the case where the `preload` attribute is not
+      // applied to sandboxed CEF views.
+      const injectGuard = () => {
+        try {
+          element.executeJavascript(GUEST_GUARD_SCRIPT)
+        } catch {
+          // No native side yet (or already gone): the next event re-tries.
+        }
+      }
       const onNavigate = (event: CustomEvent) => {
+        injectGuard()
         const next = urlFromDetail(event.detail) ?? element.src
         if (next) {
           setUrl(next)
@@ -616,9 +779,27 @@ export function BrowserPane({
         syncHistory(element)
       }
       const onDomReady = () => {
+        injectGuard()
         setLoading(false)
         setPaneLive(true)
         syncHistory(element)
+      }
+      // The guarded page asked to close itself. There are no tabs and the pane
+      // is never torn down, so the useful reading of "close me" is "go back to
+      // whatever opened me" (the common case: an auth flow that ends on a
+      // self-closing page). With no history to go back to, stay put.
+      const onHostMessage = (event: CustomEvent) => {
+        if (!isPageCloseRequest(event.detail)) return
+        void element
+          .canGoBack()
+          .then((back) => {
+            if (!back) return
+            setLoading(true)
+            element.goBack()
+          })
+          .catch(() => {
+            // Nothing to do: the page stays where it is.
+          })
       }
       // Links that ask for a new window stay in the pane; there is no tab UI.
       const onNewWindow = (event: CustomEvent) => {
@@ -633,9 +814,31 @@ export function BrowserPane({
       element.on("did-commit-navigation", onNavigate)
       element.on("dom-ready", onDomReady)
       element.on("new-window-open", onNewWindow)
+      element.on("host-message", onHostMessage)
 
-      host.appendChild(element)
+      // Into the stage — NOT into `host`, which React owns. `syncStage` has
+      // already put the stage over the slot, and keeps it there.
+      syncStage()
+      if (element.parentElement !== getBrowserStage()) getBrowserStage().appendChild(element)
+      liveWebview = element
       webviewRef.current = element
+
+      if (reused) {
+        // The page is already there: adopt its state instead of waiting for
+        // lifecycle events that will not fire again for this document.
+        const current = element.src
+        if (current) {
+          setUrl(current)
+          setDraft(current)
+        }
+        const live = element.webviewId != null
+        setLoading(!live)
+        setPaneLive(live)
+        if (live) {
+          syncHistory(element)
+          injectGuard()
+        }
+      }
       // The suppressor is created after an async round trip, so the pane may
       // already be closed by the time it exists: seed it from the ref that
       // tracks the latest `visible` rather than assuming an open pane.
@@ -650,12 +853,15 @@ export function BrowserPane({
         element.off("did-commit-navigation", onNavigate)
         element.off("dom-ready", onDomReady)
         element.off("new-window-open", onNewWindow)
+        element.off("host-message", onHostMessage)
         stopOverlayWatch()
         if (suppressorRef.current === suppressor) suppressorRef.current = null
         if (webviewRef.current === element) webviewRef.current = null
-        // Only reached at app teardown (or a StrictMode double-invoke before
-        // any native view exists) — closing the pane hides it, see note 5.
-        destroyWebview(element, () => initStarted)
+        // Reached at app teardown, on a StrictMode double-invoke, and when the
+        // root error boundary rebuilds the tree — closing the pane only hides
+        // it, see note 5. The element itself survives all of these (it lives in
+        // the stage); it is only forgotten when it was safe to remove.
+        if (!destroyWebview(element, () => initStarted) && liveWebview === element) liveWebview = null
       }
     }
 
@@ -670,7 +876,7 @@ export function BrowserPane({
       cancelled = true
       teardown?.()
     }
-  }, [available, syncHistory])
+  }, [available, syncHistory, syncStage])
 
   const navigate = useCallback((rawUrl: string) => {
     const nextUrl = normalizeBrowserAddress(rawUrl)
@@ -809,8 +1015,12 @@ export function BrowserPane({
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-muted/30">
         {available ? (
-          // The native webview is composited over this box; it must stay empty
-          // of anything meant to be SEEN (the native view paints over it).
+          // The pane SLOT. The webview element is not a child of this box — it
+          // lives in the body-level stage, which is kept exactly over this rect
+          // (`syncStage`) so the native view is composited here anyway. Keeping
+          // it out of React's tree is what makes the pane survive an unmount of
+          // the app (note 5 / AppErrorBoundary). This box must stay empty of
+          // anything meant to be SEEN: the native view paints over it.
           <div ref={hostRef} className="absolute inset-0">
             {/* Drag shield. It has to live inside the host, not beside it:
                 `paneCovered` treats any element it does not contain as an

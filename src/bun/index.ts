@@ -742,9 +742,25 @@ process.on("SIGTERM", () => {
   cleanup()
   process.exit(0)
 })
-// Best-effort: if the window is closed and this is the last one, Electrobun
-// typically exits; keep the hook for explicit destroy if the API surfaces it.
-void win
+// Closing this window ends the process, and that is deliberate.
+//
+// Electrobun (1.18.1) emits `close` per window, deletes it from its window map
+// and — with `runtime.exitOnLastWindowClosed` defaulting to true — calls
+// `quit()` → `stopEventLoop()` + `forceExit(0)` once the map is empty. Since
+// this app has exactly one window that is the normal ⌘W / red-button exit.
+//
+// It is ALSO the tail of the browser pane's failure mode: the pane's CEF
+// browser is a child NSView of this window, so closing that browser makes CEF
+// send `performClose:` here and the app exits silently. The fix for that lives
+// where the trigger is (src/mainview/lib/browserGuest.ts neuters the guest
+// page's `window.close()`, and BrowserPane parks its webview instead of
+// removing it) rather than here: setting `exitOnLastWindowClosed: false` would
+// turn a genuine ⌘W into a windowless process with no way back, since nothing
+// recreates the window. This handler exists so that if the app ever does exit
+// this way again, the log says so instead of the process just vanishing.
+win.on("close", () => {
+  console.log("[chunky] main window closed — app will exit")
+})
 
 console.log("[chunky] window ready")
 
