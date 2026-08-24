@@ -35,6 +35,16 @@
 export const PAGE_CLOSE_REQUEST = "chunky:page-close-request"
 
 /**
+ * Message type carrying the page's `<meta name="theme-color">` content, or
+ * null when the page has none. Reported RAW: validation is the host's job
+ * (`~/lib/browserTint`), because a page string must never reach a style.
+ */
+export const PAGE_THEME_COLOR = "chunky:page-theme-color"
+
+/** How long the guard coalesces `<head>` churn before re-reading the meta. */
+export const THEME_COLOR_THROTTLE_MS = 250
+
+/**
  * The JS injected into the guest page.
  *
  * Notes on the shape:
@@ -75,6 +85,73 @@ export const GUEST_GUARD_SCRIPT = `(function(){
       try { href = String(window.location.href); } catch (err) {}
       post({ type: ${JSON.stringify(PAGE_CLOSE_REQUEST)}, url: href });
     };
+
+    // -- theme-color -------------------------------------------------------
+    // Media-aware: a page may ship one meta per colour scheme, so the variant
+    // whose media query currently matches wins, with the unscoped one as the
+    // fallback. Reported on load, on <head> changes (SPAs swap these), and when
+    // the colour scheme flips.
+    var lastReported;
+    // Everything is reached through window.* on purpose: the script is also
+    // evaluated against a stand-in window in tests, and in a real page
+    // window.document === document.
+    var readThemeColor = function () {
+      try {
+        var doc = window.document;
+        if (!doc || typeof doc.querySelectorAll !== "function") return null;
+        var metas = doc.querySelectorAll('meta[name="theme-color"]');
+        var fallback = null;
+        for (var i = 0; i < metas.length; i++) {
+          var content = metas[i].getAttribute("content");
+          if (!content) continue;
+          var media = metas[i].getAttribute("media");
+          if (!media) { if (fallback === null) fallback = content; continue; }
+          try {
+            if (window.matchMedia && window.matchMedia(media).matches) return content;
+          } catch (err) {}
+        }
+        return fallback;
+      } catch (err) {
+        return null;
+      }
+    };
+    var reportThemeColor = function () {
+      var color = readThemeColor();
+      if (color === lastReported) return;
+      lastReported = color;
+      post({ type: ${JSON.stringify(PAGE_THEME_COLOR)}, color: color === null ? null : String(color) });
+    };
+    var pending = 0;
+    var scheduleReport = function () {
+      if (pending) return;
+      pending = window.setTimeout(function () {
+        pending = 0;
+        reportThemeColor();
+      }, ${THEME_COLOR_THROTTLE_MS});
+    };
+    reportThemeColor();
+    try {
+      var doc = window.document;
+      if (doc && doc.readyState === "loading" && doc.addEventListener) {
+        doc.addEventListener("DOMContentLoaded", reportThemeColor, { once: true });
+      }
+      if (window.addEventListener) window.addEventListener("load", scheduleReport);
+      // ONE observer per document: the __chunkyGuestGuard gate above means a
+      // re-injection returns before reaching this, so observers cannot stack.
+      if (doc && doc.head && typeof window.MutationObserver === "function") {
+        new window.MutationObserver(scheduleReport).observe(doc.head, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["content", "media", "name"]
+        });
+      }
+      if (window.matchMedia) {
+        var scheme = window.matchMedia("(prefers-color-scheme: dark)");
+        if (scheme.addEventListener) scheme.addEventListener("change", scheduleReport);
+        else if (scheme.addListener) scheme.addListener(scheduleReport);
+      }
+    } catch (err) {}
     try {
       Object.defineProperty(window, "close", {
         configurable: true,
@@ -107,4 +184,27 @@ export function isPageCloseRequest(detail: unknown): boolean {
   }
   if (!value || typeof value !== "object") return false
   return (value as { type?: unknown }).type === PAGE_CLOSE_REQUEST
+}
+
+/**
+ * Read a theme-colour report out of a `host-message` detail.
+ *
+ * Returns the RAW page string (never trusted, never styled with directly), or
+ * null both for "the page has no theme colour" and for "this message is
+ * something else" — distinguished by the `matched` flag so the host only resets
+ * its tint on an actual report.
+ */
+export function readThemeColorMessage(detail: unknown): { matched: boolean; color: string | null } {
+  let value = detail
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return { matched: false, color: null }
+    }
+  }
+  if (!value || typeof value !== "object") return { matched: false, color: null }
+  const body = value as { type?: unknown; color?: unknown }
+  if (body.type !== PAGE_THEME_COLOR) return { matched: false, color: null }
+  return { matched: true, color: typeof body.color === "string" ? body.color : null }
 }

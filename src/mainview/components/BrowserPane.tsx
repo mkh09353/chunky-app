@@ -16,7 +16,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
 import { resolveAddressKey, shouldSyncAddressDraft } from "~/lib/browserAddressBar"
@@ -30,7 +30,8 @@ import {
   type FindState,
 } from "~/lib/browserFind"
 import { onBrowserFindRequested } from "~/lib/browserMenu"
-import { GUEST_GUARD_SCRIPT, isPageCloseRequest } from "~/lib/browserGuest"
+import { resolveToolbarTint, type AppTheme } from "~/lib/browserTint"
+import { GUEST_GUARD_SCRIPT, isPageCloseRequest, readThemeColorMessage } from "~/lib/browserGuest"
 import { describeLoadFailure, isErrorPageUrl, shouldClearFailure, type LoadFailure } from "~/lib/browserLoadState"
 import {
   isAllowedPaneUrl,
@@ -520,6 +521,27 @@ export function BrowserPane({
   const findRef = useRef<FindState>(INITIAL_FIND_STATE)
   // When the bar was last opened, for de-duplicating the two ⌘F routes.
   const lastFindOpenRef = useRef<number | null>(null)
+  // ── Toolbar tint ─────────────────────────────────────────────────────────
+  // The page's <meta name="theme-color">, exactly as the page wrote it. It is
+  // never used directly: `resolveToolbarTint` parses it into three integers or
+  // refuses it, and only numbers we produced reach a style.
+  const [themeColor, setThemeColor] = useState<string | null>(null)
+  // The app theme drives which base the page colour is blended into. Read from
+  // the live `.dark` class rather than `useTheme()`, which owns persistence —
+  // this is a read-only observer, not a second theme store.
+  const [appTheme, setAppTheme] = useState<AppTheme>(() =>
+    typeof document !== "undefined" && document.documentElement.classList.contains("dark") ? "dark" : "light",
+  )
+  useEffect(() => {
+    const root = document.documentElement
+    const sync = () => setAppTheme(root.classList.contains("dark") ? "dark" : "light")
+    sync()
+    const observer = new MutationObserver(sync)
+    observer.observe(root, { attributes: true, attributeFilter: ["class"] })
+    return () => observer.disconnect()
+  }, [])
+  const tint = useMemo(() => resolveToolbarTint(themeColor, appTheme), [themeColor, appTheme])
+
   // Brief "Copied" state on the action menu's copy row; no toast.
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef(0)
@@ -884,6 +906,13 @@ export function BrowserPane({
       // whatever opened me" (the common case: an auth flow that ends on a
       // self-closing page). With no history to go back to, stay put.
       const onHostMessage = (event: CustomEvent) => {
+        // The guard reports the page's theme colour here too (same channel,
+        // different message type). Raw string in, validated in `tint`.
+        const themeReport = readThemeColorMessage(event.detail)
+        if (themeReport.matched) {
+          setThemeColor(themeReport.color)
+          return
+        }
         if (!isPageCloseRequest(event.detail)) return
         void element
           .canGoBack()
@@ -911,9 +940,17 @@ export function BrowserPane({
         programmaticNavRef.current?.(next)
       }
 
+      // A committed navigation is a NEW document: drop the old page's tint
+      // before the new one has reported (an in-page navigation keeps it — same
+      // document, and the guard only re-reports on a real change).
+      const onCommit = (event: CustomEvent) => {
+        setThemeColor(null)
+        onNavigate(event)
+      }
+
       element.on("did-navigate", onNavigate)
       element.on("did-navigate-in-page", onNavigate)
-      element.on("did-commit-navigation", onNavigate)
+      element.on("did-commit-navigation", onCommit)
       element.on("dom-ready", onDomReady)
       element.on("new-window-open", onNewWindow)
       element.on("host-message", onHostMessage)
@@ -952,7 +989,7 @@ export function BrowserPane({
       return () => {
         element.off("did-navigate", onNavigate)
         element.off("did-navigate-in-page", onNavigate)
-        element.off("did-commit-navigation", onNavigate)
+        element.off("did-commit-navigation", onCommit)
         element.off("dom-ready", onDomReady)
         element.off("new-window-open", onNewWindow)
         element.off("host-message", onHostMessage)
@@ -1288,7 +1325,25 @@ export function BrowserPane({
           )}
         />
       </div>
-      <form className="no-drag flex h-[52px] shrink-0 items-center gap-1 border-border/70 border-b px-2" onSubmit={submit}>
+      {/* Toolbar. When the page reports a usable theme colour the strip picks
+          up a hint of it — Safari's compact tinting, not a repaint: 14% of the
+          page colour blended into the app's own background (see
+          `~/lib/browserTint`), with the transition doing the rest. Everything
+          below the strip keeps its own tokens, so the address field, refusal
+          strip, find bar and action menu stay legible either way. */}
+      <form
+        className="no-drag flex h-[52px] shrink-0 items-center gap-1 border-border/70 border-b px-2 transition-colors duration-300"
+        style={
+          tint
+            ? {
+                backgroundColor: tint.background,
+                borderBottomColor: tint.border,
+                ...(tint.foreground ? { color: tint.foreground } : {}),
+              }
+            : undefined
+        }
+        onSubmit={submit}
+      >
         <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoBack} onClick={() => { setLoading(true); setFailure(null); webviewRef.current?.goBack() }} aria-label="Back">
           <ArrowLeft />
         </Button>
