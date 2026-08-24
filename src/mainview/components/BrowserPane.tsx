@@ -1,7 +1,27 @@
-import { ArrowLeft, ArrowRight, Cookie, Globe2, LoaderCircle, RotateCw, TriangleAlert, X } from "lucide-react"
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  ChevronUp,
+  Cookie,
+  Globe2,
+  LoaderCircle,
+  RotateCw,
+  Search,
+  TriangleAlert,
+  X,
+} from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
+import { resolveAddressKey, shouldSyncAddressDraft } from "~/lib/browserAddressBar"
+import {
+  INITIAL_FIND_STATE,
+  findReducer,
+  shouldClaimFindShortcut,
+  type FindEvent,
+  type FindState,
+} from "~/lib/browserFind"
 import { GUEST_GUARD_SCRIPT, isPageCloseRequest } from "~/lib/browserGuest"
 import { describeLoadFailure, isErrorPageUrl, shouldClearFailure, type LoadFailure } from "~/lib/browserLoadState"
 import {
@@ -470,6 +490,29 @@ export function BrowserPane({
   // callbacks below exist; this ref hands them the current one without making
   // the whole webview effect depend on it.
   const programmaticNavRef = useRef<((url: string) => void) | null>(null)
+
+  // ── Address bar editing ───────────────────────────────────────────
+  // True from focus until blur/commit: while it is true a page navigation may
+  // not touch the field (`shouldSyncAddressDraft`).
+  const [editing, setEditing] = useState(false)
+  const editingRef = useRef(false)
+  editingRef.current = editing
+  const addressRef = useRef<HTMLInputElement | null>(null)
+  // Set for exactly one mouseup after a focus-select, so the click that focused
+  // the field cannot immediately collapse the selection.
+  const justFocusedRef = useRef(false)
+
+  // ── Find in page ────────────────────────────────────────────────
+  const [find, setFind] = useState<FindState>(INITIAL_FIND_STATE)
+  // The authoritative copy for `dispatchFind`, which must compute exactly one
+  // transition per event (see there).
+  const findRef = useRef<FindState>(INITIAL_FIND_STATE)
+  const findInputRef = useRef<HTMLInputElement | null>(null)
+  const paneRef = useRef<HTMLElement | null>(null)
+  // Is the pane the surface the user is working in? Set from real DOM
+  // interaction inside the pane, cleared by interaction anywhere else — so ⌘F
+  // in the composer or a dialog is never claimed.
+  const paneEngagedRef = useRef(false)
   // The error surface is painted over the pane, and a DOM overlay cannot cover
   // a natively composited view: holding the overlay lock is what makes the
   // suppressor step the page aside so this is both visible and clickable.
@@ -797,9 +840,17 @@ export function BrowserPane({
           if (!isErrorPageUrl(next)) {
             requestedUrlRef.current = next
             setUrl(next)
-            setDraft(next)
+            // The page owns the field only while the user does not: a redirect
+            // landing mid-typing must not overwrite a half-typed address.
+            setDraft((current) =>
+              shouldSyncAddressDraft({ editing: editingRef.current, committed: next, draft: current })
+                ? next
+                : current,
+            )
             persistUrl(next)
           }
+          // Highlights belong to the document that just went away.
+          dispatchFindRef.current({ type: "navigated" })
         }
         setLoading(false)
         setPaneLive(true)
@@ -961,6 +1012,34 @@ export function BrowserPane({
 
   programmaticNavRef.current = navigateProgrammatically
 
+  /**
+   * Run one find-bar transition and send the resulting command to the view.
+   *
+   * `findInPage`/`stopFindInPage` map to `CefBrowserHost::Find` /
+   * `StopFinding` — real, and the only part of CEF's find API that reaches us
+   * (no match counts, see `~/lib/browserFind`).
+   */
+  const dispatchFind = useCallback((event: FindEvent) => {
+    // Deliberately NOT inside a `setFind` updater: React double-invokes
+    // updaters in StrictMode, which would issue every Find twice — and a
+    // repeated Find with the same text steps to the next match.
+    const { state: next, command, focusInput } = findReducer(findRef.current, event)
+    findRef.current = next
+    setFind(next)
+    const view = webviewRef.current
+    if (command?.kind === "find") view?.findInPage(command.text, { forward: command.forward })
+    else if (command?.kind === "stop") view?.stopFindInPage()
+    if (focusInput) {
+      // The input may be mounting in this very commit.
+      requestAnimationFrame(() => {
+        findInputRef.current?.focus()
+        findInputRef.current?.select()
+      })
+    }
+  }, [])
+  const dispatchFindRef = useRef(dispatchFind)
+  dispatchFindRef.current = dispatchFind
+
   /** Retry the page the error surface is about. */
   const retryFailedLoad = useCallback(() => {
     const target = failure?.url
@@ -1012,6 +1091,71 @@ export function BrowserPane({
     void cookieSyncCompleteFirstRun()
   }, [])
 
+  /**
+   * ⌘F opens the find bar — but only for a pane the user is actually in.
+   *
+   * Following the app's Esc-to-stop convention (App.tsx): claim the key only
+   * from the owning surface, never globally. "In the pane" is tracked from real
+   * DOM interaction; note that while focus is inside the native view the host
+   * WebView receives no key events at all, so ⌘F over the page itself cannot be
+   * seen here — it works from the pane's chrome (address bar, toolbar, find
+   * bar), which is where a keyboard user will be.
+   */
+  useEffect(() => {
+    if (!available) return
+    const insidePane = (target: EventTarget | null) =>
+      target instanceof Node && paneRef.current?.contains(target) === true
+
+    const onPointerDown = (event: PointerEvent) => {
+      paneEngagedRef.current = insidePane(event.target)
+    }
+    const onFocusIn = (event: FocusEvent) => {
+      paneEngagedRef.current = insidePane(event.target)
+    }
+    const onPaneEnter = () => {
+      paneEngagedRef.current = true
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !shouldClaimFindShortcut({
+          key: event.key,
+          metaKey: event.metaKey,
+          ctrlKey: event.ctrlKey,
+          altKey: event.altKey,
+          defaultPrevented: event.defaultPrevented,
+          paneVisible: visibleRef.current,
+          paneEngaged: paneEngagedRef.current,
+          // A dialog or the palette is a body-level overlay over the pane; the
+          // overlay guard already knows about them.
+          overlayOpen: lockedOverlaysCoverRect(
+            paneRef.current?.getBoundingClientRect() ?? new DOMRect(0, 0, 0, 0),
+          ),
+        })
+      ) {
+        return
+      }
+      event.preventDefault()
+      dispatchFindRef.current({ type: "open" })
+    }
+
+    const pane = paneRef.current
+    window.addEventListener("pointerdown", onPointerDown, true)
+    window.addEventListener("focusin", onFocusIn, true)
+    pane?.addEventListener("pointerenter", onPaneEnter)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true)
+      window.removeEventListener("focusin", onFocusIn, true)
+      pane?.removeEventListener("pointerenter", onPaneEnter)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [available])
+
+  // A hidden pane must not keep a find bar (or its highlights) alive.
+  useEffect(() => {
+    if (!visible && find.open) dispatchFind({ type: "close" })
+  }, [visible, find.open, dispatchFind])
+
   // Navigation requests that arrive while the pane is already open.
   useEffect(
     () =>
@@ -1026,7 +1170,23 @@ export function BrowserPane({
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    setEditing(false)
+    addressRef.current?.blur()
     navigate(draft)
+  }
+
+  /** Escape in the address bar: put the real URL back and leave the field. */
+  const onAddressKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    const action = resolveAddressKey({ key: event.key, committed: url, draft })
+    if (!action) return
+    event.preventDefault()
+    // Claim it so App's Esc handling (and AppKit's "exit fullscreen") does not
+    // also act on this key.
+    event.stopPropagation()
+    if (action.type === "revert") setDraft(action.url)
+    setAddressError(null)
+    setEditing(false)
+    event.currentTarget.blur()
   }
 
   return (
@@ -1040,6 +1200,8 @@ export function BrowserPane({
       style={{ width: paneWidth }}
       aria-label="Browser pane"
       aria-hidden={!visible}
+      data-browser-pane=""
+      ref={paneRef}
     >
       {/* Resize handle. It reaches further OUT than in on purpose: the half
           lying over the pane is dead once the native webview is composited on
@@ -1085,12 +1247,29 @@ export function BrowserPane({
         <div className="relative min-w-0 flex-1">
           <Globe2 className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
+            ref={addressRef}
             value={draft}
             onChange={(event) => {
               setDraft(event.target.value)
+              setEditing(true)
               if (addressError) setAddressError(null)
             }}
-            onFocus={(event) => event.currentTarget.select()}
+            onKeyDown={onAddressKeyDown}
+            onFocus={(event) => {
+              // Every real browser selects the whole address on focus, however
+              // the field was reached (click, Tab, ⌘L-style focus).
+              setEditing(true)
+              justFocusedRef.current = true
+              event.currentTarget.select()
+            }}
+            onBlur={() => setEditing(false)}
+            onMouseUp={(event) => {
+              // A click that focused the field would otherwise collapse the
+              // selection `onFocus` just made when the mouse comes back up.
+              if (!justFocusedRef.current) return
+              justFocusedRef.current = false
+              event.preventDefault()
+            }}
             placeholder="Search or enter URL"
             spellCheck={false}
             title={url}
@@ -1119,6 +1298,74 @@ export function BrowserPane({
           className="shrink-0 border-border/70 border-b bg-destructive/5 px-3 py-1.5 text-[11.5px] text-destructive"
         >
           {addressError}
+        </div>
+      ) : null}
+
+      {/* Find bar. Docked in the pane's CHROME COLUMN, above the slot — not
+          floated over the page. That is deliberate: the native view is
+          composited above all DOM and Electrobun's mask support clips paint
+          without a `hitTest:` override, so a bar drawn over the page would be
+          invisible, unclickable, or both. Sitting outside the native view's
+          rect (the slot shrinks by this bar's height and `syncStage` follows)
+          it is simply real DOM. No overlay lock: hiding the page to search it
+          would be absurd. */}
+      {find.open ? (
+        <div
+          className={cn(
+            NO_DRAG_REGION,
+            "flex h-9 shrink-0 items-center gap-1 border-border/70 border-b bg-muted/20 px-2",
+          )}
+          role="search"
+        >
+          <Search className="pointer-events-none ml-1 size-3.5 shrink-0 text-muted-foreground" />
+          <input
+            ref={findInputRef}
+            value={find.query}
+            onChange={(event) => dispatchFind({ type: "query", value: event.target.value })}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault()
+                dispatchFind({ type: event.shiftKey ? "previous" : "next" })
+              } else if (event.key === "Escape") {
+                event.preventDefault()
+                event.stopPropagation()
+                dispatchFind({ type: "close" })
+              }
+            }}
+            placeholder="Find in page"
+            spellCheck={false}
+            aria-label="Find in page"
+            className="h-7 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:bg-muted/40"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled={!find.query}
+            onClick={() => dispatchFind({ type: "previous" })}
+            aria-label="Previous match"
+          >
+            <ChevronUp />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            disabled={!find.query}
+            onClick={() => dispatchFind({ type: "next" })}
+            aria-label="Next match"
+          >
+            <ChevronDown />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={() => dispatchFind({ type: "close" })}
+            aria-label="Close find bar"
+          >
+            <X />
+          </Button>
         </div>
       ) : null}
 
