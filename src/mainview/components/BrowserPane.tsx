@@ -1,8 +1,15 @@
-import { ArrowLeft, ArrowRight, Cookie, Globe2, LoaderCircle, RotateCw, X } from "lucide-react"
+import { ArrowLeft, ArrowRight, Cookie, Globe2, LoaderCircle, RotateCw, TriangleAlert, X } from "lucide-react"
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react"
 import { announceAppBrowserTarget, preferredWebviewRenderer } from "~/lib/appBrowser"
 import { GUEST_GUARD_SCRIPT, isPageCloseRequest } from "~/lib/browserGuest"
+import { describeLoadFailure, isErrorPageUrl, shouldClearFailure, type LoadFailure } from "~/lib/browserLoadState"
+import {
+  isAllowedPaneUrl,
+  resolveAddressInput,
+  resolveProgrammaticUrl,
+  resolveStartupUrl,
+} from "~/lib/browserNavPolicy"
 import { resolveWebviewTeardown, shouldRetainForReuse } from "~/lib/browserPaneTeardown"
 import { isPaneOwnedNode, resolveStageRect, type PaneRect } from "~/lib/browserStage"
 import {
@@ -28,17 +35,22 @@ import { CookieSyncModal } from "./browser/CookieSyncModal"
 import { Button } from "./ui/button"
 
 const LAST_URL_KEY = "chunky.browser.lastUrl"
-const DEFAULT_URL = "https://duckduckgo.com/"
 
-function readLastUrl(): string {
+function readLastUrl(): string | null {
   try {
-    return localStorage.getItem(LAST_URL_KEY) || DEFAULT_URL
+    return localStorage.getItem(LAST_URL_KEY)
   } catch {
-    return DEFAULT_URL
+    return null
   }
 }
 
+/**
+ * Remember the last page — but only one the pane would accept again. An error
+ * page, or anything the policy refuses, must not become the next launch's
+ * start-up URL.
+ */
 function persistUrl(url: string) {
+  if (!isAllowedPaneUrl(url) || isErrorPageUrl(url)) return
   try {
     localStorage.setItem(LAST_URL_KEY, url)
   } catch {
@@ -46,35 +58,8 @@ function persistUrl(url: string) {
   }
 }
 
-/** Resolve browser-style address input without sending arbitrary prose to a host. */
-export function normalizeBrowserAddress(input: string): string {
-  const value = input.trim()
-  if (!value) return DEFAULT_URL
-
-  if (/^[a-z][a-z\d+.-]*:/i.test(value)) {
-    try {
-      return new URL(value).href
-    } catch {
-      return `https://duckduckgo.com/?q=${encodeURIComponent(value)}`
-    }
-  }
-
-  // Hosts, localhost, IPv4 addresses, and paths with a host-like first segment.
-  const looksLikeUrl =
-    value === "localhost" ||
-    value.startsWith("localhost:") ||
-    /^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:\/|$)/.test(value) ||
-    /^(?:[\w-]+\.)+[a-z]{2,}(?::\d+)?(?:\/|$)/i.test(value)
-  if (looksLikeUrl) {
-    try {
-      return new URL(`https://${value}`).href
-    } catch {
-      // Fall through to search for malformed host-looking input.
-    }
-  }
-
-  return `https://duckduckgo.com/?q=${encodeURIComponent(value)}`
-}
+/** How long a refused address stays called out in the toolbar. */
+const ADDRESS_ERROR_MS = 4_000
 
 function desktopWebviewAvailable(): boolean {
   return (
@@ -452,7 +437,13 @@ export function BrowserPane({
   // first mount can see one — afterwards the pane is permanently mounted, so a
   // request while it is hidden arrives live through `subscribeBrowserNavigation`
   // and the store is cleared there.
-  if (!initialUrlRef.current) initialUrlRef.current = takePendingBrowserUrl() || readLastUrl()
+  // Both candidates go through the policy: a parked request comes from a page
+  // (or the server) and a persisted one from disk, so neither is trusted to be
+  // a loadable http(s) URL. An unacceptable value falls back to the home page
+  // rather than leaving the pane blank.
+  if (!initialUrlRef.current) {
+    initialUrlRef.current = resolveStartupUrl(takePendingBrowserUrl(), readLastUrl())
+  }
   // The suppressor is created after an async round trip, and `visible` may have
   // changed by then, so the latest answer is kept where that callback can read
   // it rather than captured.
@@ -466,6 +457,31 @@ export function BrowserPane({
   // A CDP target for this pane only exists once its page is up, so the server
   // cannot be told anything useful before that.
   const [paneLive, setPaneLive] = useState(false)
+  // A refused address: shown inline in the toolbar, never as a dialog.
+  const [addressError, setAddressError] = useState<string | null>(null)
+  const addressErrorTimer = useRef(0)
+  // The engine committed its own error document instead of the page we asked
+  // for. `null` whenever a real page is showing.
+  const [failure, setFailure] = useState<LoadFailure | null>(null)
+  // What the pane last asked for, so a committed error page can be described in
+  // terms of the request rather than `chrome-error://chromewebdata/`.
+  const requestedUrlRef = useRef<string>(initialUrlRef.current)
+  // The mount effect's event handlers are created once, before the navigation
+  // callbacks below exist; this ref hands them the current one without making
+  // the whole webview effect depend on it.
+  const programmaticNavRef = useRef<((url: string) => void) | null>(null)
+  // The error surface is painted over the pane, and a DOM overlay cannot cover
+  // a natively composited view: holding the overlay lock is what makes the
+  // suppressor step the page aside so this is both visible and clickable.
+  useOverlayLock(failure != null, "always")
+
+  const flagAddressError = useCallback((reason: string) => {
+    setAddressError(reason)
+    window.clearTimeout(addressErrorTimer.current)
+    addressErrorTimer.current = window.setTimeout(() => setAddressError(null), ADDRESS_ERROR_MS)
+  }, [])
+
+  useEffect(() => () => window.clearTimeout(addressErrorTimer.current), [])
 
   // ── Cookie sync ──────────────────────────────────────────────────────────
   // The first-launch offer, and the site picker it opens. `firstRunComplete`
@@ -770,9 +786,20 @@ export function BrowserPane({
         injectGuard()
         const next = urlFromDetail(event.detail) ?? element.src
         if (next) {
-          setUrl(next)
-          setDraft(next)
-          persistUrl(next)
+          // The only load-failure signal this stack actually produces: the
+          // engine navigating to its own error document (see
+          // `~/lib/browserLoadState` — there is no did-fail-load event here).
+          const detected = describeLoadFailure(next, requestedUrlRef.current)
+          if (detected) setFailure(detected)
+          else if (shouldClearFailure(next)) setFailure(null)
+          // An error page's URL is not an address: keep showing what was asked
+          // for, and never persist it as the next launch's start-up page.
+          if (!isErrorPageUrl(next)) {
+            requestedUrlRef.current = next
+            setUrl(next)
+            setDraft(next)
+            persistUrl(next)
+          }
         }
         setLoading(false)
         setPaneLive(true)
@@ -794,7 +821,12 @@ export function BrowserPane({
           .canGoBack()
           .then((back) => {
             if (!back) return
+            // Going back can only reach entries this pane already accepted on
+            // the way in (every entry point is policy-checked), so there is no
+            // URL to re-validate here — and the committed URL is checked again
+            // by `onNavigate` when it arrives.
             setLoading(true)
+            setFailure(null)
             element.goBack()
           })
           .catch(() => {
@@ -802,11 +834,13 @@ export function BrowserPane({
           })
       }
       // Links that ask for a new window stay in the pane; there is no tab UI.
+      // The target comes from the page, so it is policy-checked like any other
+      // programmatic navigation — a `javascript:`/`file:`/custom-scheme popup
+      // target is refused with an inline note instead of being loaded.
       const onNewWindow = (event: CustomEvent) => {
         const next = urlFromDetail(event.detail)
         if (!next) return
-        setLoading(true)
-        element.loadURL(next)
+        programmaticNavRef.current?.(next)
       }
 
       element.on("did-navigate", onNavigate)
@@ -878,14 +912,66 @@ export function BrowserPane({
     }
   }, [available, syncHistory, syncStage])
 
-  const navigate = useCallback((rawUrl: string) => {
-    const nextUrl = normalizeBrowserAddress(rawUrl)
-    setUrl(nextUrl)
-    setDraft(nextUrl)
-    persistUrl(nextUrl)
+  /**
+   * The single way anything gets loaded in this pane.
+   *
+   * Every caller — the address bar, `new-window-open`, the server's
+   * `app.open_url`, a restored link — lands here, and nothing reaches
+   * `loadURL` without having been through the policy first.
+   */
+  const load = useCallback(
+    (nextUrl: string) => {
+      requestedUrlRef.current = nextUrl
+      setFailure(null)
+      setAddressError(null)
+      setUrl(nextUrl)
+      setDraft(nextUrl)
+      persistUrl(nextUrl)
+      setLoading(true)
+      webviewRef.current?.loadURL(nextUrl)
+    },
+    [],
+  )
+
+  /** Address-bar semantics: URLs load, bare terms search, bad schemes refuse. */
+  const navigate = useCallback(
+    (rawUrl: string) => {
+      const resolved = resolveAddressInput(rawUrl)
+      if (!resolved.ok) {
+        flagAddressError(resolved.reason)
+        return
+      }
+      load(resolved.url)
+    },
+    [flagAddressError, load],
+  )
+
+  /** Programmatic navigation: a URL or nothing — never a search. */
+  const navigateProgrammatically = useCallback(
+    (rawUrl: string) => {
+      const resolved = resolveProgrammaticUrl(rawUrl)
+      if (!resolved.ok) {
+        flagAddressError(resolved.reason)
+        return
+      }
+      load(resolved.url)
+    },
+    [flagAddressError, load],
+  )
+
+  programmaticNavRef.current = navigateProgrammatically
+
+  /** Retry the page the error surface is about. */
+  const retryFailedLoad = useCallback(() => {
+    const target = failure?.url
+    setFailure(null)
     setLoading(true)
-    webviewRef.current?.loadURL(nextUrl)
-  }, [])
+    if (target && isAllowedPaneUrl(target)) {
+      webviewRef.current?.loadURL(target)
+      return
+    }
+    webviewRef.current?.reload()
+  }, [failure])
 
   /**
    * Tell the server how to drive this pane. Reactive rather than once-on-open:
@@ -932,9 +1018,10 @@ export function BrowserPane({
       subscribeBrowserNavigation((next) => {
         // Clear the parked request so a later remount does not repeat it.
         takePendingBrowserUrl()
-        navigate(next)
+        // Server- and page-originated: policy-checked, never searched.
+        navigateProgrammatically(next)
       }),
-    [navigate],
+    [navigateProgrammatically],
   )
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -986,32 +1073,54 @@ export function BrowserPane({
         />
       </div>
       <form className="no-drag flex h-[52px] shrink-0 items-center gap-1 border-border/70 border-b px-2" onSubmit={submit}>
-        <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoBack} onClick={() => { setLoading(true); webviewRef.current?.goBack() }} aria-label="Back">
+        <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoBack} onClick={() => { setLoading(true); setFailure(null); webviewRef.current?.goBack() }} aria-label="Back">
           <ArrowLeft />
         </Button>
-        <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoForward} onClick={() => { setLoading(true); webviewRef.current?.goForward() }} aria-label="Forward">
+        <Button type="button" variant="ghost" size="icon-sm" disabled={!available || !canGoForward} onClick={() => { setLoading(true); setFailure(null); webviewRef.current?.goForward() }} aria-label="Forward">
           <ArrowRight />
         </Button>
-        <Button type="button" variant="ghost" size="icon-sm" disabled={!available} onClick={() => { setLoading(true); webviewRef.current?.reload() }} aria-label="Reload">
+        <Button type="button" variant="ghost" size="icon-sm" disabled={!available} onClick={() => { setLoading(true); setFailure(null); webviewRef.current?.reload() }} aria-label="Reload">
           <RotateCw className={cn(loading && "animate-spin")} />
         </Button>
         <div className="relative min-w-0 flex-1">
           <Globe2 className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              setDraft(event.target.value)
+              if (addressError) setAddressError(null)
+            }}
             onFocus={(event) => event.currentTarget.select()}
             placeholder="Search or enter URL"
             spellCheck={false}
             title={url}
-            className="h-8 w-full rounded-lg border border-input bg-muted/30 py-1 pl-8 pr-3 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70 focus:border-ring focus:ring-[3px] focus:ring-ring/25"
+            className={cn(
+              "h-8 w-full rounded-lg border bg-muted/30 py-1 pl-8 pr-3 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/70 focus:ring-[3px]",
+              addressError
+                ? "border-destructive ring-[3px] ring-destructive/20 focus:border-destructive focus:ring-destructive/25"
+                : "border-input focus:border-ring focus:ring-ring/25",
+            )}
             aria-label="Browser address"
+            aria-invalid={addressError ? true : undefined}
           />
         </div>
         <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close browser">
           <X />
         </Button>
       </form>
+
+      {/* A refused address (`javascript:`, `file:`, a custom scheme, junk):
+          inline and self-clearing, never a dialog. It sits in the toolbar
+          column — above the native view's rect — so it needs no overlay lock. */}
+      {addressError ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="shrink-0 border-border/70 border-b bg-destructive/5 px-3 py-1.5 text-[11.5px] text-destructive"
+        >
+          {addressError}
+        </div>
+      ) : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-muted/30">
         {available ? (
@@ -1030,6 +1139,7 @@ export function BrowserPane({
             {resizing ? <div className="absolute inset-0 z-10 cursor-col-resize" /> : null}
           </div>
         ) : (
+
           <div className="flex h-full flex-col items-center justify-center gap-3 px-7 text-center">
             <div className="flex size-10 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary"><Globe2 className="size-5" /></div>
             <div>
@@ -1038,7 +1148,36 @@ export function BrowserPane({
             </div>
           </div>
         )}
-        {available && loading ? <LoaderCircle className="pointer-events-none absolute right-3 top-3 size-4 animate-spin text-primary" aria-label="Loading" /> : null}
+        {available && loading && !failure ? (
+          <LoaderCircle className="pointer-events-none absolute right-3 top-3 size-4 animate-spin text-primary" aria-label="Loading" />
+        ) : null}
+
+        {/* Load failure. A DOM overlay cannot cover a natively composited view,
+            so this is only visible AND clickable because `useOverlayLock`
+            (above) makes the suppressor hide the native view for as long as
+            `failure` is set — the same mechanism dialogs and the cookie card
+            use. Sibling of the slot, not a child of it, for the same reason. */}
+        {failure ? (
+          <div
+            role="alert"
+            className={cn(NO_DRAG_REGION, "absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-background px-7 text-center")}
+          >
+            <div className="flex size-10 items-center justify-center rounded-xl border border-destructive/20 bg-destructive/10 text-destructive">
+              <TriangleAlert className="size-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate font-medium text-[13px] text-foreground">Couldn't load {failure.host}</p>
+              <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+                {failure.reason
+                  ? `The page could not be reached (${failure.reason}).`
+                  : "The page could not be reached. Check the address and your connection."}
+              </p>
+            </div>
+            <Button size="sm" onClick={retryFailedLoad}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
 
         {/* First-launch cookie offer. Deliberately a sibling of the webview
             host rather than a child of it, and it holds the overlay lock while
@@ -1093,6 +1232,7 @@ export function BrowserPane({
           // Synced cookies only apply to the next request, so reload the pane's
           // current page to pick up the freshly imported session.
           setLoading(true)
+          setFailure(null)
           webviewRef.current?.reload()
         }}
       />
