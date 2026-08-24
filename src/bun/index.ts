@@ -156,6 +156,15 @@ void ensureFinders(extraRoots).catch((err) => {
   console.warn("[chunky] FFF warm-up failed:", err)
 })
 
+/**
+ * bun→webview message for Edit ▸ Find…
+ *
+ * Mirrored (not imported) in `src/mainview/lib/browserMenu.ts`, the same way
+ * `SETUP_STAGE_MESSAGE` is mirrored in `src/mainview/lib/setupStatus.ts`: the
+ * renderer bundle must not pull in Bun modules.
+ */
+const BROWSER_FIND_MESSAGE = "chunkyBrowserFind"
+
 // macOS routes ⌘C/⌘V/⌘X/⌘A through the app menu's key-equivalents. Electrobun
 // installs no default menu, so wire up the standard Edit roles or copy/paste
 // are no-ops in the WebView.
@@ -183,6 +192,16 @@ ApplicationMenu.setApplicationMenu([
       { role: "copy", accelerator: "CommandOrControl+C" },
       { role: "paste", accelerator: "CommandOrControl+V" },
       { role: "selectAll", accelerator: "CommandOrControl+A" },
+      { type: "separator" },
+      // Find… lives in the menu, not just in the renderer, because of where the
+      // browser pane's keyboard goes: while focus is inside the pane's NATIVE
+      // (CEF) view, the host WebView receives no key events at all, so the
+      // renderer's own ⌘F listener never sees the keystroke. AppKit delivers a
+      // menu key equivalent regardless of which NSView has focus, so this is
+      // the only route that works from inside the page. The renderer decides
+      // whether it means anything (it opens the pane's find bar only when the
+      // pane is visible).
+      { label: "Find…", action: "browser-find", accelerator: "CommandOrControl+F" },
     ],
   },
   {
@@ -200,6 +219,12 @@ ApplicationMenu.setApplicationMenu([
 ApplicationMenu.on("application-menu-clicked", (event) => {
   const action = (event as { data?: { action?: unknown } }).data?.action
   if (action === "check-for-updates") void checkForUpdates({ interactive: true })
+  else if (action === BROWSER_FIND_MESSAGE) {
+    // Same fire-and-forget bun→webview channel the terminal stream and the
+    // setup/updater notices use — no parallel mechanism.
+    const send = rpc?.send as unknown as Record<string, (value: unknown) => void> | undefined
+    send?.[BROWSER_FIND_MESSAGE]?.({})
+  }
 })
 
 function clampLimit(raw: unknown): number {

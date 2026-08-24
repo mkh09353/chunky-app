@@ -1,7 +1,15 @@
 // Find-in-page state machine + shortcut arming.
 // Run with: bun test src/mainview/lib/browserFind.test.ts
 import { describe, expect, test } from "bun:test"
-import { INITIAL_FIND_STATE, findReducer, shouldClaimFindShortcut, type FindState } from "./browserFind"
+import {
+  FIND_OPEN_DEDUPE_MS,
+  INITIAL_FIND_STATE,
+  findReducer,
+  isDuplicateFindOpen,
+  shouldClaimFindShortcut,
+  shouldOpenFromMenuSignal,
+  type FindState,
+} from "./browserFind"
 
 const open = (query = ""): FindState => ({ open: true, query })
 
@@ -65,6 +73,48 @@ describe("findReducer", () => {
     const result = findReducer(INITIAL_FIND_STATE, { type: "navigated" })
     expect(result.command).toBeNull()
     expect(result.state).toBe(INITIAL_FIND_STATE)
+  })
+})
+
+describe("shouldOpenFromMenuSignal", () => {
+  test("opens when the pane is visible and focus is in the page or its chrome", () => {
+    // Focus inside the native view: the host document has no editable focus.
+    expect(
+      shouldOpenFromMenuSignal({ paneVisible: true, activeInsidePane: false, activeIsEditable: false }),
+    ).toBe(true)
+    // Focus in the pane's own address/find field.
+    expect(
+      shouldOpenFromMenuSignal({ paneVisible: true, activeInsidePane: true, activeIsEditable: true }),
+    ).toBe(true)
+  })
+
+  test("never steals ⌘F from a text field outside the pane (the composer)", () => {
+    expect(
+      shouldOpenFromMenuSignal({ paneVisible: true, activeInsidePane: false, activeIsEditable: true }),
+    ).toBe(false)
+  })
+
+  test("a hidden pane ignores the menu item", () => {
+    expect(
+      shouldOpenFromMenuSignal({ paneVisible: false, activeInsidePane: false, activeIsEditable: false }),
+    ).toBe(false)
+  })
+})
+
+describe("isDuplicateFindOpen", () => {
+  test("collapses the keyboard and menu routes firing on one keystroke", () => {
+    expect(isDuplicateFindOpen(1_000, 1_000)).toBe(true)
+    expect(isDuplicateFindOpen(1_000, 1_000 + FIND_OPEN_DEDUPE_MS - 1)).toBe(true)
+  })
+
+  test("a deliberate second ⌘F still re-searches", () => {
+    expect(isDuplicateFindOpen(1_000, 1_000 + FIND_OPEN_DEDUPE_MS)).toBe(false)
+    expect(isDuplicateFindOpen(1_000, 5_000)).toBe(false)
+  })
+
+  test("first open, and a clock that went backwards, are never duplicates", () => {
+    expect(isDuplicateFindOpen(null, 1_000)).toBe(false)
+    expect(isDuplicateFindOpen(5_000, 1_000)).toBe(false)
   })
 })
 

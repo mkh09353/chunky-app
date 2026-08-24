@@ -84,6 +84,31 @@ export function findReducer(state: FindState, event: FindEvent): FindTransition 
   }
 }
 
+export interface FindMenuSignalInput {
+  /** Is the pane on screen? A hidden pane ignores the menu item. */
+  paneVisible: boolean
+  /** Is the focused element inside the pane's own chrome? */
+  activeInsidePane: boolean
+  /** Is the focused element a text field / contenteditable? */
+  activeIsEditable: boolean
+}
+
+/**
+ * Should the native `Edit ▸ Find…` item open the pane's find bar?
+ *
+ * AppKit gives a menu key equivalent to the app no matter where focus is, which
+ * is exactly why the item exists (it is the only ⌘F that survives focus being
+ * inside the native view). The flip side is that it also fires while the user
+ * is typing in the composer, so: a visible pane, and never while an editable
+ * field OUTSIDE the pane has focus. When focus is in the native view the host
+ * document has no editable focus at all, so that case still opens.
+ */
+export function shouldOpenFromMenuSignal(input: FindMenuSignalInput): boolean {
+  if (!input.paneVisible) return false
+  if (input.activeIsEditable && !input.activeInsidePane) return false
+  return true
+}
+
 export interface FindShortcutInput {
   key: string
   metaKey: boolean
@@ -107,6 +132,21 @@ export interface FindShortcutInput {
  * must be left alone (macOS/WebKit may have their own use for it), and an event
  * something else already consumed is never re-claimed.
  */
+/**
+ * Two ⌘F routes reach the find bar: the pane's own key handler and the native
+ * `Edit ▸ Find…` menu item (see `~/lib/browserMenu`). One keystroke can trip
+ * both — AppKit's key equivalent and, depending on where focus is, the DOM
+ * keydown — and a second `open` re-issues the search, stepping to the next
+ * match. Collapse opens that arrive together.
+ */
+export const FIND_OPEN_DEDUPE_MS = 250
+
+export function isDuplicateFindOpen(previousAt: number | null, now: number, gapMs = FIND_OPEN_DEDUPE_MS): boolean {
+  if (previousAt == null) return false
+  const elapsed = now - previousAt
+  return elapsed >= 0 && elapsed < gapMs
+}
+
 export function shouldClaimFindShortcut(input: FindShortcutInput): boolean {
   if (input.defaultPrevented) return false
   if (!input.paneVisible || !input.paneEngaged || input.overlayOpen) return false

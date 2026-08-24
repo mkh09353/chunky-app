@@ -1,13 +1,18 @@
 import {
   ArrowLeft,
   ArrowRight,
+  Check,
   ChevronDown,
   ChevronUp,
   Cookie,
+  Copy,
+  ExternalLink,
   Globe2,
   LoaderCircle,
+  MoreHorizontal,
   RotateCw,
   Search,
+  SquareTerminal,
   TriangleAlert,
   X,
 } from "lucide-react"
@@ -18,10 +23,13 @@ import { resolveAddressKey, shouldSyncAddressDraft } from "~/lib/browserAddressB
 import {
   INITIAL_FIND_STATE,
   findReducer,
+  isDuplicateFindOpen,
   shouldClaimFindShortcut,
+  shouldOpenFromMenuSignal,
   type FindEvent,
   type FindState,
 } from "~/lib/browserFind"
+import { onBrowserFindRequested } from "~/lib/browserMenu"
 import { GUEST_GUARD_SCRIPT, isPageCloseRequest } from "~/lib/browserGuest"
 import { describeLoadFailure, isErrorPageUrl, shouldClearFailure, type LoadFailure } from "~/lib/browserLoadState"
 import {
@@ -51,8 +59,11 @@ import {
   useOverlayLock,
 } from "~/lib/nativeOverlayGuard"
 import { cookieSyncCompleteFirstRun, cookieSyncGetSettings } from "~/lib/cookieSync"
+import { copyText } from "~/lib/clipboard"
+import { openExternal } from "~/lib/openExternal"
 import { CookieSyncModal } from "./browser/CookieSyncModal"
 import { Button } from "./ui/button"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu"
 
 const LAST_URL_KEY = "chunky.browser.lastUrl"
 
@@ -507,6 +518,12 @@ export function BrowserPane({
   // The authoritative copy for `dispatchFind`, which must compute exactly one
   // transition per event (see there).
   const findRef = useRef<FindState>(INITIAL_FIND_STATE)
+  // When the bar was last opened, for de-duplicating the two ⌘F routes.
+  const lastFindOpenRef = useRef<number | null>(null)
+  // Brief "Copied" state on the action menu's copy row; no toast.
+  const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef(0)
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const findInputRef = useRef<HTMLInputElement | null>(null)
   const paneRef = useRef<HTMLElement | null>(null)
   // Is the pane the surface the user is working in? Set from real DOM
@@ -1020,6 +1037,13 @@ export function BrowserPane({
    * (no match counts, see `~/lib/browserFind`).
    */
   const dispatchFind = useCallback((event: FindEvent) => {
+    if (event.type === "open") {
+      // One keystroke can arrive twice (DOM keydown + the native menu's key
+      // equivalent); a second `open` would re-issue the search and skip a match.
+      const now = Date.now()
+      if (isDuplicateFindOpen(lastFindOpenRef.current, now)) return
+      lastFindOpenRef.current = now
+    }
     // Deliberately NOT inside a `setFind` updater: React double-invokes
     // updaters in StrictMode, which would issue every Find twice — and a
     // repeated Find with the same text steps to the next match.
@@ -1149,6 +1173,36 @@ export function BrowserPane({
       pane?.removeEventListener("pointerenter", onPaneEnter)
       window.removeEventListener("keydown", onKeyDown)
     }
+  }, [available])
+
+  /**
+   * `Edit ▸ Find…` (⌘F) from the native menu.
+   *
+   * This is the route that works when focus is inside the native view, where
+   * the renderer sees no keys at all. Engagement cannot be known in that case
+   * (the click that focused the page never reached the DOM), so VISIBILITY is
+   * the gate: a hidden pane ignores the item rather than popping open.
+   */
+  useEffect(() => {
+    if (!available) return
+    return onBrowserFindRequested(() => {
+      const active = document.activeElement
+      const editable =
+        active instanceof HTMLElement &&
+        (active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          active.isContentEditable)
+      if (
+        !shouldOpenFromMenuSignal({
+          paneVisible: visibleRef.current,
+          activeInsidePane: active instanceof Node && paneRef.current?.contains(active) === true,
+          activeIsEditable: editable,
+        })
+      ) {
+        return
+      }
+      dispatchFindRef.current({ type: "open" })
+    })
   }, [available])
 
   // A hidden pane must not keep a find bar (or its highlights) alive.
@@ -1283,6 +1337,64 @@ export function BrowserPane({
             aria-invalid={addressError ? true : undefined}
           />
         </div>
+        {/* Pane actions. Base UI menu, portaled to <body> — which is exactly
+            what the native-view overlay guard scans, so the popup makes the
+            page step aside while it overlaps and no further wiring is needed. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              // `type="button"` matters here and not in the other menus in the
+              // app: this trigger lives inside the address <form>, where the
+              // default submit type would navigate on click.
+              <Button type="button" variant="ghost" size="icon-sm" className={NO_DRAG_REGION} aria-label="Browser actions" />
+            }
+          >
+            <MoreHorizontal />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              disabled={!isAllowedPaneUrl(url)}
+              onClick={() => {
+                // The shared helper only ever hands http(s) to the Bun process,
+                // which spawns the OS handler with an argument array.
+                openExternal(url)
+              }}
+            >
+              <ExternalLink />
+              Open in system browser
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              closeOnClick={false}
+              disabled={!url}
+              onClick={() => {
+                void copyText(url).then((ok) => {
+                  if (!ok) return
+                  setCopied(true)
+                  window.clearTimeout(copiedTimer.current)
+                  copiedTimer.current = window.setTimeout(() => setCopied(false), 1_500)
+                })
+              }}
+            >
+              {copied ? <Check /> : <Copy />}
+              {copied ? "Copied" : "Copy link"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!available}
+              onClick={() => dispatchFind({ type: "open" })}
+            >
+              <Search />
+              Find in page
+              <span className="ml-auto pl-4 font-mono text-[11px] text-muted-foreground">⌘F</span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!available || !paneLive}
+              onClick={() => webviewRef.current?.openDevTools()}
+            >
+              <SquareTerminal />
+              Open DevTools
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close browser">
           <X />
         </Button>
