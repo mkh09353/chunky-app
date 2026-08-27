@@ -3,6 +3,8 @@
 import {
   ROUTES,
   readSSE,
+  readSessionEventStream,
+  sessionEventsUrl,
   type AgentEvent,
   type AppBrowserAnnounce,
   type AppBrowserEndpoint,
@@ -28,6 +30,7 @@ import {
   type ForkResponse, type GoalRequest, type GoalSnapshot, type RewindPoint,
 } from "@chunky/protocol"
 import { readNamedSSE } from "./sse"
+import type { SessionStreamFrame } from "./sessionStream"
 
 export type {
   MessageDelivery,
@@ -885,6 +888,44 @@ export async function openEventStream(
   for await (const ev of readSSE(res)) {
     if (signal?.aborted) break
     onEvent(ev)
+  }
+}
+
+/** The server refused our cursor as malformed (HTTP 400). Retrying with the
+ *  same cursor can only fail again, so the caller must drop it and replay. */
+export class SessionCursorRejected extends Error {
+  constructor(message = "invalid session event cursor") {
+    super(message)
+    this.name = "SessionCursorRejected"
+  }
+}
+
+/**
+ * Subscribe to the cursor-aware (v2) session event stream.
+ *
+ * `cursor` resumes the durable history where the caller left off; omit it for a
+ * full replay. An OLD server ignores `?stream=v2` and answers with plain
+ * AgentEvent frames — those surface as `{ kind: "legacy" }` frames so the
+ * caller can fall back to full-replay reconciliation.
+ */
+export async function openSessionEventStream(
+  baseUrl: string,
+  sessionId: string,
+  onFrame: (frame: SessionStreamFrame) => void,
+  opts: { cursor?: string | null; signal?: AbortSignal; onOpen?: () => void } = {},
+): Promise<void> {
+  const { cursor, signal, onOpen } = opts
+  const url = baseUrl + sessionEventsUrl(sessionId, cursor ? { cursor } : undefined)
+  const res = await fetch(url, { signal })
+  if (res.status === 400 && cursor) {
+    const body = await res.json().catch(() => null) as { error?: string } | null
+    throw new SessionCursorRejected(body?.error || undefined)
+  }
+  if (!res.ok) throw new Error(`events stream failed (${res.status})`)
+  onOpen?.()
+  for await (const frame of readSessionEventStream(res)) {
+    if (signal?.aborted) break
+    onFrame(frame)
   }
 }
 

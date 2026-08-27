@@ -1,12 +1,13 @@
 // Coalesce a session's SSE event stream into React commits.
 //
-// WHY: the protocol has no replay cursor — every attach (and every reconnect)
-// streams the session's whole history from event zero before live events
-// resume. Reducing that history is cheap (~6ms for an 11k-event session);
-// COMMITTING it to React once per event is not, because each commit re-projects
-// and re-renders the entire transcript. That is what made switching to a
-// session which had been running in the background sit on a stale projection
-// for many seconds before snapping to its finished state.
+// WHY: a legacy attach (and every reconnect to an old server) still streams
+// the session's whole history from event zero before live events resume. The
+// v2 cursor stream skips that, but live tokens still arrive faster than React
+// should commit. Reducing is cheap (~6ms for an 11k-event session); COMMITTING
+// to React once per event is not, because each commit re-projects and
+// re-renders the entire transcript. That is what made switching to a session
+// which had been running in the background sit on a stale projection for many
+// seconds before snapping to its finished state.
 //
 // So the split is: reduce EAGERLY (callers still see every event, in order, and
 // their side effects still fire per event), publish on a CADENCE.
@@ -97,6 +98,22 @@ export class TranscriptCoalescer {
   push(ev: AgentEvent): TranscriptState {
     if (this.disposed) return this.working
     this.working = reduce(this.working, ev)
+    this.dirty = true
+    if (this.held) this.armHoldTimers()
+    else this.schedule()
+    return this.working
+  }
+
+  /**
+   * Adopt an externally-reduced projection and publish it on the cadence.
+   *
+   * The v2 cursor stream reduces its own projections (see sessionStream.ts:
+   * visible and durable are separate), so it hands finished states here rather
+   * than pushing events through `push`.
+   */
+  publish(state: TranscriptState): TranscriptState {
+    if (this.disposed) return this.working
+    this.working = state
     this.dirty = true
     if (this.held) this.armHoldTimers()
     else this.schedule()

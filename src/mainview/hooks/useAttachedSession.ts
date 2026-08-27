@@ -24,14 +24,15 @@
 // used, which is what let the move be byte-for-byte rather than a rewrite.
 import { useCallback, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react"
 import type { AgentEvent, GoalSnapshot, ModeSpec } from "@chunky/protocol"
-import { getGoal, openEventStream, type AppConfig } from "../lib/api"
+import { getGoal, openSessionEventStream, SessionCursorRejected, type AppConfig } from "../lib/api"
+import { SessionStreamMachine, v2CacheNeedsLegacyRebuild, type SessionStreamFrame, type StreamStep } from "../lib/sessionStream"
 import { getSessionAgentConfig, type AdvisorStatus, type SessionAgentConfig, type SidekickConfig } from "../lib/configApi"
 import { initialState, type TranscriptState } from "../lib/transcript"
 import { isPersistedSessionEvent, rebuildTranscript, SessionCache } from "../lib/sessionCache"
 import type { PendingSend } from "../lib/pendingSends"
 import { TranscriptCoalescer } from "../lib/replayCoalescer"
 import { ReplayReconciler } from "../lib/replayReconciler"
-import { isIntentionalAbort, reconnectDelay, sleep } from "../lib/reconnect"
+import { installVisibilityWake, isIntentionalAbort, reconnectDelay, ReconnectWaker, sleepUntilWoken } from "../lib/reconnect"
 import { reresolveConnection, shouldReresolve } from "../lib/reresolve"
 import { consumeApiKeyRequest } from "../lib/apiKeyRequest"
 import { consumeAppOpenUrl } from "../lib/browserNav"
@@ -143,6 +144,8 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         goal: goalRef.current,
         repoId: activeRepoIdRef.current,
         events: sessionCache.current.get(previousId)?.events ?? [],
+        durable: sessionCache.current.get(previousId)?.durable ?? null,
+        cursor: sessionCache.current.get(previousId)?.cursor ?? null,
       })
     }
     stopStream()
@@ -171,7 +174,27 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     // Re-read on every (re)connection: a rebuild replaces the entry, and
     // remember() extends whichever one is current.
     let cached = sessionCache.current.get(id)
-    const replay = new ReplayReconciler(cached?.events)
+    // LEGACY servers only: recognise our own past in a from-zero full replay.
+    let replay = new ReplayReconciler(cached?.events)
+
+    // ---- v2 (cursor) stream state ----
+    // The COMMITTED durable shadow and the cursor it sits at. Every connection
+    // attempt starts from these and, unless it reaches `replay-end`, leaves
+    // them (and the screen) exactly as it found them. That discard is what
+    // makes an interrupted reconnect unable to age the visible transcript.
+    let committedDurable: TranscriptState | null = cached?.durable ?? null
+    let committedCursor: string | null = cached?.cursor ?? null
+    let machine: SessionStreamMachine | null = null
+    /** This attempt is talking to a v2 server (frames, not bare events). */
+    let v2 = false
+    /** The first legacy frame after a v2 cache requires a full legacy rebuild;
+     *  its cache has a cursor/shadow, not the persisted event prefix the old
+     *  reconciler needs to recognise a from-zero replay. */
+    let legacyAttemptStarted = false
+    /** Cuts a reconnect backoff short when the app comes back to the front. */
+    const waker = new ReconnectWaker()
+    let reconnecting = false
+    const removeVisibilityWake = installVisibilityWake(waker, () => reconnecting)
 
     // The projection is published on a cadence, NOT once per event: the server
     // replays the whole history on every attach, and committing that per event
@@ -196,7 +219,10 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         settleTimer.current = null
       }
     }
-    attachTimers.current = clearCatchUpTimers
+    attachTimers.current = () => {
+      clearCatchUpTimers()
+      removeVisibilityWake()
+    }
     /** Replay is over: publish everything held back and stop deferring to the
      *  session summary for this session's busy state. */
     const finishCatchUp = () => {
@@ -210,7 +236,9 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     /** Each replayed event pushes the settle out; the cap is what stops a
      *  session that keeps streaming from claiming to replay forever. */
     const noteReplayProgress = () => {
-      if (!catchUpActive || gen !== attachGen.current) return
+      // The v2 stream has an explicit replay boundary; only the legacy
+      // full-replay path has to guess with timers.
+      if (v2 || !catchUpActive || gen !== attachGen.current) return
       if (catchUpQuiet != null) window.clearTimeout(catchUpQuiet)
       catchUpQuiet = window.setTimeout(finishCatchUp, REPLAY_SETTLE_MS)
       settleTimer.current = catchUpQuiet
@@ -234,6 +262,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
 
     const onOpen = () => {
       if (gen !== attachGen.current) return
+      reconnecting = false
       setConnectionState("connected")
       setAppMode("live")
       // Arms the settle even for a session with NO history, whose stream sends
@@ -242,6 +271,8 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     }
 
     let attempt = 0
+    /** LEGACY path: full replay from event zero, reconciled against the cached
+     *  persisted prefix. Unchanged — old servers still land here. */
     const onEvent = (ev: AgentEvent) => {
       if (gen !== attachGen.current) return
       attempt = 0
@@ -276,11 +307,11 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       // order, exactly as they did when every event committed on its own.
       if (!isPersistedSessionEvent(ev)) {
         if (ev.type === "session.rewound") {
-          sessionCache.current.delete(id)
           // A rewind throws recent turns away, so the baseline any in-flight
           // optimistic row was measured against no longer describes this
-          // history. Drop them here rather than leave a row that can never be
-          // matched (the reattach below keeps same-session rows otherwise).
+          // history. Drop them here, but retain the last committed projection
+          // and cursor: the reattach keeps that screen visible until legacy
+          // divergence settles or v2 replay-reset reaches replay-end.
           setPendingSends([])
           void attachSession(baseUrl, id)
           return
@@ -315,6 +346,125 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       }
     }
 
+    /** v2: write the projection on screen plus the durable shadow/cursor the
+     *  next reconnect will resume from. */
+    const cacheVisible = (nextTranscript: TranscriptState) => {
+      sessionCache.current.update(id, {
+        transcript: nextTranscript,
+        goal: goalRef.current,
+        repoId: activeRepoIdRef.current,
+        durable: machine?.durable ?? committedDurable,
+        cursor: machine?.cursor ?? committedCursor,
+        events: [],
+      })
+    }
+
+    /** v2: act on one decision from the stream machine. */
+    const applyStep = (step: StreamStep): void => {
+      if (step.kind === "legacy" || step.kind === "reset") return
+      if (step.kind === "commit") {
+        // Atomic: the shadow, the cursor and the screen move together, and only
+        // here. Durable now covers everything the live overlay had.
+        committedDurable = step.durable
+        committedCursor = step.cursor
+        live.replaceState(step.visible)
+        sessionCache.current.commitCursor(id, {
+          transcript: step.visible,
+          durable: step.durable,
+          cursor: step.cursor,
+          goal: goalRef.current,
+          repoId: activeRepoIdRef.current,
+        })
+        finishCatchUp()
+        return
+      }
+      const ev = step.event
+      if (step.kind === "durable") {
+        // Shadow-only: replay history, or the coalesced delta whose raw tokens
+        // are already on screen. Never touches the visible projection.
+        if (ev.type === "goal.update") {
+          goalRef.current = ev.goal
+          setGoalState(ev.goal)
+          sessionCache.current.update(id, { goal: ev.goal })
+        }
+        if (step.phase === "live") {
+          committedDurable = machine?.durable ?? committedDurable
+          committedCursor = machine?.cursor ?? committedCursor
+          sessionCache.current.update(id, { durable: committedDurable, cursor: committedCursor })
+        }
+        return
+      }
+      // Visible. Live-only events are claimed here, in stream order, exactly as
+      // on the legacy path — a claimed event must never become a transcript item.
+      if (!isPersistedSessionEvent(ev)) {
+        if (ev.type === "session.rewound") {
+          // Keep the committed projection/cursor visible through the rewind
+          // rebuild; the new generation produces replay-reset and swaps only
+          // at replay-end. Only optimistic sends are invalid after truncation.
+          setPendingSends([])
+          void attachSession(baseUrl, id)
+          return
+        }
+        if (ev.type === "mode.applied") {
+          cacheVisible(machine?.visible ?? live.state)
+          modeAppliedRef.current(ev.name, ev.spec, ev.sessionId)
+          return
+        }
+        if (consumeAppOpenUrl(ev)) { cacheVisible(machine?.visible ?? live.state); return }
+        if (consumeApiKeyRequest(ev)) { cacheVisible(machine?.visible ?? live.state); return }
+      }
+      const nextTranscript = machine ? machine.reduceVisible(ev) : live.push(ev)
+      if (machine) live.publish(nextTranscript)
+      cacheVisible(nextTranscript)
+      if (ev.type === "goal.update") {
+        goalRef.current = ev.goal
+        setGoalState(ev.goal)
+        sessionCache.current.update(id, { goal: ev.goal })
+      }
+      if (ev.type === "session.status" && ev.status === "idle") {
+        void refreshSessions(baseUrl, activeRepoIdRef.current).catch(() => {})
+      }
+    }
+
+    const onFrame = (frame: SessionStreamFrame) => {
+      if (gen !== attachGen.current) return
+      attempt = 0
+      if (frame.kind === "legacy") {
+        // Old server: it ignored ?stream=v2 and is replaying from event zero.
+        // A cache produced by v2 has no legacy event prefix, so reset the
+        // working projection before consuming the first history event rather
+        // than appending the entire replay to the already-visible transcript.
+        if (!legacyAttemptStarted) {
+          legacyAttemptStarted = true
+          if (v2CacheNeedsLegacyRebuild({ cursor: committedCursor, durable: committedDurable })) {
+            replay = new ReplayReconciler()
+            committedDurable = null
+            committedCursor = null
+            live.replaceState(initialState)
+            live.hold()
+            sessionCache.current.set(id, {
+              transcript: live.state,
+              goal: goalRef.current,
+              repoId: activeRepoIdRef.current,
+              events: [],
+              durable: null,
+              cursor: null,
+            })
+          }
+        }
+        // Route the whole attempt through the reconciler + settle timers.
+        onEvent(frame.event)
+        return
+      }
+      if (!v2) {
+        v2 = true
+        // replay-end, not a quiet timer, ends catch-up from here on.
+        clearCatchUpTimers()
+      }
+      if (!machine) return
+      applyStep(machine.handle(frame))
+    }
+
     /** After a failed attachment: when the evidence says the server is gone or
      *  retiring (not just a hiccup), resolve the connection again and reattach
      *  to whatever is serving this workspace now. Returns true once this loop
@@ -335,35 +485,64 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     for (;;) {
       try {
         if (gen !== attachGen.current) return
+        reconnecting = attempt > 0
         setConnectionState(attempt === 0 ? "connecting" : "reconnecting")
-        await openEventStream(baseUrl, id, onEvent, ac.signal, onOpen)
+        // One machine per attempt, built from COMMITTED state only: if this
+        // attempt dies before replay-end, its working shadow dies with it.
+        v2 = false
+        legacyAttemptStarted = false
+        machine = new SessionStreamMachine({
+          visible: live.state,
+          durable: committedDurable,
+          cursor: committedCursor,
+        })
+        await openSessionEventStream(baseUrl, id, onFrame, {
+          cursor: machine.requestCursor,
+          signal: ac.signal,
+          onOpen,
+        })
         if (ac.signal.aborted || gen !== attachGen.current) return
         finishCatchUp()
+        reconnecting = true
         setConnectionState("reconnecting")
         attempt += 1
-        await sleep(reconnectDelay(attempt - 1), ac.signal)
+        await sleepUntilWoken(reconnectDelay(attempt - 1), ac.signal, waker)
         if (await handOverToReplacement()) return
       } catch (err) {
         if (isIntentionalAbort(err, ac.signal) || gen !== attachGen.current) return
+        if (err instanceof SessionCursorRejected) {
+          // The server refuses this cursor outright (400). Keeping it would
+          // fail identically forever, so forget the resume point and take a
+          // full replay — the screen still keeps its projection until the next
+          // replay-end commits.
+          committedCursor = null
+          committedDurable = null
+          sessionCache.current.update(id, { durable: null, cursor: null })
+        }
         attempt += 1
+        reconnecting = true
         setConnectionState("reconnecting")
         // Publish whatever the working state holds: the stream is gone, so
-        // nothing else is going to arrive to trigger a cadence flush.
+        // nothing else is going to arrive to trigger a cadence flush. On the v2
+        // path this is always the last COMMITTED projection — a replay in
+        // flight never touched it.
         finishCatchUp()
         try {
-          await sleep(reconnectDelay(attempt), ac.signal)
+          await sleepUntilWoken(reconnectDelay(attempt), ac.signal, waker)
         } catch {
           return
         }
         if (await handOverToReplacement(err)) return
       }
       if (ac.signal.aborted || gen !== attachGen.current) return
-      // The protocol has no since/offset cursor: a new stream always starts at
-      // history event zero. Keep the current cached projection visible and
-      // discard its matching persisted prefix on the next connection.
+      // Keep the current projection on screen while the next connection
+      // resumes: v2 from the committed cursor, legacy by discarding the
+      // matching persisted prefix of another full replay.
       setTranscriptLoading(false)
       cached = sessionCache.current.get(id)
       replay.reset(cached?.events)
+      committedDurable = cached?.durable ?? committedDurable
+      committedCursor = cached?.cursor ?? committedCursor
       catchUpActive = true
       setCatchingUp(true)
     }

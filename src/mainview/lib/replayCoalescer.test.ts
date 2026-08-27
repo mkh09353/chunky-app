@@ -170,4 +170,17 @@ describe("TranscriptCoalescer", () => {
     expect(second.threads.main!.items).toHaveLength(2)
     expect(second).toBe(coalescer.state)
   })
+
+  test("publish adopts an externally-reduced projection on the cadence", () => {
+    const { clock, emits, coalescer } = harness()
+    coalescer.push({ type: "message.user", text: "one" })
+    expect(emits).toHaveLength(1)
+    const next = reduce(coalescer.state, { type: "message.user", text: "two" })
+    const published = coalescer.publish(next)
+    expect(published).toBe(coalescer.state)
+    expect(published.threads.main!.items).toHaveLength(2)
+    expect(emits).toHaveLength(1)
+    clock.advance(50)
+    expect(emits.at(-1)).toEqual(next)
+  })
 })

@@ -49,6 +49,24 @@ describe("SessionCache", () => {
     expect(shadow).toEqual(rebuildTranscript(replay))
     expect(shadow.threads.main!.items).toHaveLength(2)
   })
+
+  test("commitCursor stores durable+cursor and drops the legacy events prefix", () => {
+    const cache = new SessionCache()
+    const transcript = rebuildTranscript([{ type: "message.user", text: "hello" }])
+    cache.set("s", { transcript: initialState, goal: null, repoId: "repo", events: [{ type: "message.user", text: "stale" }] })
+    cache.commitCursor("s", {
+      transcript,
+      durable: transcript,
+      cursor: "cursor-1",
+      goal: null,
+      repoId: "repo",
+    })
+    const entry = cache.get("s")!
+    expect(entry.events).toEqual([])
+    expect(entry.cursor).toBe("cursor-1")
+    expect(entry.durable).toEqual(transcript)
+    expect(entry.transcript).toEqual(transcript)
+  })
 })
 
 describe("ports.changed is live-only and session-scoped", () => {

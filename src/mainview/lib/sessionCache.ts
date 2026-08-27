@@ -20,8 +20,14 @@ export interface CachedSession {
   transcript: TranscriptState
   goal: GoalSnapshot | null
   repoId: string | null
-  /** Persisted event prefix used to discard the server's unavoidable full replay. */
+  /** LEGACY servers only: persisted event prefix used to discard the server's
+   *  unavoidable full replay (see replayReconciler.ts). The v2 cursor stream
+   *  replaces it with `durable` + `cursor`. */
   events: AgentEvent[]
+  /** v2: the durable shadow projection — exact state at `cursor`. */
+  durable?: TranscriptState | null
+  /** v2: encoded replay cursor this session's durable shadow sits at. */
+  cursor?: string | null
 }
 
 /** Small in-memory LRU for projections that would otherwise be rebuilt from SSE history. */
@@ -47,6 +53,23 @@ export class SessionCache {
   update(sessionId: string, update: Partial<CachedSession>): void {
     const current = this.get(sessionId)
     if (current) this.set(sessionId, { ...current, ...update })
+  }
+
+  /** v2: commit the durable shadow and the cursor it sits at, atomically with
+   *  the projection that is now on screen. The legacy `events` prefix is
+   *  dropped: a cursor makes recognising our own past unnecessary. */
+  commitCursor(
+    sessionId: string,
+    entry: { transcript: TranscriptState; durable: TranscriptState; cursor: string; goal: GoalSnapshot | null; repoId: string | null },
+  ): void {
+    this.set(sessionId, {
+      transcript: entry.transcript,
+      goal: entry.goal,
+      repoId: entry.repoId,
+      events: [],
+      durable: entry.durable,
+      cursor: entry.cursor,
+    })
   }
 
   /** Updates the projection and appends only server-persisted replay events. */
