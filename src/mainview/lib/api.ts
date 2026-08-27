@@ -596,6 +596,154 @@ export async function stopDelegate(
   }
 }
 
+/**
+ * Live status for a session's delegated runs (GET /api/sessions/:id/delegates).
+ *
+ * The SSE transcript is still the source of truth for what a delegate DID; this
+ * endpoint answers the two things the stream cannot: how long a run has
+ * actually been going (the protocol carries no start time on `thread.spawn`, so
+ * lib/useRunClock can only time runs it watched start), and whether a run we
+ * never saw settle is in fact finished.
+ *
+ * Same three-way result and the same literal path as the usage history above:
+ * the route landed in the server at 0.3.63 and `@chunky/protocol` has no ROUTES
+ * entry for it, so an older server must degrade to `unsupported` at runtime
+ * rather than fail this build.
+ *
+ * 404 is read exactly the way stop-delegate reads it: a body the server could
+ * not put JSON on is the route missing (unsupported), while a JSON `{ error }`
+ * is a capable server refusing THIS call (the sessions router 404s an unknown
+ * or archived session id before reaching the delegates branch) — an error for
+ * this request only, which must not retire the endpoint.
+ */
+export interface DelegateRunStatus {
+  kind: "sidekick" | "spawn_thread" | "workflow"
+  /** Detached run id, when this run has one. */
+  runId?: string
+  /** The delegate's own thread id — how a RunRecord is matched to this row. */
+  threadId: string
+  seat?: string
+  title: string
+  status: "running" | "completed" | "failed" | "cancelled"
+  elapsedMs: number
+  result?: string
+}
+
+export type DelegatesResult =
+  | { status: "ok"; runs: DelegateRunStatus[] }
+  | { status: "unsupported" }
+  | { status: "error"; message: string }
+
+export interface DelegatesQuery {
+  runId?: string
+  seat?: string
+  /** Long-poll budget, when the caller wants the server to wait for a change. */
+  timeoutMs?: number
+}
+
+const DELEGATE_KINDS = new Set(["sidekick", "spawn_thread", "workflow"])
+const DELEGATE_STATES = new Set(["running", "completed", "failed", "cancelled"])
+
+/** One wire row → a typed status, or null when it is not one.
+ *
+ *  Malformed rows are dropped rather than failing the whole snapshot: a status
+ *  poll is an enrichment, and one unknown row must not blank the others. */
+function toDelegateRunStatus(row: unknown): DelegateRunStatus | null {
+  if (typeof row !== "object" || row === null) return null
+  const r = row as Record<string, unknown>
+  const threadId = r.thread_id
+  const kind = r.kind
+  const state = r.status
+  if (typeof threadId !== "string" || !threadId) return null
+  if (typeof kind !== "string" || !DELEGATE_KINDS.has(kind)) return null
+  if (typeof state !== "string" || !DELEGATE_STATES.has(state)) return null
+  const elapsed = typeof r.elapsed_ms === "number" && Number.isFinite(r.elapsed_ms) ? r.elapsed_ms : 0
+  return {
+    kind: kind as DelegateRunStatus["kind"],
+    threadId,
+    status: state as DelegateRunStatus["status"],
+    title: typeof r.title === "string" ? r.title : "",
+    elapsedMs: elapsed,
+    ...(typeof r.run_id === "string" && r.run_id ? { runId: r.run_id } : {}),
+    ...(typeof r.seat === "string" && r.seat ? { seat: r.seat } : {}),
+    ...(typeof r.result === "string" ? { result: r.result } : {}),
+  }
+}
+
+/** Classify one delegates HTTP result. Exported for tests: the status/body
+ *  matrix is the whole compatibility contract. */
+export function classifyDelegatesResponse(status: number, body: unknown): DelegatesResult {
+  if (status === 501) return { status: "unsupported" }
+  const json = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : null
+  if (status === 404 || status === 405) {
+    // A JSON error body means a server that knows this route and is refusing
+    // this particular call; anything else is the route itself being absent.
+    if (json && typeof json.error === "string" && json.error) {
+      return { status: "error", message: json.error }
+    }
+    return { status: "unsupported" }
+  }
+  if (status < 200 || status >= 300) {
+    const message = json?.error
+    return {
+      status: "error",
+      message:
+        typeof message === "string" && message ? message : `delegate status failed (${status})`,
+    }
+  }
+  // A 2xx with no usable body is "nothing running", not a crash.
+  const rows = Array.isArray(json?.runs) ? (json.runs as unknown[]) : []
+  const runs: DelegateRunStatus[] = []
+  for (const row of rows) {
+    const parsed = toDelegateRunStatus(row)
+    if (parsed) runs.push(parsed)
+  }
+  return { status: "ok", runs }
+}
+
+/**
+ * Is the delegates endpoint worth asking `baseUrl` about?
+ *
+ * Same rule as `stopDelegateAvailable`: support is remembered as the ONE base
+ * URL that answered "no such endpoint", so a reconnect or an in-place upgrade
+ * onto another base URL is a fresh start with no reset to remember. Nothing is
+ * persisted.
+ */
+export function delegatesAvailable(
+  baseUrl: string | null | undefined,
+  unsupportedOn: string | null,
+): boolean {
+  if (!baseUrl) return false
+  return unsupportedOn !== baseUrl
+}
+
+function delegatesQueryString(query: DelegatesQuery): string {
+  const params = new URLSearchParams()
+  if (query.runId) params.set("run_id", query.runId)
+  if (query.seat) params.set("seat", query.seat)
+  if (query.timeoutMs != null && Number.isFinite(query.timeoutMs)) {
+    params.set("timeout_ms", String(Math.trunc(query.timeoutMs)))
+  }
+  const qs = params.toString()
+  return qs ? `?${qs}` : ""
+}
+
+export async function getSessionDelegates(
+  baseUrl: string,
+  sessionId: string,
+  query: DelegatesQuery = {},
+): Promise<DelegatesResult> {
+  if (!baseUrl) return { status: "error", message: "Chunky server is unavailable" }
+  try {
+    const res = await fetch(
+      `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/delegates${delegatesQueryString(query)}`,
+    )
+    return classifyDelegatesResponse(res.status, await res.json().catch(() => null))
+  } catch (err) {
+    return { status: "error", message: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   const body = await res.json().catch(() => ({})) as T & { error?: string }

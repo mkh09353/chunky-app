@@ -46,6 +46,14 @@ import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { applyRunAnchors } from "~/lib/mapTranscript"
 import { liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
 import { useRunClock } from "~/lib/useRunClock"
+import {
+  mergeDelegateStatus,
+  mergeIsEmpty,
+  mergedAnchors,
+  mergedRunRecords,
+  mergedViews,
+} from "~/lib/delegateStatus"
+import { useDelegateStatus } from "~/hooks/useDelegateStatus"
 import type { RunRecord, TranscriptState } from "~/lib/transcript"
 
 /** Top chrome strip: repo tabs + actions. */
@@ -290,6 +298,7 @@ export function ChatView({
   foldAll = false,
   compacted = 0,
   onStopRun,
+  delegateStatus,
 }: {
   thread: Thread
   project?: Project
@@ -307,6 +316,16 @@ export function ChatView({
    *  mode, and dropped for the rest of the session once a server has said it
    *  has no such endpoint — which hides the Stop control entirely. */
   onStopRun?: (runId: string, target: StopDelegateRequest) => void | Promise<void>
+  /** Where to ask for live delegate status, when there is a live session and
+   *  the server still claims the endpoint. Omitted in demo/offline mode and
+   *  dropped for good once a server 404s it — at which point every pill renders
+   *  exactly as it did before this existed. */
+  delegateStatus?: {
+    baseUrl: string
+    sessionId: string
+    /** Stable identity, please: it is a polling effect dependency. */
+    onUnsupported: (baseUrl: string) => void
+  }
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -462,25 +481,63 @@ export function ChatView({
   }, [followBottom])
 
   // Run state → anchors: which pill owns which run, live or settled.
-  const anchors = useMemo(
+  const streamAnchors = useMemo(
     () => (transcript ? runAnchors(transcript) : new Map<number, RunAnchor>()),
     [transcript],
   )
-  const runIndex = useMemo(
+  const streamRunIndex = useMemo(
     () => (transcript ? runsById(transcript) : new Map<string, RunRecord>()),
     [transcript],
+  )
+  // Live delegate streams, keyed by run id, handed to the tool cards that
+  // spawned them (Message → ToolCard → LiveRunSection). Settled runs are not in
+  // here, which is what makes a finished card go back to its plain self.
+  const streamViews = useMemo(() => liveRunViews(transcript), [transcript])
+
+  // Server-reported status for those runs, polled ONLY while some run is live
+  // (lib/delegateStatus). It sharpens elapsed — the stream carries no start
+  // time — and settles a run whose `thread.status` we never saw. It can never
+  // revive a run the stream already settled, and it never touches the reduced
+  // transcript: everything below is a fresh projection.
+  const delegateSnapshot = useDelegateStatus({
+    baseUrl: delegateStatus?.baseUrl ?? null,
+    sessionId: delegateStatus?.sessionId ?? null,
+    liveRunCount: streamViews.size,
+    ...(delegateStatus ? { onUnsupported: delegateStatus.onUnsupported } : {}),
+  })
+  const delegateMerge = useMemo(
+    () => mergeDelegateStatus({ runs: streamRunIndex, snapshot: delegateSnapshot }),
+    [streamRunIndex, delegateSnapshot],
+  )
+  // Nothing to apply (the usual case, and always when the endpoint is absent)
+  // keeps the original map identities, so no memo below it recomputes.
+  const anchors = useMemo(
+    () => (mergeIsEmpty(delegateMerge) ? streamAnchors : mergedAnchors(streamAnchors, delegateMerge)),
+    [streamAnchors, delegateMerge],
+  )
+  const runIndex = useMemo(
+    () =>
+      mergeIsEmpty(delegateMerge) ? streamRunIndex : mergedRunRecords(streamRunIndex, delegateMerge),
+    [streamRunIndex, delegateMerge],
+  )
+  const liveViews = useMemo(
+    () => (mergeIsEmpty(delegateMerge) ? streamViews : mergedViews(streamViews, delegateMerge)),
+    [streamViews, delegateMerge],
   )
   const messages = useMemo(
     () => applyRunAnchors(thread.messages, anchors),
     [thread.messages, anchors],
   )
   // Keyed by session: the clock lives in a module-level store, so a delegate
-  // left running survives switching away and back (lib/useRunClock).
-  const elapsedOf = useRunClock(transcript?.runs, thread.id)
-  // Live delegate streams, keyed by run id, handed to the tool cards that
-  // spawned them (Message → ToolCard → LiveRunSection). Settled runs are not in
-  // here, which is what makes a finished card go back to its plain self.
-  const liveViews = useMemo(() => liveRunViews(transcript), [transcript])
+  // left running survives switching away and back (lib/useRunClock). The
+  // server's own elapsed wins when it has one — the local clock can only ever
+  // time from first sight.
+  const clockElapsedOf = useRunClock(transcript?.runs, thread.id)
+  const elapsedOf = useCallback(
+    (run: RunRecord | undefined): number | undefined =>
+      run ? (delegateMerge.elapsedMs.get(run.id) ?? clockElapsedOf(run)) : undefined,
+    [delegateMerge, clockElapsedOf],
+  )
 
   // A turn ends when the session goes running → idle: `session.status` from the
   // SSE reducer (transcript.status), or — in demo/offline mode, where there is

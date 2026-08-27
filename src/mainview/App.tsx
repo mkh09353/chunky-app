@@ -59,6 +59,7 @@ import {
   fetchServerInfo,
   fetchServerRetiring,
   interruptSession,
+  delegatesAvailable,
   stopDelegate,
   stopDelegateAvailable,
   forkSession, getGoal, getRewindPoints, getScoreboard, getUsage, renameSession, rewindSession, setGoal, shipSession,
@@ -437,6 +438,10 @@ export function App() {
    *  another server — a reconnect, or an in-place upgrade that swaps baseUrl
    *  without remounting — brings the control back by itself. Never persisted. */
   const [stopDelegateUnsupportedOn, setStopDelegateUnsupportedOn] = useState<string | null>(null)
+  /** Same idea, same lifetime, for GET .../delegates: the ONE base URL that has
+   *  no delegate-status endpoint. Polling stops there and nowhere else, and a
+   *  move onto another server starts asking again. */
+  const [delegatesUnsupportedOn, setDelegatesUnsupportedOn] = useState<string | null>(null)
   // Superseded servers still running after an upgrade. Dismissal is in-memory
   // on purpose: it should come back next launch if they are still there.
   const [oldServers, setOldServers] = useState<ServerInspection | null>(null)
@@ -2336,6 +2341,13 @@ export function App() {
     [config, sessionId],
   )
 
+  /** This server has no delegate-status endpoint. Recorded once, per base URL,
+   *  and silently: unlike Stop there is no control to explain away — the pills
+   *  simply go back to the stream-only picture they had before. */
+  const handleDelegatesUnsupported = useCallback((baseUrl: string) => {
+    setDelegatesUnsupportedOn(baseUrl)
+  }, [])
+
   const handleStop = useCallback(() => {
     if (!live) {
       stopDemoStream()
@@ -3193,6 +3205,18 @@ export function App() {
                   sessionId &&
                   stopDelegateAvailable(config?.baseUrl, stopDelegateUnsupportedOn)
                     ? { onStopRun: handleStopRun }
+                    : {})}
+                  {...(live &&
+                  sessionId &&
+                  config?.baseUrl &&
+                  delegatesAvailable(config.baseUrl, delegatesUnsupportedOn)
+                    ? {
+                        delegateStatus: {
+                          baseUrl: config.baseUrl,
+                          sessionId,
+                          onUnsupported: handleDelegatesUnsupported,
+                        },
+                      }
                     : {})}
                 />
               </FileLinkProvider>
