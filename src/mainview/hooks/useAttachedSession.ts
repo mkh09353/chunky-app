@@ -38,6 +38,7 @@ import { consumeApiKeyRequest } from "../lib/apiKeyRequest"
 import { consumeAppOpenUrl } from "../lib/browserNav"
 import { rememberLastSession } from "../lib/desktopState"
 import type { SessionSummary } from "../lib/api"
+import { bootPerf } from "../lib/bootPerf"
 
 export type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
 export type AppMode = "live" | "demo"
@@ -128,7 +129,8 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
   }, [])
 
   // ---- Live: attach SSE (abort on switch, reconcile cached projection with full replay) ----
-  const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean }) => {
+  const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean; boot?: boolean }) => {
+    const firstBootAttach = bootPerf.beginFirstAttach(opts?.boot === true)
     const previousId = sessionIdRef.current
     // Optimistic rows belong to the session they were typed into. A reattach to
     // the SAME session (reconnect, rewind, server hand-over) keeps them: their
@@ -232,6 +234,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       live.flush()
       setCatchingUp(false)
       setTranscriptLoading(false)
+      bootPerf.settleFirstAttach(firstBootAttach)
     }
     /** Each replayed event pushes the settle out; the cap is what stops a
      *  session that keeps streaming from claiming to replay forever. */
@@ -262,6 +265,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
 
     const onOpen = () => {
       if (gen !== attachGen.current) return
+      bootPerf.noteStreamOpen(firstBootAttach)
       reconnecting = false
       setConnectionState("connected")
       setAppMode("live")
@@ -275,6 +279,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
      *  persisted prefix. Unchanged — old servers still land here. */
     const onEvent = (ev: AgentEvent) => {
       if (gen !== attachGen.current) return
+      if (catchUpActive) bootPerf.noteReplayEvent(firstBootAttach)
       attempt = 0
       noteReplayProgress()
       // The server always sends history from event zero and exposes no replay
@@ -462,6 +467,9 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         clearCatchUpTimers()
       }
       if (!machine) return
+      if (frame.kind === "event" && machine.phase === "replay") {
+        bootPerf.noteReplayEvent(firstBootAttach)
+      }
       applyStep(machine.handle(frame))
     }
 

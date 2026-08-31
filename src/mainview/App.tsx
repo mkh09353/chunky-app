@@ -128,6 +128,7 @@ import {
   type ShelfPin,
 } from "./lib/sessionShelf"
 import { useMinuteClock } from "./hooks/useMinuteClock"
+import { bootPerf } from "./lib/bootPerf"
 import type { CloneStatus } from "./components/RepoTabs"
 import { asScoreboard, asUsage, compactTokens, type ScoreboardResponse, type UsageResponse } from "./lib/stats"
 import {
@@ -972,8 +973,10 @@ export function App() {
 
   /** Load sessions for a repo and attach last/newest/created session. */
   const openRepoThreads = useCallback(
-    async (baseUrl: string, repoId: string | null) => {
-      const list = await refreshSessions(baseUrl, repoId)
+    async (baseUrl: string, repoId: string | null, boot = false) => {
+      const list = boot
+        ? await bootPerf.measure("boot listSessions", () => refreshSessions(baseUrl, repoId))
+        : await refreshSessions(baseUrl, repoId)
       if (repoId != null && repoId !== activeRepoIdRef.current) return
 
       const remembered = lastSessionByRepo.current[repoId ?? NO_REPO_SCOPE]
@@ -982,7 +985,7 @@ export function App() {
         list[0]?.sessionId
 
       if (pick) {
-        void attachSession(baseUrl, pick)
+        void attachSession(baseUrl, pick, boot ? { boot: true } : undefined)
         return
       }
 
@@ -990,7 +993,7 @@ export function App() {
         const created = await createSession(baseUrl, repoId, null, repoId === null ? "none" : undefined)
         if (repoId != null && repoId !== activeRepoIdRef.current) return
         await refreshSessions(baseUrl, repoId)
-        void attachSession(baseUrl, created.sessionId)
+        void attachSession(baseUrl, created.sessionId, boot ? { boot: true } : undefined)
       } catch (err) {
         setTranscriptLoading(false)
         setConnError(`Can't create a session: ${(err as Error).message}`)
@@ -1034,7 +1037,7 @@ export function App() {
         return
       }
 
-      const cfg = await loadConfig()
+      const cfg = await bootPerf.measure("config / connection resolved", () => loadConfig())
       // Setup is over the moment the connection resolves: stop listening (a
       // later background runtime upgrade must not repaint the boot banner) and
       // drop the line.
@@ -1052,10 +1055,12 @@ export function App() {
 
       try {
         const [info, reg, sel, rows] = await Promise.all([
-          fetchServerInfo(cfg.baseUrl),
-          listRepos(cfg.baseUrl).catch(() => null),
-          fetchModel(cfg.baseUrl),
-          listAllModels(cfg.baseUrl).catch(() => [] as ModelRow[]),
+          bootPerf.measure("fetch server info", () => fetchServerInfo(cfg.baseUrl)),
+          bootPerf.measure("list repositories", () => listRepos(cfg.baseUrl).catch(() => null)),
+          bootPerf.measure("fetch selected model", () => fetchModel(cfg.baseUrl)),
+          bootPerf.measure("fetch model catalog", () =>
+            listAllModels(cfg.baseUrl).catch(() => [] as ModelRow[]),
+          ),
         ])
         if (cancelled) return
 
@@ -1069,7 +1074,7 @@ export function App() {
 
         // Durable UI state (open tab + per-tab thread) lives in desktop.json,
         // not in the webview's storage, so it survives updates/reinstalls.
-        const ui = await loadDesktopUiState()
+        const ui = await bootPerf.measure("loadDesktopUiState", () => loadDesktopUiState())
         if (cancelled) return
         lastSessionByRepo.current = { ...ui.lastSessionByRepo }
 
@@ -1087,7 +1092,7 @@ export function App() {
           activeRepoIdRef.current = repoId
         }
 
-        await openRepoThreads(cfg.baseUrl, repoId)
+        await openRepoThreads(cfg.baseUrl, repoId, true)
       } catch (err) {
         if (cancelled) return
         setConnectionState("offline")
