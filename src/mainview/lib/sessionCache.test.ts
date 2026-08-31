@@ -67,6 +67,27 @@ describe("SessionCache", () => {
     expect(entry.durable).toEqual(transcript)
     expect(entry.transcript).toEqual(transcript)
   })
+
+  test("cursor commits preserve older-page metadata", () => {
+    const cache = new SessionCache()
+    cache.set("s", {
+      transcript: initialState,
+      goal: null,
+      repoId: "repo",
+      events: [],
+      olderPage: { before: "older", hasMore: true },
+      historyRows: [{ seq: 3, event: { type: "message.user", text: "tail" } }],
+    })
+    cache.commitCursor("s", {
+      transcript: initialState,
+      durable: initialState,
+      cursor: "stream",
+      goal: null,
+      repoId: "repo",
+    })
+    expect(cache.get("s")?.olderPage).toEqual({ before: "older", hasMore: true })
+    expect(cache.get("s")?.historyRows?.map((row) => row.seq)).toEqual([3])
+  })
 })
 
 describe("ports.changed is live-only and session-scoped", () => {

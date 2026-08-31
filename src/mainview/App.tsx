@@ -620,6 +620,8 @@ export function App() {
     transcriptRef,
     settleTimer,
     attachSession,
+    olderHistory,
+    loadOlderHistory,
     stopStream,
   } = useAttachedSession({
     sessionCache,
@@ -3206,6 +3208,8 @@ export function App() {
                   modelName={uiModel.name}
                   foldAll={foldThreads}
                   compacted={liveCompacted}
+                  {/* Older turns: only the live session pages history — the demo thread is whole. */
+                  ...(live ? { olderHistory, onLoadOlder: loadOlderHistory } : {})}
                   {...(live &&
                   sessionId &&
                   stopDelegateAvailable(config?.baseUrl, stopDelegateUnsupportedOn)

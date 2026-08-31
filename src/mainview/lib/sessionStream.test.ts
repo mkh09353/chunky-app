@@ -124,6 +124,23 @@ describe("v2 session stream: reconnect from a cursor", () => {
     expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
     expect(sizes[0]).toBe(size(durable))
   })
+
+  test("rebasing with an older page preserves the stream cursor and future suffix", () => {
+    const tail = rebuildTranscript(history.slice(2))
+    const cursor = encodeSessionEventCursor(at(4))
+    const machine = new SessionStreamMachine({ visible: tail, durable: tail, cursor })
+    const complete = rebuildTranscript(history)
+    machine.rebaseCommitted(complete)
+    expect(machine.requestCursor).toBe(cursor)
+    const screen = drive(machine, [
+      ev(4, { type: "message.user", text: "next" }),
+      end(5),
+    ])
+    expect(screen.visible).toEqual(rebuildTranscript([
+      ...history,
+      { type: "message.user", text: "next" },
+    ]))
+  })
 })
 
 describe("v2 session stream: an interrupted replay", () => {

@@ -23,8 +23,21 @@
 // The deps are destructured into locals with the SAME names the App bodies
 // used, which is what let the move be byte-for-byte rather than a rewrite.
 import { useCallback, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react"
-import type { AgentEvent, GoalSnapshot, ModeSpec } from "@chunky/protocol"
-import { getGoal, openSessionEventStream, SessionCursorRejected, type AppConfig } from "../lib/api"
+import {
+  encodeSessionEventCursor,
+  type AgentEvent,
+  type GoalSnapshot,
+  type ModeSpec,
+} from "@chunky/protocol"
+import {
+  fetchSessionHistory,
+  fetchSessionTodos,
+  getGoal,
+  openSessionEventStream,
+  SessionCursorRejected,
+  SessionHistoryRewritten,
+  type AppConfig,
+} from "../lib/api"
 import { SessionStreamMachine, v2CacheNeedsLegacyRebuild, type SessionStreamFrame, type StreamStep } from "../lib/sessionStream"
 import { getSessionAgentConfig, type AdvisorStatus, type SessionAgentConfig, type SidekickConfig } from "../lib/configApi"
 import { initialState, type TranscriptState } from "../lib/transcript"
@@ -39,6 +52,18 @@ import { consumeAppOpenUrl } from "../lib/browserNav"
 import { rememberLastSession } from "../lib/desktopState"
 import type { SessionSummary } from "../lib/api"
 import { bootPerf } from "../lib/bootPerf"
+import {
+  appendMonotonicHistoryRow,
+  committedSessionSnapshot,
+  mergeSessionHistoryRows,
+  projectSessionHistory,
+  SessionHistoryPager,
+} from "../lib/sessionHistory"
+import {
+  deleteSessionSnapshot,
+  loadSessionSnapshot,
+  saveSessionSnapshot,
+} from "../lib/sessionSnapshots"
 
 export type ConnectionState = "booting" | "connecting" | "connected" | "reconnecting" | "offline" | "error"
 export type AppMode = "live" | "demo"
@@ -99,6 +124,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
   // state. Everything that would otherwise claim "running" from the transcript
   // defers to the server's own summary while this is true.
   const [catchingUp, setCatchingUp] = useState(false)
+  const [olderHistory, setOlderHistory] = useState({ hasMore: false, loading: false })
   const [goal, setGoalState] = useState<GoalSnapshot | null>(null)
 
   const streamAbort = useRef<AbortController | null>(null)
@@ -112,6 +138,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
   const coalescer = useRef<TranscriptCoalescer | null>(null)
   // Timers belonging to the current attachment's catch-up bookkeeping.
   const attachTimers = useRef<(() => void) | null>(null)
+  const olderLoader = useRef<(() => Promise<void>) | null>(null)
 
   sessionIdRef.current = sessionId
   transcriptRef.current = transcript
@@ -126,10 +153,15 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     coalescer.current = null
     attachTimers.current?.()
     attachTimers.current = null
+    olderLoader.current = null
   }, [])
 
   // ---- Live: attach SSE (abort on switch, reconcile cached projection with full replay) ----
-  const attachSession = useCallback(async (baseUrl: string, id: string, opts?: { fresh?: boolean; boot?: boolean }) => {
+  const attachSession = useCallback(async (
+    baseUrl: string,
+    id: string,
+    opts?: { fresh?: boolean; boot?: boolean; fullRebuild?: boolean },
+  ) => {
     const firstBootAttach = bootPerf.beginFirstAttach(opts?.boot === true)
     const previousId = sessionIdRef.current
     // Optimistic rows belong to the session they were typed into. A reattach to
@@ -148,12 +180,16 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         events: sessionCache.current.get(previousId)?.events ?? [],
         durable: sessionCache.current.get(previousId)?.durable ?? null,
         cursor: sessionCache.current.get(previousId)?.cursor ?? null,
+        olderPage: sessionCache.current.get(previousId)?.olderPage,
+        historyRows: sessionCache.current.get(previousId)?.historyRows,
       })
     }
     stopStream()
     const ac = new AbortController()
     streamAbort.current = ac
     const gen = ++attachGen.current
+    olderLoader.current = null
+    setOlderHistory({ hasMore: false, loading: false })
 
     setSessionId(id)
     // Both model provenance and complete mode/delegate state are server truth.
@@ -187,6 +223,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     let committedDurable: TranscriptState | null = cached?.durable ?? null
     let committedCursor: string | null = cached?.cursor ?? null
     let machine: SessionStreamMachine | null = null
+    let lastHistorySeq = cached?.historyRows?.at(-1)?.seq ?? -1
     /** This attempt is talking to a v2 server (frames, not bare events). */
     let v2 = false
     /** The first legacy frame after a v2 cache requires a full legacy rebuild;
@@ -206,6 +243,15 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       setTranscript(next)
     })
     coalescer.current = live
+    // Todos are a current server snapshot, not merely historical decoration.
+    // Hydrate them independently so a bounded tail cannot hide an old list.
+    void fetchSessionTodos(baseUrl, id).then((todos) => {
+      if (gen !== attachGen.current) return
+      const next = { ...live.state, todos }
+      live.replaceState(next)
+      live.flush()
+      sessionCache.current.update(id, { transcript: next })
+    }).catch(() => {})
 
     // ---- catch-up (replay in flight) ----
     let catchUpActive = !opts?.fresh
@@ -263,6 +309,172 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     setSendError(null)
     setConnError(null)
 
+    const installOlderPager = (entry: NonNullable<typeof cached>) => {
+      if (!entry.olderPage || !entry.historyRows) return
+      setOlderHistory({ hasMore: entry.olderPage.hasMore, loading: false })
+      const pager = new SessionHistoryPager(entry.historyRows, entry.olderPage)
+      olderLoader.current = async () => {
+        if (gen !== attachGen.current || ac.signal.aborted) return
+        setOlderHistory((current) => current.hasMore ? { ...current, loading: true } : current)
+        try {
+          await pager.load(
+            (before) => fetchSessionHistory(baseUrl, id, { turns: 10, before }),
+            () => gen === attachGen.current && !ac.signal.aborted,
+            (rows, projection, olderPage) => {
+              if (gen !== attachGen.current || ac.signal.aborted) return
+              // HTTP pages contain persisted history only. Retain authoritative
+              // live/current snapshots that are intentionally absent there.
+              const next = {
+                ...projection,
+                todos: live.state.todos,
+                background: live.state.background,
+                ports: live.state.ports,
+                queue: live.state.queue,
+              }
+              live.replaceState(next)
+              live.flush()
+              committedDurable = next
+              machine?.rebaseCommitted(next)
+              sessionCache.current.update(id, {
+                transcript: next,
+                durable: next,
+                olderPage,
+                historyRows: rows,
+              })
+              lastHistorySeq = rows.at(-1)?.seq ?? lastHistorySeq
+              setOlderHistory({ hasMore: olderPage.hasMore, loading: false })
+            },
+          )
+        } catch (err) {
+          if (gen !== attachGen.current || ac.signal.aborted) return
+          if (err instanceof SessionHistoryRewritten) {
+            sessionCache.current.delete(id)
+            setOlderHistory({ hasMore: false, loading: false })
+            void attachSession(baseUrl, id, { fullRebuild: true })
+          }
+          // Paging is opportunistic. Other failures retain the current tail
+          // and cursor so another scroll-up can retry.
+        } finally {
+          if (gen === attachGen.current && !ac.signal.aborted) {
+            setOlderHistory((current) => ({ ...current, loading: false }))
+          }
+        }
+      }
+    }
+    if (cached) installOlderPager(cached)
+
+    // On renderer relaunch the in-memory LRU is empty. A durable snapshot is a
+    // warm cursor cache: paint it before HTTP history and resume SSE from it.
+    if (!cached && !opts?.fresh && !opts?.fullRebuild) {
+      const snapshot = await bootPerf.measure("snapshot load", () => loadSessionSnapshot(id))
+      if (gen !== attachGen.current || ac.signal.aborted) return
+      if (snapshot?.cursor) {
+        const cursor = encodeSessionEventCursor(snapshot.cursor)
+        committedDurable = snapshot.transcript
+        committedCursor = cursor
+        live.replaceState(snapshot.transcript)
+        live.flush()
+        setTranscriptLoading(false)
+        cached = {
+          transcript: snapshot.transcript,
+          durable: snapshot.transcript,
+          cursor,
+          goal: goalRef.current,
+          repoId: activeRepoIdRef.current,
+          events: [],
+          olderPage: snapshot.olderPage,
+        }
+        sessionCache.current.set(id, cached)
+        setOlderHistory({ hasMore: snapshot.olderPage?.hasMore ?? false, loading: false })
+        if (snapshot.olderPage?.hasMore) {
+          // Snapshots omit raw rows. Re-fetch the current bounded tail on the
+          // first scroll-up to reconstruct pager input, then page older.
+          olderLoader.current = async () => {
+            if (gen !== attachGen.current || ac.signal.aborted) return
+            setOlderHistory({ hasMore: true, loading: true })
+            try {
+              let page = await fetchSessionHistory(baseUrl, id, { turns: 10 })
+              if (gen !== attachGen.current || ac.signal.aborted) return
+              let rows = [...page.events]
+              // Reconstruct the pages represented by the snapshot before
+              // asking for one more. Page cursors are opaque, so equality with
+              // the saved cursor is the only safe stopping condition.
+              while (
+                page.hasMore &&
+                page.before &&
+                page.before !== snapshot.olderPage?.before
+              ) {
+                page = await fetchSessionHistory(baseUrl, id, { turns: 10, before: page.before })
+                if (gen !== attachGen.current || ac.signal.aborted) return
+                rows = mergeSessionHistoryRows(page.events, rows)
+              }
+              const entry = sessionCache.current.get(id)
+              if (!entry) return
+              entry.historyRows = rows
+              entry.olderPage = { before: page.before, hasMore: page.hasMore }
+              lastHistorySeq = rows.at(-1)?.seq ?? -1
+              installOlderPager(entry)
+              await olderLoader.current?.()
+            } catch (err) {
+              if (gen !== attachGen.current || ac.signal.aborted) return
+              if (err instanceof SessionHistoryRewritten) {
+                sessionCache.current.delete(id)
+                void attachSession(baseUrl, id, { fullRebuild: true })
+              }
+            } finally {
+              if (gen === attachGen.current && !ac.signal.aborted) {
+                setOlderHistory((current) => ({ ...current, loading: false }))
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Cold v2 bootstrap: seed a bounded durable projection, then ask SSE only
+    // for events persisted after the HTTP route's captured boundary. Opening
+    // the stream afterward is race-safe because that cursor makes the suffix
+    // include anything that arrived while the tail request was in flight.
+    const coldTail = !opts?.fresh && !opts?.fullRebuild && !cached?.durable && !cached?.cursor
+    if (coldTail) {
+      try {
+        const tail = await bootPerf.measure("history tail fetch", () =>
+          fetchSessionHistory(baseUrl, id, { turns: 10 }),
+        )
+        if (gen !== attachGen.current || ac.signal.aborted) return
+        cached = sessionCache.current.get(id)
+        // Goal/config hydration may have updated the placeholder while the
+        // request was in flight; a durable/cursor means another path won.
+        if (cached?.durable || cached?.cursor) return
+        const seeded = projectSessionHistory(tail.events, tail.cursor)
+        const seededTranscript = { ...seeded.transcript, todos: live.state.todos }
+        committedDurable = seededTranscript
+        committedCursor = seeded.cursor
+        live.replaceState(seededTranscript)
+        live.flush()
+        setTranscriptLoading(false)
+        bootPerf.noteTailEvents(firstBootAttach, tail.events.length)
+        const seededRows = [...tail.events]
+        lastHistorySeq = seededRows.at(-1)?.seq ?? -1
+        sessionCache.current.set(id, {
+          transcript: seededTranscript,
+          durable: seededTranscript,
+          cursor: seeded.cursor,
+          goal: cached?.goal ?? goalRef.current,
+          repoId: activeRepoIdRef.current,
+          events: [],
+          olderPage: { before: tail.before, hasMore: tail.hasMore },
+          historyRows: seededRows,
+        })
+
+        installOlderPager(sessionCache.current.get(id)!)
+      } catch {
+        if (gen !== attachGen.current || ac.signal.aborted) return
+        // Unsupported and network-failed tail requests both retain the exact
+        // pre-existing from-zero replay path below.
+      }
+    }
+
     const onOpen = () => {
       if (gen !== attachGen.current) return
       bootPerf.noteStreamOpen(firstBootAttach)
@@ -318,6 +530,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
           // and cursor: the reattach keeps that screen visible until legacy
           // divergence settles or v2 replay-reset reaches replay-end.
           setPendingSends([])
+          void deleteSessionSnapshot(id)
           void attachSession(baseUrl, id)
           return
         }
@@ -364,6 +577,16 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       })
     }
 
+    const saveCommittedSnapshot = () => {
+      if (gen !== attachGen.current || ac.signal.aborted || !committedDurable || !committedCursor) return
+      const snapshot = committedSessionSnapshot(
+        committedDurable,
+        committedCursor,
+        sessionCache.current.get(id)?.olderPage ?? null,
+      )
+      if (snapshot) void saveSessionSnapshot(id, snapshot)
+    }
+
     /** v2: act on one decision from the stream machine. */
     const applyStep = (step: StreamStep): void => {
       if (step.kind === "legacy" || step.kind === "reset") return
@@ -380,6 +603,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
           goal: goalRef.current,
           repoId: activeRepoIdRef.current,
         })
+        saveCommittedSnapshot()
         finishCatchUp()
         return
       }
@@ -396,6 +620,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
           committedDurable = machine?.durable ?? committedDurable
           committedCursor = machine?.cursor ?? committedCursor
           sessionCache.current.update(id, { durable: committedDurable, cursor: committedCursor })
+          saveCommittedSnapshot()
         }
         return
       }
@@ -407,6 +632,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
           // rebuild; the new generation produces replay-reset and swaps only
           // at replay-end. Only optimistic sends are invalid after truncation.
           setPendingSends([])
+          void deleteSessionSnapshot(id)
           void attachSession(baseUrl, id)
           return
         }
@@ -467,10 +693,35 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
         clearCatchUpTimers()
       }
       if (!machine) return
+      if (frame.kind === "replay-reset") {
+        void deleteSessionSnapshot(id)
+        // The server rejected/replaced the durable generation. Keep the old
+        // projection visible while replay works, but rebuild row-backed paging
+        // solely from the replacement generation.
+        sessionCache.current.update(id, { historyRows: [], olderPage: undefined })
+        lastHistorySeq = -1
+        olderLoader.current = null
+        setOlderHistory({ hasMore: false, loading: false })
+      }
       if (frame.kind === "event" && machine.phase === "replay") {
         bootPerf.noteReplayEvent(firstBootAttach)
       }
+      if (frame.kind === "event" && isPersistedSessionEvent(frame.event)) {
+        const entry = sessionCache.current.get(id)
+        if (entry?.historyRows) {
+          lastHistorySeq = appendMonotonicHistoryRow(
+            entry.historyRows,
+            { seq: frame.seq, event: frame.event },
+            lastHistorySeq,
+          )
+        }
+      }
       applyStep(machine.handle(frame))
+      if (frame.kind === "event" && machine.phase === "live") {
+        committedDurable = machine.durable
+        committedCursor = machine.cursor
+        saveCommittedSnapshot()
+      }
     }
 
     /** After a failed attachment: when the evidence says the server is gone or
@@ -526,6 +777,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
           committedCursor = null
           committedDurable = null
           sessionCache.current.update(id, { durable: null, cursor: null })
+          void deleteSessionSnapshot(id)
         }
         attempt += 1
         reconnecting = true
@@ -556,6 +808,10 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     }
   }, [refreshSessions, hydrateSessionModel, stopStream])
 
+  const loadOlderHistory = useCallback(async (): Promise<void> => {
+    await olderLoader.current?.()
+  }, [])
+
   return {
     sessionId,
     setSessionId,
@@ -564,6 +820,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     transcriptLoading,
     setTranscriptLoading,
     catchingUp,
+    olderHistory,
     pendingSends,
     setPendingSends,
     goal,
@@ -572,6 +829,7 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
     transcriptRef,
     settleTimer,
     attachSession,
+    loadOlderHistory,
     stopStream,
   }
 }

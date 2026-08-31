@@ -23,10 +23,13 @@ import {
   type SendBlockedResponse,
   type ServerInfoResponse,
   type SessionDelta,
+  type SessionHistoryRequest,
+  type SessionHistoryResponse,
   type SessionSummary,
   type ShellSessionsResponse,
   type StopDelegateRequest,
   type StopDelegateResponse,
+  type TodoSnapshot,
   type ForkResponse, type GoalRequest, type GoalSnapshot, type RewindPoint,
 } from "@chunky/protocol"
 import { readNamedSSE } from "./sse"
@@ -260,6 +263,51 @@ export interface SessionStreamHandlers {
   onDelta: (delta: SessionDelta) => void
   /** Fires once the stream is accepted — the snapshot follows immediately. */
   onOpen?: () => void
+}
+
+export class SessionHistoryUnsupported extends Error {
+  constructor() {
+    super("session history tail is unsupported")
+    this.name = "SessionHistoryUnsupported"
+  }
+}
+
+export class SessionHistoryRewritten extends Error {
+  constructor(readonly cursor: SessionHistoryResponse["cursor"]) {
+    super("session history was rewritten")
+    this.name = "SessionHistoryRewritten"
+  }
+}
+
+/** Fetch a bounded transcript tail or older page. Authentication is supplied
+ * by the renderer's shared fetch wrapper installed during connection setup. */
+export async function fetchSessionHistory(
+  baseUrl: string,
+  sessionId: string,
+  request: SessionHistoryRequest = {},
+): Promise<SessionHistoryResponse> {
+  const path = baseUrl.replace(/\/$/, "") + ROUTES.sessionHistory(sessionId)
+  const url = path.startsWith("http://") || path.startsWith("https://")
+    ? new URL(path)
+    : new URL(path, typeof window !== "undefined" ? window.location.origin : "http://localhost")
+  if (request.turns != null) url.searchParams.set("turns", String(request.turns))
+  if (request.before) url.searchParams.set("before", request.before)
+  const res = await fetch(url)
+  if (res.status === 404) throw new SessionHistoryUnsupported()
+  if (res.status === 409) {
+    const body = await res.json().catch(() => null) as { cursor?: SessionHistoryResponse["cursor"] } | null
+    if (body?.cursor) throw new SessionHistoryRewritten(body.cursor)
+  }
+  if (!res.ok) throw new Error(`session history failed (${res.status})`)
+  return await res.json() as SessionHistoryResponse
+}
+
+/** Current checklist snapshot; unlike transcript history this remains complete
+ * when a cold attachment starts from a bounded tail. */
+export async function fetchSessionTodos(baseUrl: string, sessionId: string): Promise<TodoSnapshot[]> {
+  const res = await fetch(baseUrl.replace(/\/$/, "") + ROUTES.todos(sessionId))
+  if (!res.ok) throw new Error(`session todos failed (${res.status})`)
+  return await res.json() as TodoSnapshot[]
 }
 
 /**

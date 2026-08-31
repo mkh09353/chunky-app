@@ -133,6 +133,14 @@ export class SessionStreamMachine {
     this.visibleState = state
   }
 
+  /** Rebase the committed projection after older HTTP history is prepended.
+   * The stream cursor is unchanged: the added rows precede it. */
+  rebaseCommitted(state: TranscriptState): void {
+    this.visibleState = state
+    this.durableState = state
+    this.working = state
+  }
+
   handle(frame: SessionStreamFrame): StreamStep {
     if (frame.kind === "legacy") return { kind: "legacy", event: frame.event }
     if (frame.kind === "replay-reset") {

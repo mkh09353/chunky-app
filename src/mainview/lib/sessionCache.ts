@@ -1,4 +1,6 @@
-import type { AgentEvent, GoalSnapshot } from "@chunky/protocol"
+import type { AgentEvent, GoalSnapshot, SessionHistoryResponse } from "@chunky/protocol"
+import type { SessionHistoryRow } from "./sessionHistory"
+import { deleteSessionSnapshot } from "./sessionSnapshots"
 import { initialState, PORTS_CHANGED, reduce, type TranscriptState } from "./transcript"
 
 /** These are deliberately sent live-only by the server and never appear in history. */
@@ -28,6 +30,10 @@ export interface CachedSession {
   durable?: TranscriptState | null
   /** v2: encoded replay cursor this session's durable shadow sits at. */
   cursor?: string | null
+  /** Server cursor for paging toward older history. */
+  olderPage?: Pick<SessionHistoryResponse, "before" | "hasMore"> | null
+  /** Bounded rows loaded through history paging plus persisted stream suffix. */
+  historyRows?: SessionHistoryRow[]
 }
 
 /** Small in-memory LRU for projections that would otherwise be rebuilt from SSE history. */
@@ -62,6 +68,7 @@ export class SessionCache {
     sessionId: string,
     entry: { transcript: TranscriptState; durable: TranscriptState; cursor: string; goal: GoalSnapshot | null; repoId: string | null },
   ): void {
+    const current = this.get(sessionId)
     this.set(sessionId, {
       transcript: entry.transcript,
       goal: entry.goal,
@@ -69,6 +76,8 @@ export class SessionCache {
       events: [],
       durable: entry.durable,
       cursor: entry.cursor,
+      olderPage: current?.olderPage,
+      historyRows: current?.historyRows,
     })
   }
 
@@ -89,12 +98,13 @@ export class SessionCache {
 
   delete(sessionId: string): void {
     this.entries.delete(sessionId)
+    void deleteSessionSnapshot(sessionId)
   }
 
   /** Remove cached sessions known to belong to a repo but absent from its fresh list. */
   reconcileRepo(repoId: string | null, sessionIds: ReadonlySet<string>): void {
     for (const [id, entry] of this.entries) {
-      if (entry.repoId === repoId && !sessionIds.has(id)) this.entries.delete(id)
+      if (entry.repoId === repoId && !sessionIds.has(id)) this.delete(id)
     }
   }
 

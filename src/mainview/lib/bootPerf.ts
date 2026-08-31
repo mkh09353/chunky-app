@@ -7,6 +7,7 @@ const timings = new Map<string, Timing>()
 let firstAttachClaimed = false
 let printed = false
 let replayedEvents = 0
+let tailEvents = 0
 
 function safeNow(): number {
   try {
@@ -66,6 +67,13 @@ function noteReplayEvent(firstBootAttach: boolean): void {
   } catch {}
 }
 
+function noteTailEvents(firstBootAttach: boolean, count: number): void {
+  try {
+    if (!firstBootAttach || printed) return
+    tailEvents = count
+  } catch {}
+}
+
 function settleFirstAttach(firstBootAttach: boolean): void {
   try {
     if (!firstBootAttach || printed) return
@@ -80,6 +88,8 @@ function settleFirstAttach(firstBootAttach: boolean): void {
       "loadDesktopUiState",
       "boot listSessions",
       "attachSession start",
+      "snapshot load",
+      "history tail fetch",
       "SSE stream open",
       "first replayed event",
       "replay-end / catch-up settled",
@@ -93,6 +103,7 @@ function settleFirstAttach(firstBootAttach: boolean): void {
           ? "—"
           : Number(timing.duration.toFixed(1)),
         "replayed events": name === "replay-end / catch-up settled" ? replayedEvents : "—",
+        "tail events": name === "replay-end / catch-up settled" ? tailEvents : "—",
       }
     })
     console.table(rows)
@@ -105,5 +116,6 @@ export const bootPerf = {
   beginFirstAttach,
   noteStreamOpen,
   noteReplayEvent,
+  noteTailEvents,
   settleFirstAttach,
 }

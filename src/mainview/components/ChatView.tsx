@@ -14,7 +14,7 @@ import {
   Sun,
   Target,
 } from "lucide-react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import type { StopDelegateRequest } from "@chunky/protocol"
 import type { Repo } from "~/lib/api"
 import type { Message, Project, Thread } from "~/lib/mock"
@@ -42,6 +42,7 @@ import {
   resolveParkPosition,
   type ParkReason,
 } from "~/lib/followBottom"
+import { anchorScrollTop, isPrepend, olderTrigger } from "~/lib/olderHistory"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { applyRunAnchors } from "~/lib/mapTranscript"
 import { liveRunViews, runAnchors, runsById, type RunAnchor } from "~/lib/runs"
@@ -297,6 +298,8 @@ export function ChatView({
   modelName,
   foldAll = false,
   compacted = 0,
+  olderHistory,
+  onLoadOlder,
   onStopRun,
   delegateStatus,
 }: {
@@ -312,6 +315,11 @@ export function ChatView({
   modelName?: string
   foldAll?: boolean
   compacted?: number
+  /** Older turns the seed did not include. Omitted (demo/offline) → no
+   *  affordance at all, exactly as before this existed. */
+  olderHistory?: { hasMore: boolean; loading: boolean }
+  /** Fetch one more page of history. Idempotent while a page is in flight. */
+  onLoadOlder?: () => void | Promise<void>
   /** Cancel one live delegate (server stop_delegate). Omitted in demo/offline
    *  mode, and dropped for the rest of the session once a server has said it
    *  has no such endpoint — which hides the Stop control entirely. */
@@ -358,6 +366,26 @@ export function ChatView({
   const pendingParkReason = useRef<ParkReason | null>(null)
   // First settled frame after a thread switch still needs open framing.
   const openPending = useRef(true)
+
+  // ---- Older history -------------------------------------------------------
+  // A session is seeded with only its last turns, so the top of the scrollport
+  // is a boundary, not the start of the conversation. The rules live in
+  // ~/lib/olderHistory; these refs are the DOM half.
+  const hasOlder = olderHistory?.hasMore ?? false
+  const loadingOlder = olderHistory?.loading ?? false
+  /** Armed by scrolling AWAY from the top, spent by one fetch: that is what
+   *  makes a short prepended page unable to fire the next one immediately. */
+  const olderArmed = useRef(false)
+  /** Scrollport metrics captured when a page was asked for, restored once it
+   *  lands. Null when the reader is at the live end — bottom-follow owns the
+   *  viewport there and must keep owning it. */
+  const olderAnchor = useRef<{ scrollHeight: number; scrollTop: number } | null>(null)
+  /** This commit grew at the FRONT. Read by the user-message re-anchor below,
+   *  which would otherwise mistake a prepended page of history for a turn the
+   *  reader just sent and yank them to the bottom of the transcript. */
+  const prepended = useRef(false)
+  const firstMessageId = useRef<string | undefined>(undefined)
+  const olderThreadId = useRef(thread.id)
 
   const endPark = useCallback(() => {
     parkTarget.current = null
@@ -576,6 +604,83 @@ export function ChatView({
   )
   const prevUserMessageCount = useRef(0)
 
+  /** Ask for one more page, remembering where the reader is first. */
+  const requestOlder = useCallback(() => {
+    const el = scrollRef.current
+    if (!el || !onLoadOlder) return
+    olderArmed.current = false
+    // Anchoring is measured from the END of the content, which is the only
+    // offset invariant under growth above the viewport. At the live end there
+    // is nothing to preserve: bottom-follow keeps doing exactly what it did.
+    olderAnchor.current = stuckToBottom.current
+      ? null
+      : { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+    try {
+      void Promise.resolve(onLoadOlder()).catch(() => {
+        olderAnchor.current = null
+      })
+    } catch {
+      olderAnchor.current = null
+    }
+  }, [onLoadOlder])
+
+  // Reaching for the top fetches the next page. Rate limited by the arming rule
+  // above, so a page shorter than the viewport cannot chain into the next one:
+  // the reader has to scroll away and come back, or press the button.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !onLoadOlder || !hasOlder) return
+    const onScroll = () => {
+      const step = olderTrigger({
+        scrollTop: el.scrollTop,
+        hasMore: hasOlder,
+        loading: loadingOlder,
+        armed: olderArmed.current,
+      })
+      olderArmed.current = step.armed
+      if (step.fetch) requestOlder()
+    }
+    el.addEventListener("scroll", onScroll, { passive: true })
+    return () => el.removeEventListener("scroll", onScroll)
+  }, [hasOlder, loadingOlder, onLoadOlder, requestOlder])
+
+  // Prepend anchoring. BEFORE paint (and before every passive effect below), so
+  // the page of history that just mounted above the reader never shows as a
+  // jump: the viewport moves down by exactly the height that was inserted.
+  useLayoutEffect(() => {
+    const nextFirst = messages[0]?.id
+    if (olderThreadId.current !== thread.id) {
+      // A session switch replaces the list wholesale; nothing to preserve.
+      olderThreadId.current = thread.id
+      olderArmed.current = false
+      olderAnchor.current = null
+      prepended.current = false
+      firstMessageId.current = nextFirst
+      return
+    }
+    const grewAtFront = isPrepend({
+      previousFirstId: firstMessageId.current,
+      previousCount: prevMessageCount.current,
+      nextFirstId: nextFirst,
+      nextCount: messages.length,
+    })
+    firstMessageId.current = nextFirst
+    if (!grewAtFront) return
+    prepended.current = true
+    const el = scrollRef.current
+    const anchor = olderAnchor.current
+    olderAnchor.current = null
+    if (!el || !anchor) return
+    const top = anchorScrollTop({
+      previousScrollHeight: anchor.scrollHeight,
+      previousScrollTop: anchor.scrollTop,
+      nextScrollHeight: el.scrollHeight,
+    })
+    // Ours, not the reader's: recorded so the scroll classifier does not read
+    // the restore as a gesture and change stickiness because of it.
+    commandedTop.current = jumpTo(el, top)
+  }, [messages, thread.id])
+
   // Switching sessions resets every lifecycle flag. Declared BEFORE the
   // user-message re-arm effect so, on the same commit as a thread change,
   // baselines and openPending are armed first and the count check sees the
@@ -607,7 +712,10 @@ export function ChatView({
       // Replay/hydration grows the user-message count while open framing is
       // still pending — that is history arriving, not a turn the reader just
       // sent. Only a genuine post-open append re-arms follow and cancels park.
-      if (!openPending.current) {
+      // A prepended page of OLDER turns grows the same count and is likewise
+      // not a send: re-anchoring there would throw the reader out of the
+      // history they just asked to see.
+      if (!openPending.current && !prepended.current) {
         stuckToBottom.current = true
         parkedByUs.current = false
         // A new human turn supersedes any unfinished open/complete park.
@@ -729,6 +837,10 @@ export function ChatView({
     pendingParkReason.current = decision.next.pendingParkReason
     if (decision.next.markTurnEnd) setTurnEnd((n) => n + 1)
 
+    // Consumed: every rule that had to know about the prepend (the user-message
+    // re-anchor above, which runs first) has already seen it.
+    prepended.current = false
+
     switch (decision.action.type) {
       case "hold":
         return
@@ -819,13 +931,44 @@ export function ChatView({
           </span>
         </div>
       )}
-      {!empty && (
+      {/* Older turns exist above this point, so the "start of thread" marker
+          would be a lie: the affordance replaces it until the history runs out,
+          at which point this row becomes the true start again. Lives INSIDE the
+          scrollport, so no drag region is involved. */}
+      {hasOlder && onLoadOlder && !empty ? (
         <Row>
-          <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
-            <Sparkles className="size-3 text-primary" />
-            {loading ? "Loading transcript…" : catchingUp ? "Catching up…" : "Start of thread"}
+          <div className="flex justify-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="rounded-full text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={requestOlder}
+              disabled={loadingOlder}
+              aria-busy={loadingOlder}
+            >
+              {loadingOlder ? (
+                <>
+                  <Loader2 className="size-3 animate-spin text-primary" />
+                  Loading…
+                </>
+              ) : (
+                <>
+                  <History className="size-3" />
+                  Load earlier messages
+                </>
+              )}
+            </Button>
           </div>
         </Row>
+      ) : (
+        !empty && (
+          <Row>
+            <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted/40 px-3 py-1 text-[11px] text-muted-foreground">
+              <Sparkles className="size-3 text-primary" />
+              {loading ? "Loading transcript…" : catchingUp ? "Catching up…" : "Start of thread"}
+            </div>
+          </Row>
+        )
       )}
 
       {(loading || catchingUp) && empty ? (

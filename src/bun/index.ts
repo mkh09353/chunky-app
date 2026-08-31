@@ -26,6 +26,11 @@ import {
   upgradeRuntimeAndReconnect,
 } from "./connectionManager"
 import { mergeDesktopState, readDesktopState, type DesktopState } from "./desktopState"
+import {
+  deleteSessionSnapshot,
+  readSessionSnapshot,
+  writeSessionSnapshot,
+} from "./sessionSnapshots"
 import { createZooManager } from "./zoo"
 import { createZooService } from "./zooService"
 import { ensureZooLedgerSkill } from "./zooLedgerSkill"
@@ -425,6 +430,39 @@ rpc = createRPC({
         sessionShelves = {},
       } = mergeDesktopState(patch)
       return { ok: true, activeRepoId, lastSessionByRepo, quickKeys, displayName, sessionShelves }
+    },
+
+    /**
+     * Durable per-session transcript snapshots
+     * (~/.chunky/state/session-snapshots/<session>.json). They let a relaunch
+     * paint the last-seen tail immediately and resume the event stream from the
+     * saved cursor instead of replaying history. A missing or rejected snapshot
+     * only costs that replay, so every failure here reads as "no snapshot".
+     * Input: { sessionId: string } (+ snapshot fields on save).
+     */
+    sessionSnapshotLoad: async (params: unknown) => {
+      const raw = (params ?? {}) as Record<string, unknown>
+      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : ""
+      if (!sessionId) return { ok: true, snapshot: null }
+      return { ok: true, snapshot: readSessionSnapshot(sessionId) }
+    },
+    sessionSnapshotSave: async (params: unknown) => {
+      const raw = (params ?? {}) as Record<string, unknown>
+      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : ""
+      const snapshot = (raw.snapshot ?? {}) as Record<string, unknown>
+      if (!sessionId) return { ok: false, reason: "invalid" }
+      return writeSessionSnapshot(sessionId, {
+        transcript: snapshot.transcript,
+        cursor: snapshot.cursor,
+        olderPage: snapshot.olderPage,
+        savedAt: snapshot.savedAt,
+      })
+    },
+    sessionSnapshotDelete: async (params: unknown) => {
+      const raw = (params ?? {}) as Record<string, unknown>
+      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : ""
+      if (sessionId) deleteSessionSnapshot(sessionId)
+      return { ok: true }
     },
 
     /**
