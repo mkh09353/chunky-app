@@ -105,6 +105,7 @@ import {
 import { OldServersNotice } from "./components/OldServersNotice"
 import { classifyServers, subscribeOldServers } from "./lib/oldServers"
 import { serverMismatchWarning } from "./lib/serverMismatch"
+import { connectionStatusLabel, isViteDevOrigin } from "./lib/connectionSource"
 import { inspectChunkyServers, type ServerInspection } from "./lib/serverLifecycle"
 import {
   desktopUiSnapshot,
@@ -1022,6 +1023,21 @@ export function App() {
     else void openRepoThreads(next.baseUrl, activeRepoIdRef.current)
     return true
   }, [appMode, config, attachSession, openRepoThreads])
+
+  // Browser-dev tab title: keep the proxy target visible even when the user
+  // is not looking at the sidebar. Packaged Live leaves the static "Chunky".
+  useEffect(() => {
+    if (typeof document === "undefined") return
+    const origin = typeof window !== "undefined" ? window.location.origin : undefined
+    if (config?.connectionSource !== "vite-proxy" && !isViteDevOrigin(origin)) return
+    document.title = connectionStatusLabel({
+      appMode: "live",
+      connectionState: "connected",
+      connectionSource: "vite-proxy",
+      proxyTarget: config?.proxyTarget,
+      origin,
+    })
+  }, [config?.connectionSource, config?.proxyTarget])
 
   // ---- Boot ----
   useEffect(() => {
@@ -3135,17 +3151,12 @@ export function App() {
               />
             ) : null
           }
-          connectionLabel={
-            live
-              ? connectionState === "connected"
-                ? "Live"
-                : connectionState === "reconnecting"
-                  ? "Reconnecting"
-                  : connectionState === "connecting" || connectionState === "booting"
-                    ? "Connecting"
-                    : "Offline"
-              : "Demo"
-          }
+          connectionLabel={connectionStatusLabel({
+            appMode,
+            connectionState,
+            connectionSource: config?.connectionSource,
+            proxyTarget: config?.proxyTarget,
+          })}
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -3419,6 +3430,8 @@ export function App() {
             workspace: activeRepo?.path || workspace || config?.workspace || "",
             sessionCount: sessions.length,
             mode: appMode,
+            connectionSource: config?.connectionSource,
+            proxyTarget: config?.proxyTarget,
           }}
         />
         <PrPanel

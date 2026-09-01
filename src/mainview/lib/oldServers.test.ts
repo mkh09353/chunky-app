@@ -1,4 +1,5 @@
-// Which superseded servers get surfaced, and what each row offers. Run with:
+// Which discovery-managed superseded servers get surfaced, and what each row
+// offers. Raw/test listeners without a discovery record are out of scope. Run with:
 //   bun test src/mainview/lib/oldServers.test.ts
 import { describe, expect, test } from "bun:test"
 import type { InspectedServer, ServerInspection } from "./serverLifecycle"
@@ -7,6 +8,8 @@ import {
   forceStopWarning,
   formatServerRow,
   isOldServer,
+  OLD_SERVERS_NOTICE_BODY,
+  OLD_SERVERS_NOTICE_TITLE,
   parseInspection,
   sessionCountLabel,
 } from "./oldServers"
@@ -35,6 +38,15 @@ const inspection = (servers: InspectedServer[]): ServerInspection => ({
   installed: { version: "0.14.0", buildId: "build-xyz" },
 })
 
+describe("old-server notice copy", () => {
+  test("names discovery-managed servers and excludes raw/test ones", () => {
+    expect(OLD_SERVERS_NOTICE_TITLE).toContain("managed")
+    expect(OLD_SERVERS_NOTICE_BODY.toLowerCase()).toContain("discovery-registered")
+    expect(OLD_SERVERS_NOTICE_BODY.toLowerCase()).toContain("raw or test")
+    expect(OLD_SERVERS_NOTICE_BODY.toLowerCase()).not.toContain("any server")
+  })
+})
+
 describe("sessionCountLabel", () => {
   test("never says one sessions", () => {
     expect(sessionCountLabel(1)).toBe("1 active session")
@@ -44,7 +56,7 @@ describe("sessionCountLabel", () => {
 })
 
 describe("isOldServer", () => {
-  test("a reachable, non-retiring, non-current server is the case we care about", () => {
+  test("a reachable, non-retiring, non-current discovery-managed server is the case we care about", () => {
     expect(isOldServer(server())).toBe(true)
   })
 

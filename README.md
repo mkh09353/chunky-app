@@ -96,16 +96,21 @@ loading, so this app does not add an entitlements file.
 
 | Mode | Base URL | Auth token |
 |------|----------|------------|
-| Vite dev (`dev:web` / HMR) | Same-origin `/chunky-api` proxy → Chunky server (default `http://localhost:4620`, override with `CHUNKY_URL`) | Vite reads `~/.chunky/state/settings.json` (or `CHUNKY_SETTINGS`) and attaches the bearer header server-side. The token is not embedded in the renderer bundle. |
-| Electrobun window (dev) | Uses the same Vite `/chunky-api` proxy while HMR is active. | Attached by Vite server-side. |
-| Electrobun packaged view | Bun process RPC `getConfig` → `{ baseUrl, serverToken, workspace }` (reads settings + `CHUNKY_URL`/`CHUNKY_PORT`) | Runtime only via RPC — production `vite build` does **not** embed the token in `dist/`. |
+| Vite dev (`dev:web` / HMR) | Same-origin `/chunky-api` proxy → Chunky server (default `http://localhost:4620`, override with `CHUNKY_URL`). Chrome shows **Dev web · host:port** for that target so this cannot be mistaken for the installed app. | Vite reads `~/.chunky/state/settings.json` (or `CHUNKY_SETTINGS`) and attaches the bearer header server-side. The token is not embedded in the renderer bundle. |
+| Electrobun window (dev) | Uses the same Vite `/chunky-api` proxy while HMR is active, so it also shows **Dev web · host:port**. | Attached by Vite server-side. |
+| Electrobun packaged view | Bun process RPC `getConfig` → `{ baseUrl, serverToken, workspace }` via discovery (`~/.chunky/state/servers`). Packaged stable builds do **not** probe a random Vite server unless `VITE_DEV_URL` is set. Footer reads **Live**. | Runtime only via RPC — production `vite build` does **not** embed the token in `dist/`. |
 | Fallback | `public/chunky-config.json` (`baseUrl` only — do not put tokens in this file) | Dev define token if present; otherwise RPC. |
 
 Force-token-in-bundle (local debugging only): `CHUNKY_INJECT_TOKEN=1 bun run build:web`. Do not ship that.
 
 If the server is unreachable, the app shows a connection banner with **Retry**
 and an explicit **Demo mode** that keeps the polished mock UI offline. Live
-server state is the default whenever connected.
+server state is the default whenever the packaged app is connected.
+
+The post-update “older servers” notice only lists **discovery-managed**
+servers registered under `~/.chunky/state/servers`. Raw or test servers
+(temp DB/settings, random ports, `CHUNKY_URL` targets) are not enumerated
+and will not appear in that UI.
 
 ## What's inside
 

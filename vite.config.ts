@@ -46,6 +46,14 @@ export default defineConfig(({ command, mode }) => {
   const serverUrl = process.env.CHUNKY_URL ?? "http://localhost:4620"
   const devProxyPath = "/chunky-api"
   const serverToken = loadServerToken()
+  // Chrome/define may show origin only. Keep userinfo/path/query out of the renderer.
+  let proxyTargetForChrome = "http://localhost:4620"
+  try {
+    const url = new URL(serverUrl)
+    if (url.protocol === "http:" || url.protocol === "https:") proxyTargetForChrome = url.origin
+  } catch {
+    /* keep the Vite default */
+  }
   return {
   define: {
     // Dev requests use Vite's same-origin proxy. Several server JSON routes do
@@ -53,6 +61,9 @@ export default defineConfig(({ command, mode }) => {
     // by WebKit even though the server returns 200. The proxy also keeps the
     // bearer token out of the renderer bundle.
     __CHUNKY_BASE_URL__: JSON.stringify(command === "serve" ? devProxyPath : serverUrl),
+    // Safe origin of that proxy (CHUNKY_URL). Renderer chrome may show host:port;
+    // never a token, settings path, DB path, or URL userinfo.
+    __CHUNKY_PROXY_TARGET__: JSON.stringify(proxyTargetForChrome),
     __CHUNKY_TOKEN__: JSON.stringify(command === "serve" ? "" : injectToken ? serverToken : ""),
   },
   plugins: [react(), tailwindcss(), electrobunTsResolve()],

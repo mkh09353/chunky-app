@@ -22,6 +22,8 @@ export interface RelayConnectionInfo {
   workspace: string
   sessionCount: number
   mode: "live" | "demo"
+  connectionSource?: "vite-proxy" | "native" | "static"
+  proxyTarget?: string
 }
 
 export function RelaySection({ connection }: { connection?: RelayConnectionInfo }) {

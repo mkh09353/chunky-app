@@ -71,6 +71,7 @@ let declinedUpdateVersion: string | null = null
  * Keep the installed Chunky server (~/.chunky/app) current. Silent on success:
  * the replacement server takes over and the old one drains, so the only thing
  * the renderer has to do is reattach — which the message below tells it to do.
+ * Old-server inspection only covers discovery records under state/servers.
  *
  * Deliberately not a polling loop: this runs once at boot and whenever the
  * Electrobun updater check runs.

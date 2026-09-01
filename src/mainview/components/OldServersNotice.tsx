@@ -4,6 +4,8 @@ import { confirm } from "~/lib/confirm"
 import {
   classifyServers,
   forceStopWarning,
+  OLD_SERVERS_NOTICE_BODY,
+  OLD_SERVERS_NOTICE_TITLE,
   type OldServerRow,
 } from "~/lib/oldServers"
 import {
@@ -17,7 +19,9 @@ import { Button } from "./ui/button"
 const DRAIN_HINT = "Finishes in-flight work first, then exits — up to about 5 minutes."
 
 /**
- * Superseded Chunky servers that are still running after a runtime upgrade.
+ * Discovery-managed superseded Chunky servers still running after a runtime
+ * upgrade. This list is built from ~/.chunky/state/servers records, not from
+ * arbitrary listeners or raw/test servers (temp DB, CHUNKY_URL, source trees).
  *
  * Presentation only: the rows and their available actions come from
  * lib/oldServers, and the caller owns when to inspect and when to dismiss.
@@ -82,10 +86,8 @@ export function OldServersNotice({
   return (
     <div className="fixed right-5 bottom-5 z-50 flex max-h-[60vh] w-[22rem] flex-col overflow-y-auto rounded-xl border border-border/70 bg-popover shadow-panel">
       <div className="flex flex-col gap-0.5 px-4 pt-3 pb-2">
-        <span className="font-medium text-[13px]">Older Chunky servers are still running</span>
-        <span className="text-[11.5px] text-muted-foreground">
-          A newer version took over. These can be shut down when their work is done.
-        </span>
+        <span className="font-medium text-[13px]">{OLD_SERVERS_NOTICE_TITLE}</span>
+        <span className="text-[11.5px] text-muted-foreground">{OLD_SERVERS_NOTICE_BODY}</span>
       </div>
 
       <div className="flex flex-col divide-y divide-border/60 border-border/60 border-t">

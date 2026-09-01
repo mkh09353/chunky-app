@@ -31,6 +31,7 @@ import { collapseList } from "~/lib/sessionList"
 import { partitionPinned, type SessionPins } from "~/lib/sessionPins"
 import { groupByWorktree } from "~/lib/sessionGroups"
 import { cn } from "~/lib/cn"
+import { isBrowserDevLabel } from "~/lib/connectionSource"
 import { DRAG_REGION, NO_DRAG_REGION } from "~/lib/dragRegion"
 import { Kbd } from "./ui/kbd"
 import { ScrollArea } from "./ui/scroll-area"
@@ -368,7 +369,7 @@ export function Sidebar({
   evalsActive?: boolean
   onOpenSettings: () => void
   onOpenPalette: () => void
-  /** Optional live/demo connection badge in the footer. */
+  /** Optional connection badge in the footer. Browser-dev uses "Dev web · host:port". */
   connectionLabel?: string
   /** The user's git display name, resolved by App. Absent/empty → "Chunky".
    *  This row never fetches it itself. */
@@ -843,7 +844,9 @@ export function Sidebar({
               <span
                 className={cn(
                   connectionLabel === "Live" && "text-success",
-                  (connectionLabel === "Offline" || connectionLabel === "Demo") &&
+                  (connectionLabel === "Offline" ||
+                    connectionLabel === "Demo" ||
+                    (connectionLabel != null && isBrowserDevLabel(connectionLabel))) &&
                     "text-amber-600 dark:text-amber-400",
                 )}
               >

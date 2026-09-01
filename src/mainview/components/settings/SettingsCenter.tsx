@@ -72,6 +72,8 @@ export interface SettingsConnectionInfo {
   workspace: string
   sessionCount: number
   mode: "live" | "demo"
+  connectionSource?: "vite-proxy" | "native" | "static"
+  proxyTarget?: string
 }
 
 /** The sidebar name, owned by App. Settings edits it but never reads it from

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 import { getCacheGuard, runDream, setCacheGuard } from "~/lib/configApi"
 import type { CacheGuardResponse } from "~/lib/configApi"
 import { cn } from "~/lib/cn"
+import { browserDevLabel, formatSafeServerTarget } from "~/lib/connectionSource"
 import { FALLBACK_DISPLAY_NAME } from "~/lib/identity"
 import { graphemeLength } from "~/lib/quickKeys"
 import { useTheme, type ThemeMode } from "~/lib/theme"
@@ -32,7 +33,7 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
  *  Bun silently truncates. */
 const MAX_DISPLAY_NAME = 40
 
-export function GeneralSection({ connection, identity }: { connection?: { state: string; baseUrl: string; workspace: string; sessionCount: number; mode: "live" | "demo" }; identity?: SettingsIdentityInfo }) {
+export function GeneralSection({ connection, identity }: { connection?: { state: string; baseUrl: string; workspace: string; sessionCount: number; mode: "live" | "demo"; connectionSource?: "vite-proxy" | "native" | "static"; proxyTarget?: string }; identity?: SettingsIdentityInfo }) {
   const { mode, setMode } = useTheme()
 
   return (
@@ -64,11 +65,35 @@ export function GeneralSection({ connection, identity }: { connection?: { state:
 
       {connection && <Card>
         <SubLabel>Connection</SubLabel>
-        <FieldRow title={connection.mode === "live" ? connection.state : "Demo mode"} description={connection.mode === "live" ? "Local Chunky server connection." : "Mock data only; no server is connected."}>
-          <Wifi className={cn("size-4", connection.state === "connected" && connection.mode === "live" ? "text-success" : "text-muted-foreground")} />
+        <FieldRow
+          title={
+            connection.connectionSource === "vite-proxy"
+              ? browserDevLabel(connection.proxyTarget)
+              : connection.mode === "live"
+                ? connection.state
+                : "Demo mode"
+          }
+          description={
+            connection.connectionSource === "vite-proxy"
+              ? "Vite / browser-dev proxy — not the installed Chunky app."
+              : connection.mode === "live"
+                ? "Local Chunky server connection."
+                : "Mock data only; no server is connected."
+          }
+        >
+          <Wifi className={cn("size-4", connection.connectionSource === "vite-proxy" ? "text-amber-600 dark:text-amber-400" : connection.state === "connected" && connection.mode === "live" ? "text-success" : "text-muted-foreground")} />
         </FieldRow>
         <div className="grid gap-1 border-border/60 border-t pt-3 text-[12px] text-muted-foreground">
-          <span className="truncate" title={connection.baseUrl}>Server · {connection.baseUrl}</span>
+          {connection.connectionSource === "vite-proxy" && (
+            <span className="truncate text-amber-600 dark:text-amber-400" title={browserDevLabel(connection.proxyTarget)}>
+              {browserDevLabel(connection.proxyTarget)}
+            </span>
+          )}
+          <span className="truncate" title={connection.connectionSource === "vite-proxy" ? (formatSafeServerTarget(connection.proxyTarget) || "localhost:4620") : connection.baseUrl}>
+            Server · {connection.connectionSource === "vite-proxy"
+              ? formatSafeServerTarget(connection.proxyTarget) || "localhost:4620"
+              : connection.baseUrl}
+          </span>
           <span className="truncate" title={connection.workspace}>Workspace · {connection.workspace || "—"}</span>
           <span>Sessions · {connection.sessionCount}</span>
         </div>

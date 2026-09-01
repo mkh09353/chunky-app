@@ -51,6 +51,16 @@ export interface AppConfig {
   installedRuntime?: { version: string; buildId: string } | null
   /** Bun-side startup/discovery failure safe to show in the connection banner. */
   connectionError?: string
+  /**
+   * How this renderer resolved the server. `vite-proxy` is plain Vite / HMR
+   * (`dev:web`): requests go through `/chunky-api`, not packaged discovery.
+   */
+  connectionSource?: "vite-proxy" | "native" | "static"
+  /**
+   * Safe http(s) URL of the Vite proxy target (CHUNKY_URL). Host:port only is
+   * derived for chrome; never a token, settings path, or DB path.
+   */
+  proxyTarget?: string
 }
 
 export interface ModelSelection {
@@ -90,6 +100,7 @@ declare const __CHUNKY_BASE_URL__: string | undefined
 declare const __CHUNKY_TOKEN__: string | undefined
 
 import { getRpc } from "./rpc"
+import { configuredProxyTarget, isViteDevOrigin } from "./connectionSource"
 
 const DEFAULT_BASE =
   (typeof __CHUNKY_BASE_URL__ !== "undefined" && __CHUNKY_BASE_URL__) ||
@@ -127,6 +138,10 @@ function installAuthFetch(token?: string): void {
  * bridge (plain browser build) this is just loadConfig.
  */
 export async function reresolveConfig(): Promise<AppConfig> {
+  // Vite/HMR must keep the same-origin proxy even after a reconnect.
+  if (typeof window !== "undefined" && isViteDevOrigin(window.location.origin)) {
+    return withViteProxy({ baseUrl: "/chunky-api", workspace: DEFAULT_CONFIG.workspace })
+  }
   try {
     const rpc = await getRpc()
     const fn = rpc?.request?.chunkyReconnect
@@ -134,16 +149,10 @@ export async function reresolveConfig(): Promise<AppConfig> {
       const data = (await fn()) as Partial<AppConfig> | null
       if (data?.baseUrl) {
         installAuthFetch(data.serverToken)
-        return {
-          baseUrl: data.baseUrl,
-          serverToken: data.serverToken,
-          workspace: data.workspace || DEFAULT_CONFIG.workspace,
-          installedRuntime: data.installedRuntime,
-          connectionError: data.connectionError,
-        }
+        return withNativeConfig(data)
       }
       if (data?.connectionError) {
-        return { ...DEFAULT_CONFIG, baseUrl: "", connectionError: data.connectionError }
+        return { ...DEFAULT_CONFIG, baseUrl: "", connectionError: data.connectionError, connectionSource: "native" }
       }
     }
   } catch {
@@ -168,17 +177,35 @@ export async function fetchServerRetiring(baseUrl: string): Promise<boolean> {
   }
 }
 
+
+function withViteProxy(config: AppConfig): AppConfig {
+  return {
+    ...config,
+    connectionSource: "vite-proxy",
+    proxyTarget: configuredProxyTarget() || "http://localhost:4620",
+  }
+}
+
+function withNativeConfig(data: Partial<AppConfig>): AppConfig {
+  return {
+    baseUrl: data.baseUrl || "",
+    serverToken: data.serverToken,
+    workspace: data.workspace || DEFAULT_CONFIG.workspace,
+    installedRuntime: data.installedRuntime,
+    connectionError: data.connectionError,
+    connectionSource: "native",
+  }
+}
+
 export async function loadConfig(): Promise<AppConfig> {
   // When the renderer is loaded from Vite, always use its authenticated
   // same-origin proxy. This applies to both a normal browser and Electrobun's
   // HMR webview; letting the native RPC override it would send the webview
   // directly to :4620, where WebKit rejects JSON responses missing CORS.
-  if (
-    typeof window !== "undefined" &&
-    (window.location.origin === "http://localhost:5173" ||
-      window.location.origin === "http://127.0.0.1:5173")
-  ) {
-    return { baseUrl: "/chunky-api", workspace: DEFAULT_CONFIG.workspace }
+  if (typeof window !== "undefined" && isViteDevOrigin(window.location.origin)) {
+    // Keep the authenticated same-origin proxy. Native RPC must not override
+    // this: WebKit rejects CORS-less JSON from a direct :4620 fetch.
+    return withViteProxy({ baseUrl: "/chunky-api", workspace: DEFAULT_CONFIG.workspace })
   }
 
   // Inside electrobun, prefer bun-side config (real URL + token from settings).
@@ -189,13 +216,7 @@ export async function loadConfig(): Promise<AppConfig> {
       const data = (await fn()) as Partial<AppConfig> | null
       if (data?.baseUrl) {
         installAuthFetch(data.serverToken)
-        return {
-          baseUrl: data.baseUrl,
-          serverToken: data.serverToken,
-          workspace: data.workspace || DEFAULT_CONFIG.workspace,
-          installedRuntime: data.installedRuntime,
-          connectionError: data.connectionError,
-        }
+        return withNativeConfig(data)
       }
     }
   } catch {
@@ -217,6 +238,7 @@ export async function loadConfig(): Promise<AppConfig> {
         serverToken: injectedToken,
         workspace: data.workspace || DEFAULT_CONFIG.workspace,
         installedRuntime: data.installedRuntime,
+        connectionSource: "static",
       }
     }
   } catch {
@@ -227,6 +249,7 @@ export async function loadConfig(): Promise<AppConfig> {
     baseUrl: DEFAULT_CONFIG.baseUrl,
     serverToken: injectedToken,
     workspace: DEFAULT_CONFIG.workspace,
+    connectionSource: "static",
   }
 }
 

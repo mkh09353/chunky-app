@@ -1,3 +1,6 @@
+// Inspect and stop discovery-managed Chunky servers listed under
+// ~/.chunky/state/servers. Unregistered source/test processes (temp DB,
+// CHUNKY_URL, random ports) are not enumerated.
 import { join } from "node:path"
 import { readFileSync } from "node:fs"
 import { installedRuntimeIdentity, probe, recordEntries, supersedeRecord, stateDir, type Identity, type RecordFile } from "./connectionManager"

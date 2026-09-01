@@ -1,10 +1,14 @@
-// Which superseded Chunky servers are still running, and what the user may do
-// about each one.
+// Which discovery-managed superseded Chunky servers are still running, and
+// what the user may do about each one.
 //
 // After a runtime upgrade the new server takes over while the old one keeps
 // serving whatever was mid-flight. Most of the time it drains and exits on its
 // own; when it does not, this is the data behind the notice that offers to
 // retire or stop it.
+//
+// Enumeration is only ~/.chunky/state/servers records (plus identity probe).
+// Unregistered source/test servers — temp DB/settings, random ports, CHUNKY_URL
+// targets — are intentionally not listed.
 //
 // Everything above `subscribeOldServers` is pure: the classification, the
 // labels and the payload guard are all functions of an inspection, so the
@@ -18,6 +22,11 @@ import { workspaceName } from "./format"
 import { getRpc, type RpcMessageListener } from "./rpc"
 
 export type OldServerStatus = "idle" | "working" | "unknown"
+
+/** User-facing copy: this notice is discovery-managed servers only. */
+export const OLD_SERVERS_NOTICE_TITLE = "Older managed Chunky servers are still running"
+export const OLD_SERVERS_NOTICE_BODY =
+  "Discovery-registered servers from a previous runtime. Raw or test servers are not listed. These can be shut down when their work is done."
 
 export interface OldServerRow {
   id: string
@@ -46,9 +55,10 @@ export function sessionCountLabel(n: number): string {
 }
 
 /**
- * A superseded server the user might still care about: reachable (so an action
- * can reach it), not already retiring (it is leaving anyway), and not the one
- * this app is talking to.
+ * A discovery-managed superseded server the user might still care about:
+ * reachable (so an action can reach it), not already retiring (it is leaving
+ * anyway), and not the installed runtime this app would start today.
+ * Raw/test listeners without a discovery record never appear here.
  */
 export function isOldServer(server: InspectedServer): boolean {
   return server.reachable && !server.retiring && !server.current
@@ -159,9 +169,9 @@ export function parseInspection(payload: unknown): ServerInspection | null {
 }
 
 /**
- * Listen for "old servers are still running" from Bun, announced after a
- * runtime upgrade. Returns an unsubscribe function; a no-op without the native
- * bridge. Mirrors subscribeServerChanged in reresolve.ts.
+ * Listen for "discovery-managed old servers are still running" from Bun,
+ * announced after a runtime upgrade. Returns an unsubscribe function; a no-op
+ * without the native bridge. Mirrors subscribeServerChanged in reresolve.ts.
  */
 export function subscribeOldServers(handler: (inspection: ServerInspection) => void): () => void {
   let cancelled = false
