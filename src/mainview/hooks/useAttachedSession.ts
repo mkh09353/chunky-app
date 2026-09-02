@@ -431,48 +431,70 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       }
     }
 
+    /** Seed a bounded durable projection from the HTTP history tail and adopt
+     *  its captured boundary as the resume cursor. Shared by the cold v2
+     *  bootstrap and by `replay-too-large` recovery: both need exactly the same
+     *  "replace committed state with the tail, resume SSE from its cursor"
+     *  effect, and neither may leave the screen empty.
+     *
+     *  `yieldIfSeeded` is the cold-path-only race guard: another path having
+     *  filled the cache while the request was in flight means this attach must
+     *  stand down. Recovery passes false because overwriting the (rejected)
+     *  cursor is the entire point.
+     *
+     *  Returns "superseded" when the caller must stop, "failed" when the tail
+     *  request itself failed (caller keeps its legacy fallback). */
+    const seedFromHistoryTail = async (
+      seedOpts: { yieldIfSeeded: boolean },
+    ): Promise<"seeded" | "superseded" | "failed"> => {
+      let tail: Awaited<ReturnType<typeof fetchSessionHistory>>
+      try {
+        tail = await bootPerf.measure("history tail fetch", () =>
+          fetchSessionHistory(baseUrl, id, { turns: 10 }),
+        )
+      } catch {
+        return gen !== attachGen.current || ac.signal.aborted ? "superseded" : "failed"
+      }
+      if (gen !== attachGen.current || ac.signal.aborted) return "superseded"
+      cached = sessionCache.current.get(id)
+      // Goal/config hydration may have updated the placeholder while the
+      // request was in flight; a durable/cursor means another path won.
+      if (seedOpts.yieldIfSeeded && (cached?.durable || cached?.cursor)) return "superseded"
+      const seeded = projectSessionHistory(tail.events, tail.cursor)
+      const seededTranscript = { ...seeded.transcript, todos: live.state.todos }
+      committedDurable = seededTranscript
+      committedCursor = seeded.cursor
+      live.replaceState(seededTranscript)
+      live.flush()
+      setTranscriptLoading(false)
+      bootPerf.noteTailEvents(firstBootAttach, tail.events.length)
+      const seededRows = [...tail.events]
+      lastHistorySeq = seededRows.at(-1)?.seq ?? -1
+      sessionCache.current.set(id, {
+        transcript: seededTranscript,
+        durable: seededTranscript,
+        cursor: seeded.cursor,
+        goal: cached?.goal ?? goalRef.current,
+        repoId: activeRepoIdRef.current,
+        events: [],
+        olderPage: { before: tail.before, hasMore: tail.hasMore },
+        historyRows: seededRows,
+      })
+      cached = sessionCache.current.get(id)!
+      installOlderPager(cached)
+      return "seeded"
+    }
+
     // Cold v2 bootstrap: seed a bounded durable projection, then ask SSE only
     // for events persisted after the HTTP route's captured boundary. Opening
     // the stream afterward is race-safe because that cursor makes the suffix
     // include anything that arrived while the tail request was in flight.
     const coldTail = !opts?.fresh && !opts?.fullRebuild && !cached?.durable && !cached?.cursor
     if (coldTail) {
-      try {
-        const tail = await bootPerf.measure("history tail fetch", () =>
-          fetchSessionHistory(baseUrl, id, { turns: 10 }),
-        )
-        if (gen !== attachGen.current || ac.signal.aborted) return
-        cached = sessionCache.current.get(id)
-        // Goal/config hydration may have updated the placeholder while the
-        // request was in flight; a durable/cursor means another path won.
-        if (cached?.durable || cached?.cursor) return
-        const seeded = projectSessionHistory(tail.events, tail.cursor)
-        const seededTranscript = { ...seeded.transcript, todos: live.state.todos }
-        committedDurable = seededTranscript
-        committedCursor = seeded.cursor
-        live.replaceState(seededTranscript)
-        live.flush()
-        setTranscriptLoading(false)
-        bootPerf.noteTailEvents(firstBootAttach, tail.events.length)
-        const seededRows = [...tail.events]
-        lastHistorySeq = seededRows.at(-1)?.seq ?? -1
-        sessionCache.current.set(id, {
-          transcript: seededTranscript,
-          durable: seededTranscript,
-          cursor: seeded.cursor,
-          goal: cached?.goal ?? goalRef.current,
-          repoId: activeRepoIdRef.current,
-          events: [],
-          olderPage: { before: tail.before, hasMore: tail.hasMore },
-          historyRows: seededRows,
-        })
-
-        installOlderPager(sessionCache.current.get(id)!)
-      } catch {
-        if (gen !== attachGen.current || ac.signal.aborted) return
-        // Unsupported and network-failed tail requests both retain the exact
-        // pre-existing from-zero replay path below.
-      }
+      // Unsupported and network-failed tail requests both retain the exact
+      // pre-existing from-zero replay path below.
+      const outcome = await seedFromHistoryTail({ yieldIfSeeded: true })
+      if (outcome === "superseded") return
     }
 
     const onOpen = () => {
@@ -770,14 +792,27 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       } catch (err) {
         if (isIntentionalAbort(err, ac.signal) || gen !== attachGen.current) return
         if (err instanceof SessionCursorRejected) {
-          // The server refuses this cursor outright (400). Keeping it would
-          // fail identically forever, so forget the resume point and take a
-          // full replay — the screen still keeps its projection until the next
-          // replay-end commits.
-          committedCursor = null
-          committedDurable = null
-          sessionCache.current.update(id, { durable: null, cursor: null })
-          void deleteSessionSnapshot(id)
+          // A newer server can refuse a VALID cursor because the suffix from it
+          // is over its replay budget. Dropping the cursor there would ask for
+          // the unbounded from-zero replay the server just refused, so re-seed
+          // from the bounded history tail instead and resume from ITS boundary.
+          let reseeded = false
+          if (err.code === "replay-too-large") {
+            const outcome = await seedFromHistoryTail({ yieldIfSeeded: false })
+            if (gen !== attachGen.current || ac.signal.aborted) return
+            if (outcome === "superseded") return
+            reseeded = outcome === "seeded"
+          }
+          if (!reseeded) {
+            // The server refuses this cursor outright (400), or the tail fetch
+            // itself failed. Keeping the cursor would fail identically forever,
+            // so forget the resume point and take a full replay — the screen
+            // still keeps its projection until the next replay-end commits.
+            committedCursor = null
+            committedDurable = null
+            sessionCache.current.update(id, { durable: null, cursor: null })
+            void deleteSessionSnapshot(id)
+          }
         }
         attempt += 1
         reconnecting = true

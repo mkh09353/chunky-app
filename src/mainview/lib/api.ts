@@ -962,12 +962,26 @@ export async function openEventStream(
   }
 }
 
-/** The server refused our cursor as malformed (HTTP 400). Retrying with the
- *  same cursor can only fail again, so the caller must drop it and replay. */
+/** The server refused our cursor (HTTP 400). Retrying with the same cursor can
+ *  only fail again, so the caller must drop it and re-seed.
+ *
+ *  `code` distinguishes the rejections a newer server names:
+ *  - undefined  — legacy body `{ error: "invalid session event cursor" }`.
+ *  - "replay-too-large" — the cursor is valid but the suffix from it exceeds
+ *    the server's replay budget. `cursor` then carries the server's encoded
+ *    cursor at the CURRENT boundary, so the caller can re-seed from a bounded
+ *    history tail instead of replaying from zero. */
 export class SessionCursorRejected extends Error {
-  constructor(message = "invalid session event cursor") {
+  readonly code?: string
+  readonly cursor?: string
+  constructor(
+    message = "invalid session event cursor",
+    opts: { code?: string; cursor?: string } = {},
+  ) {
     super(message)
     this.name = "SessionCursorRejected"
+    this.code = opts.code
+    this.cursor = opts.cursor
   }
 }
 
@@ -989,8 +1003,13 @@ export async function openSessionEventStream(
   const url = baseUrl + sessionEventsUrl(sessionId, cursor ? { cursor } : undefined)
   const res = await fetch(url, { signal })
   if (res.status === 400 && cursor) {
-    const body = await res.json().catch(() => null) as { error?: string } | null
-    throw new SessionCursorRejected(body?.error || undefined)
+    const body = (await res.json().catch(() => null)) as
+      | { error?: string; code?: string; cursor?: string }
+      | null
+    throw new SessionCursorRejected(body?.error || undefined, {
+      code: typeof body?.code === "string" ? body.code : undefined,
+      cursor: typeof body?.cursor === "string" ? body.cursor : undefined,
+    })
   }
   if (!res.ok) throw new Error(`events stream failed (${res.status})`)
   onOpen?.()

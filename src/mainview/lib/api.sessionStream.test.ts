@@ -69,6 +69,39 @@ describe("openSessionEventStream", () => {
       Response.json({ error: "invalid session event cursor" }, { status: 400 })) as unknown as typeof fetch
     const failure = openSessionEventStream("http://x", "s1", () => {}, { cursor: CURSOR })
     await expect(failure).rejects.toBeInstanceOf(SessionCursorRejected)
+    // Legacy body: no code, no boundary cursor — the caller keeps its existing
+    // null-cursor full-replay recovery.
+    const err = await openSessionEventStream("http://x", "s1", () => {}, { cursor: CURSOR })
+      .then(() => null, (e: unknown) => e as SessionCursorRejected)
+    expect(err?.code).toBeUndefined()
+    expect(err?.cursor).toBeUndefined()
+    expect(err?.message).toBe("invalid session event cursor")
+  })
+
+  test("an over-budget replay surfaces its code and the server's boundary cursor", async () => {
+    // A newer server answers 400 replay-too-large when the suffix from OUR
+    // cursor exceeds its budget; the body carries the current boundary so the
+    // caller can re-seed from a bounded tail instead of replaying from zero.
+    const boundary = encodeSessionEventCursor({ generation: "g1", nextSeq: 9000 })
+    globalThis.fetch = (async () =>
+      Response.json(
+        { error: "session event replay too large", code: "replay-too-large", cursor: boundary, events: 12000, bytes: 90_000_000 },
+        { status: 400 },
+      )) as unknown as typeof fetch
+    const err = await openSessionEventStream("http://x", "s1", () => {}, { cursor: CURSOR })
+      .then(() => null, (e: unknown) => e as SessionCursorRejected)
+    expect(err).toBeInstanceOf(SessionCursorRejected)
+    expect(err?.code).toBe("replay-too-large")
+    expect(err?.cursor).toBe(boundary)
+    expect(err?.message).toBe("session event replay too large")
+  })
+
+  test("a 400 with a non-JSON body still rejects the cursor with no code", async () => {
+    globalThis.fetch = (async () => new Response("nope", { status: 400 })) as unknown as typeof fetch
+    const err = await openSessionEventStream("http://x", "s1", () => {}, { cursor: CURSOR })
+      .then(() => null, (e: unknown) => e as SessionCursorRejected)
+    expect(err).toBeInstanceOf(SessionCursorRejected)
+    expect(err?.code).toBeUndefined()
   })
 
   test("a 400 without a cursor is just a stream failure", async () => {
