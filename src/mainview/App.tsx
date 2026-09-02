@@ -228,6 +228,13 @@ const SESSION_STREAM_RETRY_MS = 5_000
 /** The retirement check keeps its own cadence: handover latency must not follow
  *  the session-summary cadence. */
 const RETIREMENT_POLL_MS = 5_000
+/** A repo list fetched this recently is reused by the next all-repo refresh. */
+const FRESH_LIST_MS = 1_500
+/** Cold (server-archived) rows change rarely: reopening the Archived section
+ *  within this window reuses the answer instead of asking again. */
+const COLD_FRESH_MS = 60_000
+/** How long after the boot attach starts before ambient requests may begin. */
+const BOOT_SETTLE_MS = 1_500
 /** Recent agent-activity lines kept for the clone popover's progress log. */
 const CLONE_LOG_LINES = 8
 
@@ -347,6 +354,15 @@ export function App() {
   // ---- Live server state ----
   const [config, setConfig] = useState<AppConfig | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>("booting")
+  // Boot-critical requests (session list, attach, transcript stream) share the
+  // WebView's ~6 connections per host with everything else; two of those are
+  // held by SSE streams. Ambient work (onboarding check, modes, PR board, pane
+  // announcements) waits for this so the first transcript paints sooner.
+  const [bootSettled, setBootSettled] = useState(false)
+  const bootSettledRef = useRef(false)
+  useEffect(() => {
+    bootSettledRef.current = bootSettled
+  }, [bootSettled])
   const [connError, setConnError] = useState<string | null>(null)
   const [serverWarning, setServerWarning] = useState<string | null>(null)
   // First-run install progress pushed by Bun. Disposable: null on a warm launch
@@ -550,6 +566,9 @@ export function App() {
   // existing all-repo poll. Transcript projections are bounded because a
   // lengthy history can be much larger than a sidebar row.
   const repoSessionCache = useRef(new Map<string | null, SessionSummary[]>())
+  /** When each repo's list was last fetched authoritatively (dedupes boot). */
+  const repoListFetchedAt = useRef(new Map<string | null, number>())
+  const bootSettleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const sessionCache = useRef(new SessionCache(20))
   /** Monotonic source of optimistic row ids. Distinct from mapTranscript's
    *  `ev-N` ids, so a pending row can never collide with a mapped one. */
@@ -587,6 +606,9 @@ export function App() {
   const refreshSessions = useCallback(
     async (baseUrl: string, repoId: string | null = activeRepoIdRef.current) => {
       const gen = ++repoListGen.current
+      // Stamped at request start so a concurrent all-repo refresh (boot) sees
+      // the in-flight list as fresh rather than asking a second time.
+      repoListFetchedAt.current.set(repoId, Date.now())
       const list = await listSessions(baseUrl, repoId, repoId === null ? "none" : undefined)
       if (gen !== repoListGen.current) return list
       // Authoritative rows (they carry `busy`) — fold them into the shared map
@@ -772,6 +794,64 @@ export function App() {
     activeRepo,
     unreadDone,
   ])
+
+  // ---- Cold (server-archived) sessions ------------------------------------
+  //
+  // Sessions the SERVER has archived have left the live list and the summary
+  // stream; they are fetched per repo, on demand, only when the sidebar's
+  // Archived section is opened. These rows are SIDEBAR PRESENTATION ONLY: they
+  // never enter shellSummaries / repoSessionCache / sessionCache.reconcileRepo,
+  // unread tracking or the palette+voice session lists, all of which describe
+  // what is live. Opening one attaches normally (the server rehydrates it), and
+  // that is exactly when this repo's cold answer stops being true.
+  const coldCache = useRef(new Map<string, { rows: SessionSummary[]; fetchedAt: number }>())
+  const [coldRows, setColdRows] = useState<{ repoId: string; rows: SessionSummary[] } | null>(null)
+  const [coldLoading, setColdLoading] = useState(false)
+
+  const handleArchivedOpen = useCallback(() => {
+    if (!live || !config) return
+    // Repository-less scope has no cold list, and `archived=1` with scope=none
+    // is a 400 — so it is never asked for.
+    const repoId = activeRepoIdRef.current
+    if (repoId == null) return
+    const cached = coldCache.current.get(repoId)
+    if (cached) {
+      setColdRows({ repoId, rows: cached.rows })
+      if (Date.now() - cached.fetchedAt < COLD_FRESH_MS) return
+    }
+    const baseUrl = config.baseUrl
+    setColdLoading(true)
+    void listSessions(baseUrl, repoId, undefined, { archived: true })
+      .then((rows) => {
+        coldCache.current.set(repoId, { rows, fetchedAt: Date.now() })
+        if (activeRepoIdRef.current === repoId) setColdRows({ repoId, rows })
+      })
+      .catch(() => {
+        // The cold list is an extra: an old/failing server just shows none.
+      })
+      .finally(() => {
+        if (activeRepoIdRef.current === repoId) setColdLoading(false)
+      })
+  }, [live, config])
+
+  // Only ever the ACTIVE repo's answer: a stale one from the previous tab is
+  // dropped rather than drawn under the new repo's Archived header.
+  const coldThreads: Thread[] | undefined = useMemo(() => {
+    if (!live || !coldRows || coldRows.repoId !== activeRepoId) return undefined
+    return coldRows.rows.map((s) => {
+      const t = sessionToThread(s)
+      t.cold = true
+      if (activeRepo) t.projectId = `repo:${activeRepo.id}`
+      return t
+    })
+  }, [live, coldRows, activeRepoId, activeRepo])
+
+  // A different server (or a reconnect) invalidates every cold answer.
+  useEffect(() => {
+    coldCache.current.clear()
+    setColdRows(null)
+    setColdLoading(false)
+  }, [config?.baseUrl, connectionState])
 
   // ---- Sidebar shelf (inbox vs history) -----------------------------------
   //
@@ -1072,20 +1152,19 @@ export function App() {
       }
 
       try {
-        const [info, reg, sel, rows] = await Promise.all([
+        // The model catalog (providers + per-provider model lists) is picker
+        // data, not boot data: it costs several server round trips and is
+        // loaded by the bootSettled effect below, after the first attach.
+        const [info, reg, sel] = await Promise.all([
           bootPerf.measure("fetch server info", () => fetchServerInfo(cfg.baseUrl)),
           bootPerf.measure("list repositories", () => listRepos(cfg.baseUrl).catch(() => null)),
           bootPerf.measure("fetch selected model", () => fetchModel(cfg.baseUrl)),
-          bootPerf.measure("fetch model catalog", () =>
-            listAllModels(cfg.baseUrl).catch(() => [] as ModelRow[]),
-          ),
         ])
         if (cancelled) return
 
         setServerWarning(serverMismatchWarning(cfg.baseUrl, cfg.installedRuntime, info))
         setWorkspace(info.workspace || cfg.workspace || "")
         setModelSel(sel)
-        setModelRows(rows)
         setConnectionState("connected")
         setAppMode("live")
         setConnError(null)
@@ -1111,8 +1190,14 @@ export function App() {
         }
 
         await openRepoThreads(cfg.baseUrl, repoId, true)
+        // Give the attach (model hydration, transcript stream) a head start on
+        // the connection pool before ambient requests join the queue.
+        bootSettleTimer.current = setTimeout(() => {
+          if (!cancelled) setBootSettled(true)
+        }, BOOT_SETTLE_MS)
       } catch (err) {
         if (cancelled) return
+        setBootSettled(true)
         setConnectionState("offline")
         setConnError(
           `Can't reach Chunky server at ${cfg.baseUrl}. (${(err as Error).message})`,
@@ -1124,6 +1209,7 @@ export function App() {
       unsubscribeSetup?.()
       stopStream()
       if (settleTimer.current != null) clearTimeout(settleTimer.current)
+      if (bootSettleTimer.current != null) clearTimeout(bootSettleTimer.current)
     }
   }, [openRepoThreads, stopStream])
 
@@ -1136,7 +1222,7 @@ export function App() {
    */
   useEffect(() => {
     if (!config) return
-    if (appMode === "live" && connectionState === "connected") {
+    if (appMode === "live" && connectionState === "connected" && bootSettled) {
       void announceAppBrowserTarget(config.baseUrl)
       // Same lifetime, same rules: the zoo board's local service has to be
       // re-announced on every connect for the zoo_* tools to exist.
@@ -1145,7 +1231,7 @@ export function App() {
       resetAppBrowserAnnounce()
       resetAppZooAnnounce()
     }
-  }, [config, appMode, connectionState])
+  }, [config, appMode, connectionState, bootSettled])
 
   // Poll model selection lightly so external changes show up.
   useEffect(() => {
@@ -1177,6 +1263,7 @@ export function App() {
     const ac = new AbortController()
     let pollMs = FALLBACK_POLL_MS
     let pollTimer: ReturnType<typeof setTimeout> | null = null
+    let initialTimer: ReturnType<typeof setTimeout> | null = null
     let confirmTimer: ReturnType<typeof setTimeout> | null = null
     let lastConfirmAt = 0
 
@@ -1246,7 +1333,13 @@ export function App() {
 
     /** Authoritative refresh: the only source of a settled `busy`. */
     const refreshAllRepos = async () => {
-      const active = await refreshSessions(baseUrl).catch(() => null)
+      // Boot already listed the selected repo moments ago (openRepoThreads);
+      // reuse that answer instead of asking again while the attach is queued.
+      const activeId = activeRepoIdRef.current
+      const fetchedAt = repoListFetchedAt.current.get(activeId) ?? 0
+      const active = Date.now() - fetchedAt < FRESH_LIST_MS
+        ? (repoSessionCache.current.get(activeId) ?? null)
+        : await refreshSessions(baseUrl).catch(() => null)
       if (stopped) return
       if (active) shellSummaries.current = absorbAuthoritative(shellSummaries.current, active)
       const otherRepos = repos.filter((repo) => repo.id !== activeRepoIdRef.current)
@@ -1326,12 +1419,28 @@ export function App() {
       }, pollMs)
     }
 
-    void refreshAllRepos()
-    schedulePoll()
+    // The stream's snapshot paints every repo's rows immediately; the first
+    // AUTHORITATIVE sweep (16 repos = 16 requests on this machine) can wait
+    // until the boot attach has its head start. Reconnects run it at once.
+    initialTimer = setTimeout(() => {
+      initialTimer = null
+      void refreshAllRepos().finally(schedulePoll)
+    }, bootSettledRef.current ? 0 : BOOT_SETTLE_MS)
     checkRetirement()
     const retirement = setInterval(checkRetirement, RETIREMENT_POLL_MS)
 
     void (async () => {
+      // At boot the selected repo's rows are already on screen from the
+      // authoritative list; the cross-repo snapshot (every session on the
+      // machine, hundreds of KB) can wait until the attach has its head start
+      // rather than blocking the server while the transcript loads.
+      if (!bootSettledRef.current) {
+        try {
+          await sleep(BOOT_SETTLE_MS, ac.signal)
+        } catch {
+          return
+        }
+      }
       for (;;) {
         try {
           await openSessionStream(
@@ -1339,8 +1448,13 @@ export function App() {
             {
               onOpen: () => {
                 // The stream is the fast path now; polling drops back to a
-                // safety net for what shell rows cannot express.
+                // safety net for what shell rows cannot express. A poll already
+                // armed at the fallback cadence is re-armed at the safety one.
                 pollMs = SAFETY_POLL_MS
+                if (pollTimer != null) {
+                  clearTimeout(pollTimer)
+                  schedulePoll()
+                }
               },
               onSnapshot: (rows) => {
                 const { map, stale } = applySessionSnapshot(shellSummaries.current, rows)
@@ -1375,6 +1489,7 @@ export function App() {
       ac.abort()
       clearInterval(retirement)
       if (pollTimer != null) clearTimeout(pollTimer)
+      if (initialTimer != null) clearTimeout(initialTimer)
       if (confirmTimer != null) clearTimeout(confirmTimer)
     }
   }, [config, appMode, connectionState, refreshSessions, repos, moveToResolvedServer])
@@ -1466,12 +1581,27 @@ export function App() {
   // Only ask a reachable live server once per app lifetime. Demo/offline mode
   // never touches onboarding endpoints.
   useEffect(() => {
-    if (!config || appMode !== "live" || connectionState !== "connected" || onboardingChecked.current) return
+    if (!config || appMode !== "live" || connectionState !== "connected" || !bootSettled || onboardingChecked.current) return
     onboardingChecked.current = true
     void needsOnboarding().then((needed) => {
       if (needed) setOnboardingOpen(true)
     })
-  }, [config, appMode, connectionState])
+  }, [config, appMode, connectionState, bootSettled])
+
+  // Model catalog for the picker: providers + one request per provider. Loaded
+  // once the boot attach has had its head start, and again on every reconnect.
+  useEffect(() => {
+    if (!config || appMode !== "live" || connectionState !== "connected" || !bootSettled) return
+    let cancelled = false
+    void bootPerf.measure("fetch model catalog", () =>
+      listAllModels(config.baseUrl).catch(() => [] as ModelRow[]),
+    ).then((rows) => {
+      if (!cancelled) setModelRows(rows)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [config, appMode, connectionState, bootSettled])
 
   /** Refresh current selection + full provider catalogs (picker open / retry). */
   const refreshModels = useCallback(async () => {
@@ -1541,10 +1671,10 @@ export function App() {
       setSessionAgentConfig({})
       return
     }
-    if (connectionState !== "connected") return
+    if (connectionState !== "connected" || !bootSettled) return
     void refreshModes()
     void refreshAgents()
-  }, [appMode, connectionState, refreshModes, refreshAgents])
+  }, [appMode, connectionState, bootSettled, refreshModes, refreshAgents])
 
   const slashCommands = useMemo<SlashCommand[]>(() => [...COMMANDS, ...slashModes], [slashModes])
 
@@ -1925,6 +2055,18 @@ export function App() {
         return
       }
       if (!config || id === sessionId) return
+      // Opening a cold row makes it live again on the server, so this repo's
+      // cold answer is stale: drop it (and the row) rather than keep showing it
+      // under Archived.
+      const repoId = activeRepoIdRef.current
+      if (repoId != null && coldCache.current.get(repoId)?.rows.some((r) => r.sessionId === id)) {
+        coldCache.current.delete(repoId)
+        setColdRows((prev) =>
+          prev && prev.repoId === repoId
+            ? { repoId, rows: prev.rows.filter((r) => r.sessionId !== id) }
+            : prev,
+        )
+      }
       void attachSession(config.baseUrl, id)
     },
     [live, stopDemoStream, config, sessionId, attachSession],
@@ -2022,7 +2164,7 @@ export function App() {
   /** Poll the board while connected. Paused when the window is hidden: the
    *  counts are ambient, and a backgrounded app should not keep hitting GitHub. */
   useEffect(() => {
-    if (!live || connectionState !== "connected" || prUnsupported) return
+    if (!live || connectionState !== "connected" || !bootSettled || prUnsupported) return
     const tick = () => {
       if (typeof document !== "undefined" && document.hidden) return
       void loadPrReviews()
@@ -2037,7 +2179,7 @@ export function App() {
       clearInterval(timer)
       document.removeEventListener("visibilitychange", onVisible)
     }
-  }, [live, connectionState, prUnsupported, loadPrReviews])
+  }, [live, connectionState, bootSettled, prUnsupported, loadPrReviews])
 
   /** A different server may well have the routes this one lacks: moving to a
    *  replacement (or reconnecting) re-arms the poll rather than staying dark. */
@@ -2818,16 +2960,15 @@ export function App() {
     const baseUrl = resolved.baseUrl || config.baseUrl
     if (resolved.baseUrl && resolved.baseUrl !== config.baseUrl) setConfig(resolved)
     try {
-      const [info, reg, sel, rows] = await Promise.all([
+      const [info, reg, sel] = await Promise.all([
         fetchServerInfo(baseUrl),
         listRepos(baseUrl).catch(() => null),
         fetchModel(baseUrl),
-        listAllModels(baseUrl).catch(() => [] as ModelRow[]),
       ])
       setServerWarning(serverMismatchWarning(baseUrl, resolved.installedRuntime, info))
       setWorkspace(info.workspace || "")
       setModelSel(sel)
-      setModelRows(rows)
+      setBootSettled(true)
       setConnectionState("connected")
 
       if (reg) {
@@ -3139,6 +3280,11 @@ export function App() {
           onThreadSettledChange={live ? handleThreadSettledChange : undefined}
           pinnedThreadIds={live ? pinnedSessions : undefined}
           onThreadPinnedChange={live ? handleThreadPinnedChange : undefined}
+          // Server-archived rows for THIS repo, fetched only when the section
+          // is opened. Repo-less scope has no cold list, so no opener either.
+          coldThreads={coldThreads}
+          coldLoading={coldLoading}
+          onArchivedOpen={live && activeRepoId != null ? handleArchivedOpen : undefined}
           displayName={pickDisplayName(nameOverride, gitUserName)}
           prWidget={
             live && !prUnsupported ? (

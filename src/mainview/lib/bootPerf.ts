@@ -107,6 +107,21 @@ function settleFirstAttach(firstBootAttach: boolean): void {
       }
     })
     console.table(rows)
+    postDevReport(rows)
+  } catch {}
+}
+
+declare const __CHUNKY_BASE_URL__: string | undefined
+
+/** Dev only: the Vite proxy target may be scripts/dev-request-log.ts, which
+ *  records this table next to the request timeline. Packaged builds never
+ *  reach here (no Vite proxy base URL), and a plain server 404 is ignored. */
+function postDevReport(rows: Array<Record<string, unknown>>): void {
+  try {
+    if (!import.meta.env?.DEV) return
+    if (typeof __CHUNKY_BASE_URL__ === "undefined" || __CHUNKY_BASE_URL__ !== "/chunky-api") return
+    const text = rows.map((row) => Object.values(row).map(String).join("\t")).join("\n")
+    void fetch(`${__CHUNKY_BASE_URL__}/__reqlog/bootperf`, { method: "POST", body: text, keepalive: true }).catch(() => {})
   } catch {}
 }
 

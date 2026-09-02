@@ -130,6 +130,10 @@ export interface Thread {
    *  repository's main checkout (SessionSummary.worktree.path). */
   worktreePath?: string
   number?: number
+  /** Server-archived (cold) row, fetched on demand for the Archived section.
+   *  It is sidebar presentation only: cold rows never enter the live session
+   *  caches, unread tracking or the palette/voice lists. */
+  cold?: boolean
   messages: Message[]
 }
 

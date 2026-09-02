@@ -260,23 +260,46 @@ export async function fetchServerInfo(baseUrl: string): Promise<ServerInfoRespon
   return (await res.json()) as ServerInfoResponse
 }
 
+/** Extra, non-positional knobs for `listSessions`.
+ *
+ *  `archived` asks the server for the COLD (server-archived) rows of a repo
+ *  instead of its live list — a separate, on-demand query, never mixed into the
+ *  live one. It cannot be combined with `scope: "none"` (the server answers 400
+ *  and the repository-less scope has no cold list at all). */
+export interface ListSessionsOptions {
+  archived?: boolean
+}
+
 export async function listSessions(
   baseUrl: string,
   repoId?: string | null,
   scope?: "none",
+  options?: ListSessionsOptions,
 ): Promise<SessionSummary[]> {
   const path = baseUrl.replace(/\/$/, "") + ROUTES.listSessions
   const url =
     path.startsWith("http://") || path.startsWith("https://")
       ? new URL(path)
       : new URL(path, typeof window !== "undefined" ? window.location.origin : "http://localhost")
-  if (scope === "none") url.searchParams.set("scope", "none")
-  else if (repoId) url.searchParams.set("repo", repoId)
+  const archived = options?.archived === true
+  if (scope === "none") {
+    if (archived) throw new Error("archived sessions are not available without a repository")
+    url.searchParams.set("scope", "none")
+  } else if (repoId) url.searchParams.set("repo", repoId)
+  if (archived) url.searchParams.set("archived", "1")
   const res = await fetch(url)
   if (!res.ok) throw new Error(`list sessions failed (${res.status})`)
   const data = (await res.json()) as ListSessionsResponse
   const sessions = data.sessions ?? []
-  return sessions.slice().sort((a, b) => b.lastActivity - a.lastActivity)
+  // Older servers ignore `archived=1` and answer with the LIVE list. Those rows
+  // carry no `archived: true`, so filtering here turns that into "this server
+  // has no cold rows" instead of duplicating the live list under Archived.
+  // `archived` is read structurally: the marker ships with the cold-session
+  // server, and the pinned protocol package here may predate it.
+  const rows = archived
+    ? sessions.filter((s) => (s as SessionSummary & { archived?: boolean }).archived === true)
+    : sessions
+  return rows.slice().sort((a, b) => b.lastActivity - a.lastActivity)
 }
 
 export interface SessionStreamHandlers {

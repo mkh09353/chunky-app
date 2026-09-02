@@ -28,6 +28,7 @@ import type { Project, Thread, ThreadStatus } from "~/lib/mock"
 import { useArchivedSessions } from "~/lib/archivedSessions"
 import { avatarInitial, resolveDisplayName } from "~/lib/identity"
 import { collapseList } from "~/lib/sessionList"
+import { mergeColdThreads } from "~/lib/coldSessions"
 import { partitionPinned, type SessionPins } from "~/lib/sessionPins"
 import { groupByWorktree } from "~/lib/sessionGroups"
 import { cn } from "~/lib/cn"
@@ -116,6 +117,7 @@ function ThreadRow({
   unreadMarked,
   onToggleArchive,
   archived = false,
+  cold = false,
   onSettledChange,
   settled = false,
   onPinnedChange,
@@ -133,6 +135,9 @@ function ThreadRow({
   /** Local-only archive toggle; omitted → no archive affordance on the row. */
   onToggleArchive?: () => void
   archived?: boolean
+  /** Archived by the SERVER (cold storage), not by this device: the row is
+   *  read-only here — it carries a muted marker and no un-archive toggle. */
+  cold?: boolean
   /** Shelf toggle (settle / move back to the working list); omitted → no action. */
   onSettledChange?: (settled: boolean) => void
   /** This row is on the history shelf: it renders slimmer and recedes. */
@@ -213,6 +218,15 @@ function ThreadRow({
           >
             {thread.title}
           </span>
+          {cold && (
+            <span
+              className="flex shrink-0 items-center text-muted-foreground/45"
+              title="Archived on server"
+              aria-label="Archived on server"
+            >
+              <Archive className="size-3" aria-hidden="true" />
+            </span>
+          )}
           <span
             className={cn(
               "shrink-0 text-[10.5px] text-muted-foreground/55 tabular-nums transition-opacity",
@@ -337,6 +351,9 @@ export function Sidebar({
   onThreadPinnedChange,
   prWidget,
   showProjects = false,
+  coldThreads,
+  coldLoading = false,
+  onArchivedOpen,
 }: {
   projects: Project[]
   threads: Thread[]
@@ -392,6 +409,16 @@ export function Sidebar({
   onThreadPinnedChange?: (id: string, pinned: boolean) => void
   /** Pinned above the footer, outside the scroll area (the PR reviews widget). */
   prWidget?: ReactNode
+  /** Server-archived (cold) rows for the ACTIVE repo, fetched on demand by the
+   *  parent when the Archived section is opened. They render below the
+   *  device-archived rows and cannot be un-archived from here. */
+  coldThreads?: Thread[]
+  /** The parent's cold fetch is in flight. */
+  coldLoading?: boolean
+  /** Present → this repo may have cold rows, so the Archived header is offered
+   *  even with nothing archived on this device. Called each time the section is
+   *  opened; the parent decides whether that costs a request. */
+  onArchivedOpen?: () => void
 }) {
   const [query, setQuery] = useState("")
   const [archivedOpen, setArchivedOpen] = useState(false)
@@ -443,6 +470,31 @@ export function Sidebar({
       archived: list.filter((t) => archivedIds.has(t.id)),
     }
   }, [threads, query, projectOf, archivedIds, isSettled, pinnedThreadIds])
+
+  // Cold rows join the archived section BELOW the device-archived ones. Same
+  // search filter (so narrowing narrows both), deduped against what is already
+  // drawn — a session archived both here and on the server shows once, as the
+  // local row that still owns the un-archive toggle.
+  const coldVisible = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const rows = (coldThreads ?? []).filter(
+      (t) =>
+        !q ||
+        t.title.toLowerCase().includes(q) ||
+        t.branch.toLowerCase().includes(q),
+    )
+    return mergeColdThreads(archived, rows, new Set(threads.map((t) => t.id)))
+  }, [coldThreads, query, archived, threads])
+
+  const showArchivedSection = archived.length > 0 || !!onArchivedOpen
+
+  const toggleArchivedSection = useCallback(() => {
+    setArchivedOpen((open) => {
+      const next = !open
+      if (next) onArchivedOpen?.()
+      return next
+    })
+  }, [onArchivedOpen])
 
   // Old settled threads are history, not a working list: show a screenful and
   // let the reader ask for the rest. Selection order stays the server's.
@@ -774,11 +826,11 @@ export function Sidebar({
           </p>
         )}
 
-        {archived.length > 0 && (
+        {showArchivedSection && (
           <>
             <button
               type="button"
-              onClick={() => setArchivedOpen((open) => !open)}
+              onClick={toggleArchivedSection}
               aria-expanded={archivedOpen}
               className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 pt-4 pb-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             >
@@ -793,7 +845,10 @@ export function Sidebar({
               </span>
               <span className="h-px flex-1 bg-border/60" />
               <span className="text-[10.5px] text-muted-foreground/40 tabular-nums">
-                {archived.length}
+                {/* The count is the DEVICE-archived one; cold rows are only
+                    known after the section has been opened, so an unopened
+                    section says "…" rather than a number it cannot have. */}
+                {coldLoading ? "…" : archived.length > 0 ? archived.length : onArchivedOpen ? "…" : 0}
               </span>
             </button>
             {archivedOpen && (
@@ -820,6 +875,31 @@ export function Sidebar({
                     archived
                   />
                 ))}
+                {/* Server-archived rows: read-only here (no device toggle, no
+                    shelf/pin actions — they are not in the live list). */}
+                {coldVisible.map((t) => (
+                  <ThreadRow
+                    key={t.id}
+                    thread={t}
+                    project={projectOf.get(t.projectId)}
+                    active={t.id === activeThreadId}
+                    onSelect={() => onSelectThread(t.id)}
+                    archived
+                    cold
+                    showProject={showProjects}
+                  />
+                ))}
+                {coldLoading && (
+                  <div className="flex items-center gap-2 px-2.5 py-1.5 text-[11px] text-muted-foreground/60">
+                    <span className="size-3 animate-spin rounded-full border border-muted-foreground/30 border-t-transparent" />
+                    <span className="min-w-0 truncate">Loading archived sessions…</span>
+                  </div>
+                )}
+                {!coldLoading && archived.length === 0 && coldVisible.length === 0 && (
+                  <p className="px-2.5 py-1.5 text-[11px] text-muted-foreground/60">
+                    Nothing archived.
+                  </p>
+                )}
               </div>
             )}
           </>

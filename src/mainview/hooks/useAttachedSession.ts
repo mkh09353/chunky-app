@@ -767,7 +767,13 @@ export function useAttachedSession(deps: AttachedSessionDeps) {
       try {
         if (gen !== attachGen.current) return
         reconnecting = attempt > 0
-        setConnectionState(attempt === 0 ? "connecting" : "reconnecting")
+        // A first attempt on an already-connected server must not dip the app to
+        // "connecting": every effect keyed on connectionState (summary stream,
+        // modes, PR board, announcements) would tear down and refetch on the
+        // connected→connecting→connected round trip — doubling boot traffic.
+        setConnectionState((prev) =>
+          attempt > 0 ? "reconnecting" : prev === "connected" ? prev : "connecting",
+        )
         // One machine per attempt, built from COMMITTED state only: if this
         // attempt dies before replay-end, its working shadow dies with it.
         v2 = false
