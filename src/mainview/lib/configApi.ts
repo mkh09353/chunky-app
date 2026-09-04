@@ -957,21 +957,46 @@ export interface OnboardingProvider {
   ready: boolean
 }
 
-/** A suggested onboarding mode: name + description + the full ModeSpec to apply. */
+/** A suggested onboarding mode: name + description + the full ModeSpec to apply.
+ *  `locked` (newer servers only) means one of `missingProviders` isn't connected
+ *  yet: the spec is still carried so the seats can be described, but applying it
+ *  would 409. Older servers omit both fields — everything is then unlocked. */
 export interface SuggestedMode {
   name: string
   description: string
   spec: ModeSpec
+  locked?: boolean
+  missingProviders?: string[]
+}
+
+/** The mode the server wants every new user to land in ("fire"), plus the
+ *  providers it needs and the ones still missing. Null on older servers. */
+export interface OnboardingRecommendation {
+  name: string
+  requires: string[]
+  missing: string[]
 }
 
 export interface OnboardingResponse {
   providers: OnboardingProvider[]
   onboardedAt: number | null
   suggestedModes: SuggestedMode[]
+  /** null = the server predates the recommendation (render the classic flow). */
+  recommended: OnboardingRecommendation | null
 }
 
-function normalizeOnboarding(data: unknown): OnboardingResponse {
-  const out: OnboardingResponse = { providers: [], onboardedAt: null, suggestedModes: [] }
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : []
+
+/** Tolerant by contract: an older runtime sends neither `recommended` nor
+ *  `locked`, and must come out as `recommended: null` / unlocked modes. */
+export function normalizeOnboarding(data: unknown): OnboardingResponse {
+  const out: OnboardingResponse = {
+    providers: [],
+    onboardedAt: null,
+    suggestedModes: [],
+    recommended: null,
+  }
   if (!data || typeof data !== "object") return out
   const o = data as Record<string, unknown>
   const rawProviders = Array.isArray(o.providers)
@@ -1007,12 +1032,26 @@ function normalizeOnboarding(data: unknown): OnboardingResponse {
       if (typeof row.name === "string" && row.spec && typeof row.spec === "object") {
         const spec = row.spec as ModeSpec
         if (typeof spec.provider === "string" && typeof spec.model === "string") {
+          const missingProviders = stringList(row.missingProviders)
           out.suggestedModes.push({
             name: row.name,
             description: typeof row.description === "string" ? row.description : "",
             spec,
+            locked: row.locked === true,
+            ...(missingProviders.length > 0 ? { missingProviders } : {}),
           })
         }
+      }
+    }
+  }
+  const rec = o.recommended
+  if (rec && typeof rec === "object") {
+    const r = rec as Record<string, unknown>
+    if (typeof r.name === "string" && r.name) {
+      out.recommended = {
+        name: r.name,
+        requires: stringList(r.requires),
+        missing: stringList(r.missing),
       }
     }
   }

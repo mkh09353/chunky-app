@@ -1124,6 +1124,70 @@ export function prettyModel(id: string | null | undefined): string {
     .join(" ")
 }
 
+/** Segments that read as a version number: "5", "4.6", "2025". */
+const NUMERIC_SEGMENT = /^\d+(\.\d+)*$/
+/** Vendor prefixes worth dropping when the id already names the model family
+ *  ("claude-sonnet-4-6" → "Sonnet 4.6"), but never when the rest is only a
+ *  version ("claude-3-5" keeps "Claude"). */
+const VENDOR_PREFIX = new Set(["claude", "anthropic"])
+/** Acronyms that brand-hyphenate their version: GPT-5.6, not "GPT 5.6". */
+const HYPHEN_BEFORE_VERSION = new Set(["gpt"])
+const MODEL_ACRONYMS = new Set(["glm", "gpt", "api", "llm"])
+
+/**
+ * A model id written the way a person says it: "claude-fable-5-1[1m]" →
+ * "Fable 5.1", "gpt-5.6-sol" → "GPT-5.6 Sol", "opus[1m]" → "Opus".
+ *
+ * Deliberately NOT `prettyModel`: that one is the picker's label and several
+ * surfaces (and their tests) depend on its exact output — "GPT 5.5", the
+ * vendor prefix intact. This is the prose spelling used where the name is read
+ * as a sentence (onboarding's seat rows), so the two are allowed to differ:
+ *  - a trailing `[…]` context-window tag is dropped,
+ *  - consecutive numeric segments join with a dot ("5", "1" → "5.1"),
+ *  - a leading vendor word is dropped when a family name follows it,
+ *  - GPT keeps its brand hyphen before the version.
+ */
+export function prettyModelName(id: string | null | undefined): string {
+  if (!id) return "…"
+  const parts = id
+    .replace(/\[.*?\]/g, "")
+    .split(/[-_]/)
+    .filter(Boolean)
+  if (parts.length > 1 && VENDOR_PREFIX.has(parts[0]!.toLowerCase()) && !NUMERIC_SEGMENT.test(parts[1]!)) {
+    parts.shift()
+  }
+  // Nothing but a context-window tag: there is no name to write.
+  if (parts.length === 0) return "…"
+
+  // Collapse runs of numeric segments into one dotted version token.
+  const tokens: { text: string; numeric: boolean }[] = []
+  for (const part of parts) {
+    const numeric = NUMERIC_SEGMENT.test(part)
+    const last = tokens[tokens.length - 1]
+    if (numeric && last?.numeric) {
+      last.text = `${last.text}.${part}`
+      continue
+    }
+    const lower = part.toLowerCase()
+    tokens.push({
+      text: numeric
+        ? part
+        : MODEL_ACRONYMS.has(lower)
+          ? part.toUpperCase()
+          : part[0]!.toUpperCase() + part.slice(1),
+      numeric,
+    })
+  }
+
+  return tokens.reduce((out, token, i) => {
+    if (i === 0) return token.text
+    const prev = tokens[i - 1]!
+    const brandHyphen =
+      token.numeric && !prev.numeric && HYPHEN_BEFORE_VERSION.has(prev.text.toLowerCase())
+    return `${out}${brandHyphen ? "-" : " "}${token.text}`
+  }, "")
+}
+
 /** Split a UI model key `provider/model-id` on the first slash only. */
 export function splitModelKey(id: string): { provider: string; model: string } | null {
   const slash = id.indexOf("/")

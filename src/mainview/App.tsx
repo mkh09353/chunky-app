@@ -14,9 +14,19 @@ import { quickKeyForHotkey, type QuickKey } from "./lib/quickKeys"
 import { SettingsCenter } from "./components/settings/SettingsCenter"
 import {
   devOnboardingRequested,
+  loadOnboarding,
   needsOnboarding,
   OnboardingWizard,
 } from "./components/settings/OnboardingWizard"
+import { FireNudge } from "./components/FireNudge"
+import {
+  fireNudgeCopy,
+  fireNudgeMode,
+  loadFireNudgeDismissed,
+  recommendedMode,
+  saveFireNudgeDismissed,
+} from "./lib/onboarding"
+import type { OnboardingResponse } from "./lib/configApi"
 import { ContextMeter } from "./components/ContextMeter"
 import { QueueChips } from "./components/QueueChips"
 import { ActiveWorkersStrip } from "./components/ActiveWorkersStrip"
@@ -478,6 +488,11 @@ export function App() {
   // Dev-only: `?onboarding=1` opens the flow immediately against fixture data
   // (see devOnboardingRequested); always false in production builds.
   const [onboardingOpen, setOnboardingOpen] = useState(devOnboardingRequested)
+  // The ONE boot read of onboarding state, kept so the post-setup fire nudge
+  // needs no second request. Null = never read (or the server was unreachable).
+  const [onboardingState, setOnboardingState] = useState<OnboardingResponse | null>(null)
+  const [fireNudgeDismissed, setFireNudgeDismissed] = useState<string | null>(loadFireNudgeDismissed)
+  const [fireNudgeBusy, setFireNudgeBusy] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
   const [filesRepoId, setFilesRepoId] = useState<string | null>(null)
   // The browser pane's mount is one-way (see `resolvePaneSlot`): its native
@@ -559,7 +574,10 @@ export function App() {
   const modeAppliedRef = useRef<(name: string, spec: ModeSpec, sessionId?: string) => void>(() => {})
   // Set just BEFORE this window POSTs an apply: the server broadcasts
   // mode.applied to every stream, and the local caller already shows a notice.
-  const selfAppliedMode = useRef<{ name: string; at: number } | null>(null)
+  //  `echoes` is how many broadcasts this one action will produce: applying a
+  //  mode globally AND to the attached session is two POSTs, so two echoes,
+  //  but still ONE notice from the caller.
+  const selfAppliedMode = useRef<{ name: string; at: number; echoes: number } | null>(null)
   const activeRepoIdRef = useRef<string | null>(null)
   const repoListGen = useRef(0)
   // Session lists are populated by both the selected-repo refresh and the
@@ -1583,8 +1601,9 @@ export function App() {
   useEffect(() => {
     if (!config || appMode !== "live" || connectionState !== "connected" || !bootSettled || onboardingChecked.current) return
     onboardingChecked.current = true
-    void needsOnboarding().then((needed) => {
-      if (needed) setOnboardingOpen(true)
+    void loadOnboarding().then((state) => {
+      setOnboardingState(state)
+      if (needsOnboarding(state)) setOnboardingOpen(true)
     })
   }, [config, appMode, connectionState, bootSettled])
 
@@ -1679,9 +1698,11 @@ export function App() {
   const slashCommands = useMemo<SlashCommand[]>(() => [...COMMANDS, ...slashModes], [slashModes])
 
   /** Remember that THIS window is about to apply `name`, so the echoed
-   *  mode.applied broadcast doesn't double up on the caller's own notice. */
-  const markSelfApplied = useCallback((name: string) => {
-    selfAppliedMode.current = { name: name.toLowerCase(), at: Date.now() }
+   *  mode.applied broadcast doesn't double up on the caller's own notice.
+   *  `echoes` = how many broadcasts the action will produce (global + session
+   *  apply is two); each one consumes exactly one. */
+  const markSelfApplied = useCallback((name: string, echoes = 1) => {
+    selfAppliedMode.current = { name: name.toLowerCase(), at: Date.now(), echoes }
   }, [])
 
   /** Session events refresh only that keyed config. Global events refresh only
@@ -1719,7 +1740,8 @@ export function App() {
       }
       const self = selfAppliedMode.current
       if (self && self.name === name.toLowerCase() && Date.now() - self.at < SELF_APPLY_WINDOW_MS) {
-        selfAppliedMode.current = null
+        self.echoes -= 1
+        if (self.echoes <= 0) selfAppliedMode.current = null
         return
       }
       const detail = spec?.model
@@ -2610,6 +2632,72 @@ export function App() {
     [refreshAgents, markSelfApplied],
   )
 
+  // ---- Fire nudge ---------------------------------------------------------
+  // Everything it needs is already on screen: the boot onboarding payload, the
+  // saved modes list and the derived global mode. No extra request, no polling.
+  const fireMode = useMemo(
+    () =>
+      fireNudgeMode({
+        live,
+        onboarding: onboardingState,
+        globalMode,
+        savedModes,
+        wizardOpen: onboardingOpen,
+        dismissed: fireNudgeDismissed,
+      }),
+    [live, onboardingState, globalMode, savedModes, onboardingOpen, fireNudgeDismissed],
+  )
+  const fireCopy = useMemo(
+    () => (fireMode ? fireNudgeCopy(fireMode, recommendedMode(onboardingState)?.spec) : ""),
+    [fireMode, onboardingState],
+  )
+  /**
+   * The nudge is about the GLOBAL default, so this is NOT the `/fire` slash
+   * path: `applyModeByName` posts with a sessionId, which pins the mode on that
+   * chat only and leaves `ModesResponse.current` untouched — so `globalMode`
+   * never became "fire" and the nudge never went away.
+   *
+   * `applyMode(name)` with no sessionId is the global apply (the same wrapper
+   * Settings → Modes' Apply button uses). The attached chat, if any, is then
+   * pinned too so the open thread is on fire as well; with no session attached
+   * the global apply is the whole job and nothing throws.
+   */
+  const applyFireNudge = useCallback(async () => {
+    if (!fireMode) return
+    setFireNudgeBusy(true)
+    const sid = sessionIdRef.current
+    try {
+      // Both POSTs echo back over SSE; one notice, so mark both up front.
+      markSelfApplied(fireMode, sid ? 2 : 1)
+      const applied = await applyMode(fireMode)
+      if (sid) await applyMode(fireMode, sid)
+      await Promise.all([refreshModes(), refreshAgents()])
+      const detail = applied?.model
+        ? `: ${prettyModel(applied.model)}${applied.effort ? ` (${applied.effort})` : ""} · ${applied.provider}`
+        : ""
+      setNotice(`Mode "${applied?.applied || fireMode}" applied${detail}.`)
+    } catch (err) {
+      setNotice(`Mode "${fireMode}": ${(err as Error).message}`)
+    } finally {
+      setFireNudgeBusy(false)
+    }
+  }, [fireMode, markSelfApplied, refreshModes, refreshAgents])
+  const dismissFireNudge = useCallback(() => {
+    if (!fireMode) return
+    saveFireNudgeDismissed(fireMode)
+    setFireNudgeDismissed(fireMode)
+  }, [fireMode])
+  /** Finishing setup earns a fresh nudge: the old dismissal is discarded. */
+  const handleOnboardingComplete = useCallback(() => {
+    saveFireNudgeDismissed(null)
+    setFireNudgeDismissed(null)
+    void refreshModels()
+    void refreshModes()
+    void refreshAgents()
+    // Re-read the (now updated) onboarding state — after setup, not at boot.
+    void loadOnboarding().then(setOnboardingState)
+  }, [refreshModels, refreshModes, refreshAgents])
+
   /** Steer a queued message into the running turn. The server's promote route
    *  claims the entry atomically, so the only client-side job is the fallback
    *  when it no longer has it (see lib/queueActions) — which is why the chip's
@@ -3395,6 +3483,14 @@ export function App() {
                 resolvedTheme={resolved}
               />
               <div className="flex flex-col gap-2">
+                {/* Off the recommended pairing? One quiet row back onto it. */}
+                <FireNudge
+                  mode={fireMode}
+                  copy={fireCopy}
+                  busy={fireNudgeBusy}
+                  onApply={() => void applyFireNudge()}
+                  onDismiss={dismissFireNudge}
+                />
                 <TodosPanel todos={liveTodos} />
                 <QueueChips
                   entries={liveQueue}
@@ -3554,6 +3650,10 @@ export function App() {
               void refreshModels()
               void refreshModes()
               void refreshAgents()
+              // Providers are connected in here, so fire may have just become
+              // unlocked. This is the existing "providers changed" moment — no
+              // polling, and nothing extra at boot.
+              void loadOnboarding().then(setOnboardingState)
             }
           }}
           initialSection={settingsSection}
@@ -3595,7 +3695,9 @@ export function App() {
         <OnboardingWizard
           open={onboardingOpen}
           onOpenChange={setOnboardingOpen}
-          onComplete={() => { void refreshModels() }}
+          // Onboarding can pin a mode (fire), so the mode chip has to re-derive
+          // too: refreshModels only re-reads models/selection.
+          onComplete={handleOnboardingComplete}
           onOpenProviderSettings={() => openSettingsAt("providers")}
         />
         {live && sessionId && (
